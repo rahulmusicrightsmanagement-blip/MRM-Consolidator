@@ -1,4 +1,6 @@
+import hashlib
 import json
+import logging
 import tempfile
 from collections import Counter, defaultdict
 from datetime import date
@@ -6,23 +8,27 @@ from pathlib import Path
 
 from django.conf import settings
 from django.core.cache import cache
+from django.db import transaction
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from .drive import DriveError
 from .engine import export
 from .engine.fill import fill_iprs_columns
 from .engine.verify import verify as verify_run
 from .engine.iprs import IPRSFormatError, parse_iprs
 from .engine.normalize import norm_ipi
+from .engine.pair import build_pair
 from .engine.master import MasterFormatError, parse_master
 from .engine.pipeline import run_pipeline
 from .engine.prs import SocietyFormatError, parse_prs
-from .models import SOCIETIES, SOCIETY_CODES, Client, ClientSociety, LinkDecision, MasterEdit, MasterFile, Registration, Run, SongFlag, SourceFile, Task, TaskEvent, Work
+from .models import NEWEST_FIRST, OLDEST_FIRST, SOCIETIES, SOCIETY_CODES, Client, ClientSociety, LinkDecision, MasterEdit, MasterFile, Registration, Run, SongFlag, SourceFile, Task, TaskEvent, Work
 from .sync import TASK_LABEL, is_latest, sync_run
+
+logger = logging.getLogger(__name__)
 
 PARSERS = {
     SourceFile.IPRS: (parse_iprs, IPRSFormatError),
@@ -31,6 +37,9 @@ PARSERS = {
 }
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 TASK_STATES = dict(Task.STATES)
+# Large JSON columns of a work, left out of queries that do not show them (the database may be far away).
+HEAVY = ("sources", "credits")
+TASK_WORK_HEAVY = ("work__sources", "work__credits")
 STAGES = ["Needs master", "Master loaded", "Societies in progress", "All societies complete"]
 # What the user sees: three steps per society. One-line conversion, gap filling, tune-code checks and
 # task creation run behind them as part of the process.
@@ -60,10 +69,8 @@ def _client_json(client):
 
 
 def _run_json(run):
-    files = {}
-    for kind, _ in SourceFile.KINDS:
-        f = run.active_file(kind)
-        files[kind] = {"name": f.original_name, "uploaded_at": f.uploaded_at.isoformat()} if f else None
+    files = {kind: {"name": f.original_name, "uploaded_at": f.uploaded_at.isoformat()} if f else None
+             for kind, f in run.active_files().items()}
     return {"id": run.id, "name": run.name, "client": _client_json(run.client), "client_name": run.client_name,
             "client_ipi": run.client_ipi, "summary": run.summary, "report_date": _iso(run.report_date),
             "society": run.society, "confirmed_step": run.confirmed_step, "completed_at": _iso(run.completed_at),
@@ -98,7 +105,7 @@ def _work_row(work):
 def _decisions(run):
     """Decisions for this report, inheriting the client's earlier decisions (newest wins)."""
     out = {}
-    runs = list(Run.objects.filter(client=run.client).order_by("report_date", "created_at")) if run.client else []
+    runs = list(Run.objects.filter(client=run.client).order_by(*OLDEST_FIRST)) if run.client else []
     if run not in runs:
         runs.append(run)
     for r in runs:
@@ -139,7 +146,7 @@ def snapshot(result):
 def _inputs(run):
     """The files one society check uses: its own society file, the client's master, and – for a foreign society –
     the client's latest IPRS report, so it is compared with the catalogue as IPRS has completed it."""
-    own = {kind: run.active_file(kind) for kind, _ in SourceFile.KINDS}
+    own = run.active_files()
     master = run.client.active_master() if run.client else None
     inputs = {"master": master or own["master"], "iprs": None, "prs": None}
     if run.society == "IPRS":
@@ -147,7 +154,7 @@ def _inputs(run):
     else:
         inputs[run.society.lower()] = own.get(run.society.lower())
         if run.client:
-            iprs_run = next((r for r in run.client.runs.filter(society="IPRS").order_by("-report_date", "-created_at")
+            iprs_run = next((r for r in run.client.runs.filter(society="IPRS").order_by(*NEWEST_FIRST).prefetch_related("files")
                              if r.active_file("iprs")), None)
             inputs["iprs"] = iprs_run.active_file("iprs") if iprs_run else None
     return inputs
@@ -159,7 +166,8 @@ def compute(run):
     decisions = _decisions(run)
     stamp = (run.created_at.isoformat(), tuple((k, f.id if f else 0, f.file.name if f else "") for k, f in paths.items()),
              json.dumps(decisions, sort_keys=True), run.report_date)
-    key = f"run-{run.id}-{hash(stamp)}"
+    # A stable key (Python's hash() differs per process), so every worker finds what another one computed.
+    key = f"run-{run.id}-{hashlib.sha1(repr(stamp).encode()).hexdigest()}"
     result = cache.get(key)
     if result is None:
         client = run.client
@@ -203,8 +211,8 @@ def _payload(run):
         result["master"] = {k: v for k, v in result["master"].items() if k != "layout"}
     work_ids = {}
     if run.client:
-        for wid, src in run.client.works.values_list("id", "sources"):
-            key = ((src or {}).get("tunecode") or {}).get("key")
+        # Only the one key, not each work's whole sources snapshot (hundreds of KB over the network).
+        for wid, key in run.client.works.values_list("id", "sources__tunecode__key"):
             if key:
                 work_ids[key] = wid
     return {"run": _run_json(run), "result": result, "latest": is_latest(run) if run.client else True, "work_ids": work_ids,
@@ -226,13 +234,32 @@ def _master_json(master):
     return {"id": master.id, "name": master.original_name, "uploaded_at": master.uploaded_at.isoformat(), "stats": master.stats}
 
 
+def _runs(client):
+    """The client's reports, newest first, with their files – loaded once per request (the database may be far away)."""
+    if not hasattr(client, "_runs"):
+        client._runs = list(client.runs.order_by(*NEWEST_FIRST).prefetch_related("files"))
+    return client._runs
+
+
+def _societies(client):
+    if not hasattr(client, "_societies"):
+        client._societies = list(client.societies.all())
+    return client._societies
+
+
+def _master(client):
+    if not hasattr(client, "_master"):
+        client._master = client.active_master()
+    return client._master
+
+
 def society_summaries(client, coverage, tasks):
     """Where the client stands with each society it is reconciled with."""
     out = []
-    for cs in client.societies.all():
-        runs = list(client.runs.filter(society=cs.society).order_by("-report_date", "-created_at"))
+    for cs in _societies(client):
+        runs = [r for r in _runs(client) if r.society == cs.society]
         latest = runs[0] if runs else None
-        has_file = bool(latest and latest.active_file(cs.society.lower()))
+        has_file = bool(latest and latest.active_files().get(cs.society.lower()))
         if latest and latest.completed_at:
             status = "completed"
         elif has_file:
@@ -251,11 +278,12 @@ def society_summaries(client, coverage, tasks):
 
 
 def latest_run(client):
-    return client.runs.exclude(summary={}).order_by("-report_date", "-created_at").first() or client.runs.order_by("-created_at").first()
+    runs = _runs(client)
+    return next((r for r in runs if r.summary), None) or max(runs, key=lambda r: r.created_at, default=None)
 
 
 def client_metrics(client):
-    works = list(client.works.prefetch_related("registrations", "tasks"))
+    works = list(client.works.defer(*HEAVY).prefetch_related("registrations", "tasks"))
     in_latest = [w for w in works if w.last_run_id]
     tasks = [t for w in works for t in w.tasks.all()]
     open_tasks = [t for t in tasks if t.state not in Task.CLOSED]
@@ -272,7 +300,8 @@ def client_metrics(client):
     run = latest_run(client)
     s = (run.summary if run else {}) or {}
     societies = society_summaries(client, coverage, tasks)
-    if not client.active_master():
+    master = _master(client)
+    if not master:
         stage = 0
     elif not any(x["status"] != "not_started" for x in societies):
         stage = 1
@@ -281,7 +310,7 @@ def client_metrics(client):
     else:
         stage = 2
     return {
-        "master": _master_json(client.active_master()),
+        "master": _master_json(master),
         "societies": societies,
         "works": len(in_latest),
         "with_iswc": sum(1 for w in in_latest if w.identifiers.get("ISWC")),
@@ -299,7 +328,6 @@ def client_metrics(client):
 
 # ---------------------------------------------------------------- clients
 
-@csrf_exempt
 @require_http_methods(["GET", "POST"])
 def clients(request):
     if request.method == "POST":
@@ -317,33 +345,46 @@ def clients(request):
     out = []
     for c in Client.objects.all():
         _refresh(c)
-        out.append({**_client_json(c), **client_metrics(c), "report_count": c.runs.count()})
+        out.append({**_client_json(c), **client_metrics(c), "report_count": len(_runs(c))})
     return JsonResponse({"clients": out, "stages": STAGES})
 
 
 def _refresh(client):
     """Process the latest report of every society (cached), so the catalogue reflects them."""
-    for cs in client.societies.all():
-        run = client.runs.filter(society=cs.society).order_by("-report_date", "-created_at").first()
-        if run and run.files.exists() and client.active_master():
-            compute(run)
+    for cs in _societies(client):
+        run = next((r for r in _runs(client) if r.society == cs.society), None)
+        if run and any(run.active_files().values()) and _master(client):
+            try:
+                compute(run)
+            except (FileNotFoundError, DriveError) as e:
+                # One report's spreadsheet missing (or Drive unreachable) must not break the client list / page.
+                logger.warning("Report %s of client %s skipped: %s", run.id, client.id, e)
+
+
+def _delete_files_after_commit(stored):
+    """Remove stored spreadsheets (Google Drive + local copy) once the database delete has really happened,
+    so a failed delete never leaves rows pointing at files that are gone."""
+    stored = [(f.storage, f.name) for f in stored if f.name]
+    transaction.on_commit(lambda: [storage.delete(name) for storage, name in stored])
 
 
 def _delete_run(run):
-    for f in run.files.all():
-        f.file.delete(save=False)
+    _delete_files_after_commit([f.file for f in run.files.all()])
     run.delete()
 
 
-@csrf_exempt
 @require_http_methods(["GET", "PATCH", "DELETE"])
 def client_detail(request, client_id):
     client = get_object_or_404(Client, pk=client_id)
     if request.method == "DELETE":
-        runs = list(client.runs.all())
-        for run in runs:
-            _delete_run(run)
-        client.delete()
+        # Everything of the client goes, all or nothing: its reports (and their decisions), master, societies,
+        # works with their registrations, tasks and history, master edits and song flags; then its files.
+        with transaction.atomic():
+            runs = list(client.runs.all())
+            for run in runs:
+                _delete_run(run)
+            _delete_files_after_commit([m.file for m in client.masters.all()])
+            client.delete()
         return JsonResponse({"deleted": client_id, "runs_deleted": len(runs)})
     if request.method == "PATCH":
         data = _body(request)
@@ -363,24 +404,24 @@ def client_detail(request, client_id):
                 for i in ids if i in task_titles]
     return JsonResponse({
         "client": _client_json(client), **client_metrics(client),
-        "reports": [_run_json(r) for r in client.runs.order_by("-report_date", "-created_at")],
-        "available_societies": [{**s, "added": client.societies.filter(society=s["code"]).exists()} for s in SOCIETIES],
+        "reports": [_run_json(r) for r in _runs(client)],
+        "available_societies": [{**s, "added": s["code"] in {cs.society for cs in _societies(client)}} for s in SOCIETIES],
         "changes": {"new_works": len(changes.get("new_works", [])), "status_changes": changes.get("status_changes", []),
                     "verified": task_list(changes.get("verified", [])), "reopened": task_list(changes.get("reopened", [])),
                     "new_tasks": len(changes.get("new_tasks", []))},
     })
 
 
-@csrf_exempt
 @require_http_methods(["POST", "DELETE"])
 def client_master(request, client_id):
     """Upload (or replace) our master for this client. Every society check is compared against it.
     DELETE removes the master (all versions); the societies wait for a new one."""
     client = get_object_or_404(Client, pk=client_id)
     if request.method == "DELETE":
-        for m in client.masters.all():
-            m.file.delete(save=False)
-            m.delete()
+        with transaction.atomic():
+            masters = list(client.masters.all())
+            _delete_files_after_commit([m.file for m in masters])
+            client.masters.all().delete()
         return client_detail(_as_get(request), client_id)
     uploaded = request.FILES.get("file")
     if not uploaded:
@@ -397,11 +438,17 @@ def client_master(request, client_id):
                     error = {"error": f"This is the {other.upper()} file, not our master. Upload it inside the {other.upper()} workspace."}
             return JsonResponse(error, status=422)
     uploaded.seek(0)
-    client.master_edits.all().delete()  # choices point at rows of the old master
-    client.song_flags.filter(key__startswith="M").delete()
     stats = {**parsed["stats"], "issues": len(parsed["issues"]),
              "issue_counts": dict(Counter(i["code"] for i in parsed["issues"]))}
-    MasterFile.objects.create(client=client, file=uploaded, original_name=uploaded.name, stats=stats)
+    master = MasterFile(client=client, original_name=uploaded.name, stats=stats)
+    try:
+        master.file.save(uploaded.name, uploaded, save=False)   # store the file (Google Drive) before the database row
+    except DriveError as e:
+        return JsonResponse({"error": f"The file could not be saved: {e}"}, status=502)
+    master.save()
+    # Only once the new master is safely stored: choices that point at rows of the old master go.
+    client.master_edits.all().delete()
+    client.song_flags.filter(key__startswith="M").delete()
     return client_detail(_as_get(request), client_id)
 
 
@@ -410,7 +457,6 @@ def _as_get(request):
     return request
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def client_societies(request, client_id):
     client = get_object_or_404(Client, pk=client_id)
@@ -423,7 +469,6 @@ def client_societies(request, client_id):
     return client_detail(_as_get(request), client_id)
 
 
-@csrf_exempt
 @require_http_methods(["DELETE", "POST"])
 def client_society(request, client_id, society):
     """DELETE removes a society that has no reports yet. POST starts a new report for it."""
@@ -453,7 +498,7 @@ def client_society(request, client_id, society):
 # ---------------------------------------------------------------- tasks
 
 def _tasks_qs(client):
-    return client.tasks.select_related("work", "opened_run", "closed_run").prefetch_related("work__registrations")
+    return client.tasks.select_related("work", "opened_run", "closed_run").defer(*TASK_WORK_HEAVY).prefetch_related("work__registrations")
 
 
 def client_tasks(request, client_id):
@@ -482,7 +527,6 @@ def _apply(task, data, latest):
     task.save()
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def tasks_bulk(request, client_id):
     client = get_object_or_404(Client, pk=client_id)
@@ -494,7 +538,6 @@ def tasks_bulk(request, client_id):
     return JsonResponse({"tasks": [_task_json(t) for t in _tasks_qs(client)]})
 
 
-@csrf_exempt
 @require_http_methods(["GET", "PATCH"])
 def task_detail(request, task_id):
     task = get_object_or_404(Task.objects.select_related("work", "client", "opened_run", "closed_run"), pk=task_id)
@@ -507,13 +550,13 @@ def task_detail(request, task_id):
 
 def client_works(request, client_id):
     client = get_object_or_404(Client, pk=client_id)
-    works = client.works.prefetch_related("registrations", "tasks")
+    works = client.works.defer("sources").prefetch_related("registrations", "tasks")
     return JsonResponse({"works": [_work_row(w) for w in works]})
 
 
 def work_detail(request, work_id):
     work = get_object_or_404(Work.objects.select_related("client", "first_run", "last_run"), pk=work_id)
-    tasks = work.tasks.select_related("work", "opened_run", "closed_run").prefetch_related("events", "work__registrations")
+    tasks = work.tasks.select_related("work", "opened_run", "closed_run").defer(*TASK_WORK_HEAVY).prefetch_related("events", "work__registrations")
     return JsonResponse({
         **_work_row(work), "client": _client_json(work.client), "alt_titles": work.alt_titles, "language": work.language,
         "category": work.category, "duration": work.duration, "master_row": work.master_row, "credits": work.credits,
@@ -523,13 +566,12 @@ def work_detail(request, work_id):
                                  "found_by": r.found_by, "issues": r.issues} for r in work.registrations.all()],
         "tasks": [_task_json(t, events=True) for t in tasks],
         "events": [{"kind": e.kind, "text": e.text, "at": e.at.isoformat()} for e in work.events.all()],
-        "latest_run": work.client.runs.order_by("-report_date", "-created_at").values_list("id", flat=True).first(),
+        "latest_run": work.client.runs.order_by(*NEWEST_FIRST).values_list("id", flat=True).first(),
     })
 
 
 # ---------------------------------------------------------------- reports (runs)
 
-@csrf_exempt
 @require_http_methods(["GET", "POST"])
 def runs(request):
     if request.method == "POST":
@@ -543,7 +585,6 @@ def runs(request):
     return JsonResponse({"runs": [_run_json(r) for r in Run.objects.select_related("client")]})
 
 
-@csrf_exempt
 @require_http_methods(["GET", "PATCH", "DELETE"])
 def run_detail(request, run_id):
     run = get_object_or_404(Run, pk=run_id)
@@ -574,7 +615,6 @@ def _try_parse(path, kind):
         return None, {"error": f"Could not read the file: {e}"}
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def upload(request, run_id, kind):
     """Upload one source file. kind = iprs / master / prs, or 'auto' to recognise it from its columns."""
@@ -612,7 +652,12 @@ def upload(request, run_id, kind):
         return JsonResponse({"error": f"This IPRS report is for {parsed['client']['name'].title()} (IPI {parsed['client']['ipi_name_no']}), "
                                       f"not {run.client.name} (IPI {run.client.ipi})."}, status=422)
     uploaded.seek(0)
-    SourceFile.objects.create(run=run, kind=kind, file=uploaded, original_name=uploaded.name)
+    source = SourceFile(run=run, kind=kind, original_name=uploaded.name)
+    try:
+        source.file.save(uploaded.name, uploaded, save=False)   # store the file (Google Drive) before the database row
+    except DriveError as e:
+        return JsonResponse({"error": f"The file could not be saved: {e}"}, status=502)
+    source.save()
     if run.client and not run.client.ipi and kind == SourceFile.IPRS:
         Client.objects.filter(pk=run.client_id).update(ipi=parsed["client"]["ipi_name_no"])
     if kind == SourceFile.IPRS:
@@ -628,7 +673,6 @@ def upload(request, run_id, kind):
     return JsonResponse({**_payload(run), "detected": kind})
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def decide(request, run_id):
     """Reviewer links an IPRS work to a master row, rejects a suggestion, or clears the decision."""
@@ -666,7 +710,6 @@ def decide(request, run_id):
     return JsonResponse(_payload(run))
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def master_edits(request, run_id):
     """Save which value to keep for fields where IPRS and our master differ (or our master is empty).
@@ -688,7 +731,6 @@ def master_edits(request, run_id):
     return JsonResponse(_payload(run))
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def song_flags(request, run_id):
     """Mark songs "Not our work" (or clear it). Body: {"keys": ["M12", "I2158…"], "on": true}."""
@@ -766,12 +808,28 @@ def verify(request, run_id):
                                    edits, result["iprs"]["client"], amend, reg))
 
 
+def pair(request, run_id):
+    """Every column of one IPRS work next to every column of a master row (?work=<internal no>&row=<master row>)."""
+    run = get_object_or_404(Run, pk=run_id)
+    result = compute(run)
+    inputs = _inputs(run)
+    work_no, row = request.GET.get("work", ""), request.GET.get("row", "")
+    work = next((w for w in (result.get("iprs") or {}).get("works", []) if w["internal_no"] == work_no), None)
+    master = result.get("master") or {}
+    song = next((s for s in master.get("songs", []) if str(s["row"]) == row), None)
+    if not work and not song:
+        raise Http404("Unknown work and master row")
+    return JsonResponse(build_pair(inputs["iprs"].file.path if inputs["iprs"] else None,
+                                   inputs["master"].file.path if inputs["master"] else None,
+                                   work, song, master.get("layout")))
+
+
 def client_export(request, client_id, name):
     client = get_object_or_404(Client, pk=client_id)
     if name == "tasks":
-        content = export.tasks_workbook(client, [_task_json(t, events=True) for t in _tasks_qs(client)])
+        content = export.tasks_workbook(client, [_task_json(t, events=True) for t in _tasks_qs(client).prefetch_related("events")])
     elif name == "catalogue":
-        content = export.catalogue_workbook(client, [_work_row(w) for w in client.works.prefetch_related("registrations", "tasks")])
+        content = export.catalogue_workbook(client, [_work_row(w) for w in client.works.defer("sources").prefetch_related("registrations", "tasks")])
     else:
         raise Http404("Unknown export")
     return _xlsx(content, f"{client.name.replace(' ', '_')}_{name}_{date.today()}")

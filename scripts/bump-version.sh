@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bump the MRM app version (semantic versioning) and log the change.
+# Bump the MRM-Consolidator app version (semantic versioning) and log the change.
 #   scripts/bump-version.sh patch "Fixed wrong share in compare table"   0.1.3 → 0.1.4  (fix / small change)
 #   scripts/bump-version.sh minor "Added updated-master download"        0.1.3 → 0.2.0  (new feature)
 #   scripts/bump-version.sh major "New data model, old reports reset"    0.1.3 → 1.0.0  (breaking change)
@@ -25,4 +25,4 @@ if [ -f CHANGELOG.md ]; then
 else
   printf '# MRM changelog\n\n%s' "$entry" > CHANGELOG.md
 fi
-echo "MRM $new"
+echo "MRM-Consolidator $new"

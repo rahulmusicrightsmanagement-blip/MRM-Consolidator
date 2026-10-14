@@ -1,5 +1,41 @@
 # MRM changelog
 
+## 0.8.2 – 2026-10-14 (patch)
+- Deleting a client removes all its data in Neon and its files in Google Drive, all or nothing.
+
+## 0.8.1 – 2026-10-14 (patch)
+- Google Drive uploads run in the background (faster uploads); deleting a client now also removes its master file.
+
+## 0.8.0 – 2026-10-14 (minor)
+- Uploaded spreadsheets can be stored in Google Drive (manage.py drive_setup); local folder becomes a cache.
+
+## 0.7.1 – 2026-10-14 (patch)
+- Production settings tidy-up for deployment (HSTS over HTTPS, unused email setup removed).
+
+## 0.7.0 – 2026-10-14 (minor)
+- Neon Postgres (Singapore) is now the only database, starting fresh; IPRS/PRS uploads and pages much faster (bulk writes, shared cache).
+
+## 0.6.1 – 2026-10-14 (patch)
+- Removed the 'password too similar to name' rule when adding users.
+
+## 0.6.0 – 2026-10-14 (minor)
+- Database moved from SQLite to Neon Postgres (MRM_DATABASE_URL in .env); all existing data copied over.
+
+## 0.5.0 – 2026-10-14 (minor)
+- Login page: everyone must sign in; only the super admin (rahuljadhav0417@gmail.com) can add users. Excel files kept out of git.
+
+## 0.4.1 – 2026-10-14 (patch)
+- Renamed the app to MRM-Consolidator
+
+## 0.4.0 – 2026-10-14 (minor)
+- App can now be deployed with Docker (docker compose up), with production-safe settings and data kept in a volume
+
+## 0.3.1 – 2026-10-08 (patch)
+- Map with master: the song comparison is now one simple Excel-style table – green same, red different, yellow missing in our master, plain words, Use IPRS / Keep ours on the same row, 'Show only differences'
+
+## 0.3.0 – 2026-10-08 (minor)
+- Map with master: open any song to see every column of both files – side by side with Same / Different / Only in IPRS / Only in master, each writer next to their master slot, the IPRS rows as in the file, and all 1,398 master columns
+
 ## 0.2.0 – 2026-10-07 (minor)
 - Reports step: Verification (re-reads the generated master, Amend and Registration files and checks every step – counts, no duplicates, right rows, IPRS values, statuses, and that every changed cell is explained) and a spreadsheet preview of the final master with before/after and where each value came from; faster LNV report export
 

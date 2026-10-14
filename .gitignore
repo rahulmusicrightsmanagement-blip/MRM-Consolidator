@@ -1,6 +1,53 @@
+# Python
 .venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / frontend build
 node_modules/
 frontend/dist/
+*.tsbuildinfo
+
+# Django runtime data
 backend/media/
-backend/db.sqlite3
-__pycache__/
+backend/staticfiles/
+backend/cache/
+
+# Secrets / local settings (.env.example stays tracked)
+.env
+.env.*
+!.env.example
+client_secret*.json
+
+# Excel files (client spreadsheets / samples stay on this computer only)
+*.xlsx
+*.xlsm
+*.xls
+*.xlsb
+
+# Logs
+*.log
+logs/
+
+# Office / editor lock and temp files
+.~lock.*#
+~$*
+*.tmp
+*.swp
+*.swo
+*~
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings
+.claude/settings.local.json

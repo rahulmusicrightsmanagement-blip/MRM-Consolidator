@@ -1,0 +1,15 @@
+.git
+.venv
+**/node_modules
+**/__pycache__
+frontend/dist
+backend/media
+backend/staticfiles
+*.xlsx
+*.csv
+*.pdf
+.~lock*
+.env
+docker-compose.yml
+backend/cache
+client_secret*.json

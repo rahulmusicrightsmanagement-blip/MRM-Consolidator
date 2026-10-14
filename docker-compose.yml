@@ -1,0 +1,26 @@
+# Start:  docker compose up -d --build      → http://localhost:8010
+# Stop:   docker compose down               (your data stays in the mrm-data volume)
+name: mrm-consolidator
+services:
+  mrm:
+    build:
+      context: .
+      # Use this computer's network while building (avoids DNS/timeout problems downloading packages).
+      network: host
+    image: mrm-consolidator:latest
+    container_name: mrm-consolidator
+    restart: unless-stopped
+    ports:
+      - "${MRM_PORT:-8010}:8010"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - mrm-data:/data
+      # Uploaded spreadsheets – shared with ./start.sh, since both use the same database (MRM_DATABASE_URL).
+      - ./backend/media:/data/media
+
+volumes:
+  mrm-data:
+    # Fixed name so data uploaded before the rename is kept.
+    name: mrm_mrm-data

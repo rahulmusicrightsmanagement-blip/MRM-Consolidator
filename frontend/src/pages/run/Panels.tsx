@@ -10,8 +10,9 @@ import {
 } from '../../components/ui'
 import { useRun } from '../../lib/run'
 import { songForWork } from '../../lib/model'
+import { PairPanel, editable } from './PairPanel'
 import type { Song } from '../../lib/model'
-import type { Check as CheckT, Contributor, EditChoice, FieldCompare, IprsWork, Link as MapLink, Status } from '../../types'
+import type { Check as CheckT, Contributor, EditChoice, IprsWork, Link as MapLink, Status } from '../../types'
 
 /* =================================================================== */
 /* Step 5 – tune code check (read-only; follow-up lives in Tasks)       */
@@ -126,9 +127,6 @@ export function ReviewTab() {
   )
 }
 
-/** Fields where the reviewer can pick which value our master keeps. */
-const EDITABLE = ['Title', 'Duration', 'ISWC', 'ISRC', 'Authors', 'Composers', 'Publishers']
-const editable = (f: FieldCompare) => EDITABLE.includes(f.field) && (f.result === 'different' || f.result === 'missing_master')
 
 function CompareTable({ link }: { link: MapLink }) {
   const { payload, editMaster, busy } = useRun()
@@ -286,7 +284,14 @@ export function MapTab() {
       </div>
       <Card flush>
         {filter === 'master_only' ? (
-          <DataTable rows={mapping.master_only} rowKey={(m) => String(m.row)} search={(m) => m.title} onRowClick={(m, vis) => openSong(`M${m.row}`, vis.map((v) => `M${v.row}`), 'Only in master')}
+          <DataTable rows={mapping.master_only} rowKey={(m) => String(m.row)} search={(m) => m.title}
+            expand={(m) => (
+              <div className="detail" onClick={(e) => e.stopPropagation()}>
+                <div className="decide-head"><h4>{m.title}</h4><Button size="sm" variant="ghost"
+                  onClick={() => openSong(`M${m.row}`, mapping.master_only.map((v) => `M${v.row}`), 'Only in master')}>Open song<ExternalLink size={13} /></Button></div>
+                <PairPanel work={null} row={m.row} />
+              </div>
+            )}
             columns={[
               { key: 'title', header: 'Song in our master', render: (m) => <strong>{m.title}</strong>, sort: (m) => m.title },
               { key: 'row', header: 'Row', render: (m) => m.row, sort: (m) => m.row },
@@ -322,7 +327,9 @@ export function MapTab() {
               return (
                 <div className="detail" onClick={(e) => e.stopPropagation()}>
                   {l.reason && <div className="alert info small">{l.reason}</div>}
-                  {l.comparison && <CompareTable link={l} />}
+                  <PairPanel work={l.internal_no} row={l.state === 'review' ? l.master_row ?? l.candidates[0]?.row ?? null : l.master_row}
+                    rowNote={l.state === 'review' ? 'Compared with the suggested master song – not linked yet' : undefined}
+                    link={l} />
                   <div className="decide">
                     <div className="decide-head"><h4>Change this link</h4>{song && <Button size="sm" variant="ghost" onClick={() => openSong(song.key, listKeys(), current.label)}>Open song<ExternalLink size={13} /></Button>}</div>
                     <Candidates link={l} />

@@ -1,10 +1,16 @@
 from django.contrib import admin
 from django.urls import path, re_path
 
-from catalogue import views
+from catalogue import accounts, views
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("api/auth/me/", accounts.me),
+    path("api/auth/login/", accounts.login_view),
+    path("api/auth/logout/", accounts.logout_view),
+    path("api/auth/password/", accounts.change_password),
+    path("api/users/", accounts.users),
+    path("api/users/<int:user_id>/", accounts.user_detail),
     path("api/clients/", views.clients),
     path("api/clients/<int:client_id>/", views.client_detail),
     path("api/clients/<int:client_id>/master/", views.client_master),
@@ -23,6 +29,7 @@ urlpatterns = [
     path("api/runs/<int:run_id>/master-edits/", views.master_edits),
     path("api/runs/<int:run_id>/song-flags/", views.song_flags),
     path("api/runs/<int:run_id>/verify/", views.verify),
+    path("api/runs/<int:run_id>/pair/", views.pair),
     path("api/runs/<int:run_id>/export/<str:name>/", views.download),
     re_path(r"^(?P<path>(?!api/|admin/).*)$", views.frontend),
 ]

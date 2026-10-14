@@ -400,3 +400,34 @@ export interface WorkDetail extends WorkRow {
   events: TaskEventT[]
   latest_run: number | null
 }
+
+/* Every column of one IPRS work next to every column of its master row (GET /api/runs/<id>/pair/). */
+export type PairStatus = 'same' | 'different' | 'only_iprs' | 'only_master' | 'one_side'
+export interface PairRow { label: string; iprs: string; iprs_col: string; master: string; master_col: string; letter: string; status: PairStatus; note: string }
+export interface PairPerson {
+  group: 'authors' | 'composers' | 'publishers' | 'others'
+  iprs: { row: number; name: string; role: string; ipi: string; society: string; name_type: string; set_no: string
+    per_own: number | null; per_collect: number | null; mec_own: number | null; mec_collect: number | null; sync_own: number | null; sync_collect: number | null } | null
+  master: { slot: string; col: string; name: string; role: string; ipi: string; joshua: string; perf: number | null; mech: number | null } | null
+  diffs: ('ipi' | 'role' | 'perf' | 'mech')[]
+}
+export interface PairResult {
+  internal_no: string | null
+  master_row: number | null
+  sections: { id: string; title: string; note?: string; rows: PairRow[] }[]
+  people: PairPerson[]
+  iprs_raw: { columns: { letter: string; header: string }[]; rows: { row: number; cells: string[] }[] } | null
+  master_raw: { row: number; columns: { letter: string; header: string; value: string }[] } | null
+  counts: Partial<Record<PairStatus, number>>
+  master_filled: number
+}
+
+export interface User {
+  id: number
+  email: string
+  name: string
+  is_active: boolean
+  is_super_admin: boolean
+  last_login: string | null
+  date_joined: string
+}

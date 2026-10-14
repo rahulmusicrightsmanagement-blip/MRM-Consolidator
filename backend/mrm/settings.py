@@ -10,22 +10,81 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
+import sys
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Uploaded files and the cache live here; Docker points it at a mounted volume (/data).
+DATA_DIR = Path(os.environ.get('MRM_DATA_DIR', BASE_DIR))
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-y(r$7eehere9c!baf01$a+#ud$l^@2z-#d*-=t!^)(_xh^y0na'
+def load_env_file(path):
+    """Read KEY=value lines from the project's .env (values may be quoted). Real environment variables win."""
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '\'"':
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+load_env_file(BASE_DIR.parent / '.env')
+
+
+def env_list(name, default=''):
+    return [item.strip() for item in os.environ.get(name, default).split(',') if item.strip()]
+
+
+# Local runs (./start.sh) use the development defaults below; production (Docker) sets
+# MRM_DEBUG=0 and the variables in .env.example.
+DEBUG = os.environ.get('MRM_DEBUG', '1') == '1'
+
+SECRET_KEY = os.environ.get('MRM_SECRET_KEY', '')
+if not SECRET_KEY:
+    if not DEBUG:
+        raise RuntimeError('MRM_SECRET_KEY must be set when MRM_DEBUG=0')
+    SECRET_KEY = 'django-insecure-y(r$7eehere9c!baf01$a+#ud$l^@2z-#d*-=t!^)(_xh^y0na'
+
+ALLOWED_HOSTS = env_list('MRM_ALLOWED_HOSTS', 'localhost,127.0.0.1')
+# Full origins (scheme + host) the app is reached at, e.g. https://mrm.example.com
+CSRF_TRUSTED_ORIGINS = env_list('MRM_CSRF_TRUSTED_ORIGINS')
+if DEBUG:
+    CSRF_TRUSTED_ORIGINS += ['http://localhost:5173', 'http://127.0.0.1:5173']
+
+# The only account that can add, disable or remove users.
+SUPER_ADMIN_EMAIL = os.environ.get('MRM_SUPER_ADMIN_EMAIL', 'rahuljadhav0417@gmail.com').strip().lower()
+
+# Sign-ins last 12 hours of inactivity; the cookie is not readable by page scripts.
+SESSION_COOKIE_AGE = 12 * 60 * 60
+# Signed cookies, not a database table: the database may be far away (Neon), and a session row would cost
+# a read and a write on every click. Disabled users and changed passwords are still rejected on each request.
+SESSION_ENGINE = 'django.contrib.sessions.backends.signed_cookies'
+SESSION_SAVE_EVERY_REQUEST = True
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
+
+if not DEBUG:
+    SESSION_COOKIE_SECURE = os.environ.get('MRM_HTTPS', '0') == '1'
+    CSRF_COOKIE_SECURE = SESSION_COOKIE_SECURE
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    if SESSION_COOKIE_SECURE:
+        # Browsers remember to use HTTPS only (raise MRM_HSTS_SECONDS once HTTPS is known to work everywhere).
+        SECURE_HSTS_SECONDS = int(os.environ.get('MRM_HSTS_SECONDS', '3600'))
+    # http -> https redirects are done by the reverse proxy (Caddy / nginx); a redirect here would also
+    # break the container's own health check, which calls plain http inside the container.
+    SILENCED_SYSTEM_CHECKS = ['security.W008']
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    X_FRAME_OPTIONS = 'DENY'
 
 
 # Application definition
@@ -44,10 +103,12 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'catalogue.accounts.LoginRequiredMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -75,21 +136,39 @@ WSGI_APPLICATION = 'mrm.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+def database_from_url(url):
+    """postgresql://user:pass@host:port/name?sslmode=require  ->  Django DATABASES entry."""
+    parts = urlsplit(url)
+    return {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': unquote(parts.path.lstrip('/')),
+        'USER': unquote(parts.username or ''),
+        'PASSWORD': unquote(parts.password or ''),
+        'HOST': parts.hostname or '',
+        'PORT': str(parts.port or ''),
+        # Keep connections open between requests; check they are alive before use.
+        'CONN_MAX_AGE': int(os.environ.get('MRM_DB_CONN_MAX_AGE', '600')),
+        'CONN_HEALTH_CHECKS': True,
+        # Poolers such as Neon's (PgBouncer, transaction mode) cannot keep server-side cursors.
+        'DISABLE_SERVER_SIDE_CURSORS': True,
+        'OPTIONS': dict(parse_qsl(parts.query)),
     }
-}
+
+
+# The only database is Neon Postgres: MRM_DATABASE_URL in .env (or the environment).
+if not os.environ.get('MRM_DATABASE_URL'):
+    raise RuntimeError('MRM_DATABASE_URL is not set. Put the Neon connection string in .env (see .env.example).')
+DATABASES = {'default': database_from_url(os.environ['MRM_DATABASE_URL'])}
+if 'test' in sys.argv[1:2]:
+    # Tests create and drop their own database; Neon only allows that on the direct host, not the pooler.
+    DATABASES['default']['HOST'] = DATABASES['default']['HOST'].replace('-pooler.', '.', 1)
 
 
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
 
+# No "too similar to the name/email" check: the super admin picks passwords like Name@123 for the team.
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
     },
@@ -118,22 +197,40 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedStaticFilesStorage'},
+}
+# Uploaded spreadsheets go to Google Drive once `manage.py drive_setup` has written the MRM_GDRIVE_* keys;
+# MEDIA_ROOT is then only a local cache. Tests always use the local folder.
+GDRIVE_KEYS = ('MRM_GDRIVE_CLIENT_ID', 'MRM_GDRIVE_CLIENT_SECRET', 'MRM_GDRIVE_REFRESH_TOKEN', 'MRM_GDRIVE_FOLDER_ID')
+if all(os.environ.get(k) for k in GDRIVE_KEYS) and 'test' not in sys.argv[1:2]:
+    STORAGES['default'] = {'BACKEND': 'catalogue.drive.DriveStorage'}
 
-
-# Email
-# https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
-
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {'console': {'class': 'logging.StreamHandler'}},
+    'root': {'handlers': ['console'], 'level': os.environ.get('MRM_LOG_LEVEL', 'INFO')},
 }
 
+
 # Uploaded IPRS / master / society files, kept per reporting run.
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_ROOT = DATA_DIR / 'media'
 DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 
+# One cache for all gunicorn workers (processed reports, login lock-outs), kept on local disk.
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+        'LOCATION': os.environ.get('MRM_CACHE_DIR', str(DATA_DIR / 'cache')),
+        'TIMEOUT': 60 * 60,
+        'OPTIONS': {'MAX_ENTRIES': 500},
+    }
+}
+
 # React dev server (Vite) during development; the built app is served by Django.
 CORS_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173']
-FRONTEND_DIST = BASE_DIR.parent / 'frontend' / 'dist'
+FRONTEND_DIST = Path(os.environ.get('MRM_FRONTEND_DIST', BASE_DIR.parent / 'frontend' / 'dist'))

@@ -1,6 +1,11 @@
 from django.db import models
 
 
+# Report order. Spelled out because SQLite and Postgres put reports without a date at opposite ends by default.
+NEWEST_FIRST = (models.F("report_date").desc(nulls_last=True), models.F("created_at").desc())
+OLDEST_FIRST = (models.F("report_date").asc(nulls_first=True), models.F("created_at").asc())
+
+
 class Client(models.Model):
     """A rightsholder MRM manages, identified by their IPI name number."""
     name = models.CharField(max_length=200)
@@ -80,6 +85,13 @@ class Run(models.Model):
 
     def active_file(self, kind):
         return self.files.filter(kind=kind).order_by("-uploaded_at").first()
+
+    def active_files(self):
+        """{kind: newest file or None} for every kind, in one query (none if the files were prefetched)."""
+        newest = {}
+        for f in sorted(self.files.all(), key=lambda f: f.uploaded_at, reverse=True):
+            newest.setdefault(f.kind, f)
+        return {kind: newest.get(kind) for kind, _ in SourceFile.KINDS}
 
 
 def upload_path(instance, filename):

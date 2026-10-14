@@ -1,10 +1,13 @@
 """Checks against the real Dhanya Suresh sample files in the project root."""
 import io
+import os
 import shutil
 import tempfile
 from pathlib import Path
 
 import openpyxl
+from unittest import skipUnless
+
 from django.test import TestCase, override_settings
 
 from .engine.iprs import IPRSFormatError, parse_iprs
@@ -16,6 +19,8 @@ SAMPLES = Path(__file__).resolve().parents[2]
 IPRS = SAMPLES / "DHANYA SURESH_WORKLISTING.xlsx"
 MASTER = SAMPLES / "Dhanya Suresh Menon LNV Report.xlsx"
 PRS = SAMPLES / "my_works_Dhanya_Suresh.csv"
+# The sample spreadsheets are kept out of git; tests that need them skip when they are missing.
+needs_samples = skipUnless(IPRS.exists() and MASTER.exists() and PRS.exists(), "sample files not in project root")
 
 
 class NormalizeTests(TestCase):
@@ -32,6 +37,7 @@ class NormalizeTests(TestCase):
         self.assertFalse(same_party("NELSON, ASHOK BETTY", "ANISH, T N"))
 
 
+@needs_samples
 class PipelineTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -93,13 +99,16 @@ class PipelineTests(TestCase):
                 parse_iprs(tmp.name)
 
 
+@needs_samples
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
 class ApiTests(TestCase):
     """The step-wise flow: add client → master → one society workspace at a time."""
 
     def setUp(self):
+        from django.contrib.auth import get_user_model
         from django.core.cache import cache
         cache.clear()  # database ids restart between tests; cached results must not
+        self.client.force_login(get_user_model().objects.create_user("team@example.com", "team@example.com", "x"))
 
     def tearDown(self):
         from django.conf import settings
@@ -163,6 +172,31 @@ class ApiTests(TestCase):
             self.assertEqual(self.client.get(f"/api/clients/{cid}/export/{name}/").status_code, 200)
         for name in ("step1", "step2", "step3", "step5", "all", "final"):
             self.assertEqual(self.client.get(f"/api/runs/{iprs_run}/export/{name}/").status_code, 200, name)
+
+    def test_pair_shows_every_column_of_both_files(self):
+        cid = self._client(("IPRS",))
+        run_id, res = self._society_report(cid, "IPRS", IPRS)
+        link = next(l for l in res["result"]["mapping"]["links"] if l["internal_no"] == "21313595")
+        pair = self.client.get(f"/api/runs/{run_id}/pair/", {"work": "21313595", "row": link["master_row"]}).json()
+        work, blocks, rest = pair["sections"]
+        rows = {r["label"]: r for r in work["rows"]}
+        self.assertEqual((rows["Title"]["iprs_col"], rows["Title"]["master_col"], rows["Title"]["status"]),
+                         ("D · TITLE", "B · Work*", "same"))
+        self.assertEqual(rows["Language"]["status"], "different")              # HINDI vs Malayalam
+        self.assertEqual(rows["ISWC"]["status"], "same")                       # found in the IPRS block, not column D
+        self.assertEqual({r["label"]: r["status"] for r in blocks["rows"]}["IPRS block 1 · Tune code"], "same")
+        self.assertIn("PRS TUNECODE 1", [r["label"] for r in rest["rows"]])
+        self.assertEqual([p["master"]["slot"] for p in pair["people"]], ["Author 1", "Composer 1", "Publisher 1"])
+        self.assertEqual(len(pair["iprs_raw"]["rows"]), 3)
+        self.assertEqual(len(pair["master_raw"]["columns"]), res["result"]["master"]["stats"]["columns"])
+        # Every filled master cell appears once in the side-by-side view.
+        shown = {r["master_col"].split(" · ")[0] for s in pair["sections"] for r in s["rows"] if r["master"]}
+        shown |= {p["master"]["col"] for p in pair["people"]}
+        self.assertLessEqual(len(shown), pair["master_filled"])
+        # A song only one file has.
+        only = next(l for l in res["result"]["mapping"]["links"] if not l["master_row"])
+        self.assertEqual(self.client.get(f"/api/runs/{run_id}/pair/", {"work": only["internal_no"]}).status_code, 200)
+        self.assertEqual(self.client.get(f"/api/runs/{run_id}/pair/", {"work": "nope"}).status_code, 404)
 
     def test_master_edits_go_into_the_updated_master(self):
         cid = self._client(("IPRS",))
@@ -331,6 +365,59 @@ class ApiTests(TestCase):
         self.assertEqual(self.client.get("/api/clients/").json()["clients"], [])
 
 
+@needs_samples
+@override_settings(MEDIA_ROOT=tempfile.mkdtemp())
+class ClientDeleteTests(TestCase):
+    """Deleting a client removes every row it owns in the database, and its uploaded files."""
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        cache.clear()
+        self.client.force_login(get_user_model().objects.create_user("d@example.com", "d@example.com", "x"))
+
+    def _post_file(self, url, path):
+        with open(path, "rb") as fh:
+            return self.client.post(url, {"file": fh})
+
+    def _full_client(self, name, ipi):
+        J = "application/json"
+        cid = self.client.post("/api/clients/", {"name": name, "ipi": ipi}, content_type=J).json()["id"]
+        self._post_file(f"/api/clients/{cid}/master/", MASTER)
+        self.client.post(f"/api/clients/{cid}/societies/", {"societies": ["IPRS", "PRS"]}, content_type=J)
+        rid = self.client.post(f"/api/clients/{cid}/societies/IPRS/", {}, content_type=J).json()["id"]
+        p = self._post_file(f"/api/runs/{rid}/files/iprs/", IPRS).json()
+        r2 = self.client.post(f"/api/clients/{cid}/societies/PRS/", {}, content_type=J).json()["id"]
+        self._post_file(f"/api/runs/{r2}/files/prs/", PRS)
+        link = next(l for l in p["result"]["mapping"]["links"] if l.get("master_row"))
+        self.client.post(f"/api/runs/{rid}/decisions/", {"internal_no": link["internal_no"], "action": "reject",
+                                                         "master_row": link["master_row"]}, content_type=J)
+        self.client.post(f"/api/runs/{rid}/song-flags/", {"keys": ["M3"], "on": True}, content_type=J)
+        task = self.client.get(f"/api/clients/{cid}/tasks/").json()["tasks"][0]
+        self.client.patch(f"/api/tasks/{task['id']}/", {"state": "done", "note": "x"}, content_type=J)
+        return cid
+
+    def _counts(self):
+        from django.apps import apps
+        return {m._meta.label: m.objects.count() for m in apps.get_app_config("catalogue").get_models()}
+
+    def test_delete_removes_everything(self):
+        from django.conf import settings
+        keep = self._full_client("Other client", "")
+        before_other = self._counts()
+        cid = self._full_client("Dhanya Suresh", "")
+        self.assertTrue(all(n > 0 for label, n in self._counts().items() if label not in ("catalogue.MasterEdit",)))
+        with self.captureOnCommitCallbacks(execute=True):
+            r = self.client.delete(f"/api/clients/{cid}/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self._counts(), before_other)          # only the other client's rows are left
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.delete(f"/api/clients/{keep}/")
+        self.assertEqual(set(self._counts().values()), {0})     # every catalogue table is now empty
+        leftover = [p for p in Path(settings.MEDIA_ROOT).rglob("*") if p.is_file()]
+        self.assertEqual(leftover, [])                          # and no uploaded file is left behind
+
+
 class TaskLifecycleTests(TestCase):
     """Auto-verification and reopening across reports, on synthetic report rows."""
 
@@ -355,3 +442,245 @@ class TaskLifecycleTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.state, "open")
         self.assertEqual([e.kind for e in task.events.all()], ["created", "auto_verified", "reopened"])
+
+
+@override_settings(SUPER_ADMIN_EMAIL="boss@example.com")
+class AuthTests(TestCase):
+    """Sign-in is required everywhere; only the super admin manages users."""
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        cache.clear()
+        User = get_user_model()
+        self.boss = User.objects.create_user("boss@example.com", "boss@example.com", "Boss-pass-2026")
+        self.member = User.objects.create_user("member@example.com", "member@example.com", "Member-pass-2026")
+
+    def _login(self, email, password):
+        return self.client.post("/api/auth/login/", {"email": email, "password": password}, content_type="application/json")
+
+    def test_api_needs_login(self):
+        self.assertEqual(self.client.get("/api/clients/").status_code, 401)
+        self.assertIsNone(self.client.get("/api/auth/me/").json()["user"])
+
+    def test_login_and_logout(self):
+        self.assertEqual(self._login("member@example.com", "wrong").status_code, 400)
+        r = self._login("MEMBER@example.com", "Member-pass-2026")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["user"]["is_super_admin"])
+        self.assertEqual(self.client.get("/api/clients/").status_code, 200)
+        self.client.post("/api/auth/logout/")
+        self.assertEqual(self.client.get("/api/clients/").status_code, 401)
+
+    def test_lockout_after_wrong_passwords(self):
+        for _ in range(8):
+            self._login("member@example.com", "wrong")
+        self.assertEqual(self._login("member@example.com", "Member-pass-2026").status_code, 429)
+
+    def test_only_super_admin_adds_users(self):
+        new = {"email": "new@example.com", "name": "New", "password": "New-pass-2026"}
+        self._login("member@example.com", "Member-pass-2026")
+        self.assertEqual(self.client.get("/api/users/").status_code, 403)
+        self.assertEqual(self.client.post("/api/users/", new, content_type="application/json").status_code, 403)
+
+        self._login("boss@example.com", "Boss-pass-2026")
+        self.assertTrue(self.client.get("/api/auth/me/").json()["user"]["is_super_admin"])
+        r = self.client.post("/api/users/", new, content_type="application/json")
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(self.client.post("/api/users/", new, content_type="application/json").status_code, 400)
+        weak = {**new, "email": "weak@example.com", "password": "123"}
+        self.assertEqual(self.client.post("/api/users/", weak, content_type="application/json").status_code, 400)
+        self.assertEqual(self.client.delete(f"/api/users/{self.boss.id}/").status_code, 400)
+
+        uid = r.json()["id"]
+        self.client.patch(f"/api/users/{uid}/", {"is_active": False}, content_type="application/json")
+        self.client.post("/api/auth/logout/")
+        self.assertEqual(self._login("new@example.com", "New-pass-2026").status_code, 400)
+
+    def test_disable_or_reset_signs_user_out(self):
+        from django.test import Client as HttpClient
+        member = HttpClient()
+        member.post("/api/auth/login/", {"email": "member@example.com", "password": "Member-pass-2026"}, content_type="application/json")
+        self.assertEqual(member.get("/api/clients/").status_code, 200)
+        self._login("boss@example.com", "Boss-pass-2026")
+        self.client.patch(f"/api/users/{self.member.id}/", {"password": "Reset-pass-2026"}, content_type="application/json")
+        self.assertEqual(member.get("/api/clients/").status_code, 401)
+        member.post("/api/auth/login/", {"email": "member@example.com", "password": "Reset-pass-2026"}, content_type="application/json")
+        self.assertEqual(member.get("/api/clients/").status_code, 200)
+        self.client.patch(f"/api/users/{self.member.id}/", {"is_active": False}, content_type="application/json")
+        self.assertEqual(member.get("/api/clients/").status_code, 401)
+
+    def test_change_own_password(self):
+        self._login("member@example.com", "Member-pass-2026")
+        bad = {"current": "nope", "new": "Another-pass-2026"}
+        self.assertEqual(self.client.post("/api/auth/password/", bad, content_type="application/json").status_code, 400)
+        ok = {"current": "Member-pass-2026", "new": "Another-pass-2026"}
+        self.assertEqual(self.client.post("/api/auth/password/", ok, content_type="application/json").status_code, 200)
+        self.assertEqual(self.client.get("/api/clients/").status_code, 200)
+
+    def test_csrf_enforced(self):
+        from django.test import Client as HttpClient
+        browser = HttpClient(enforce_csrf_checks=True)
+        browser.force_login(self.member)
+        self.assertEqual(browser.post("/api/clients/", {"name": "X"}, content_type="application/json").status_code, 403)
+        browser.get("/api/auth/me/")
+        token = browser.cookies["csrftoken"].value
+        r = browser.post("/api/clients/", {"name": "X"}, content_type="application/json", HTTP_X_CSRFTOKEN=token)
+        self.assertIn(r.status_code, (200, 201))
+
+    def test_superadmin_command(self):
+        import os
+        from io import StringIO
+        from django.core.management import call_command
+        from django.contrib.auth import get_user_model
+        get_user_model().objects.filter(id=self.boss.id).delete()
+        os.environ["MRM_SUPER_ADMIN_PASSWORD"] = "Fresh-boss-2026"
+        try:
+            call_command("superadmin", "--no-input", stdout=StringIO())
+        finally:
+            del os.environ["MRM_SUPER_ADMIN_PASSWORD"]
+        boss = get_user_model().objects.get(username="boss@example.com")
+        self.assertTrue(boss.is_superuser and boss.check_password("Fresh-boss-2026"))
+
+
+class FakeDrive:
+    """In-memory stand-in for the Google Drive REST API used by catalogue.drive."""
+
+    class Response:
+        def __init__(self, status=200, data=None, content=b""):
+            self.status_code, self._data, self.content, self.text = status, data or {}, content, ""
+
+        def json(self):
+            return self._data
+
+    def __init__(self, fail=False):
+        self.files, self.fail = {}, fail   # id -> (name, parent, bytes)
+
+    def post(self, url, data=None, json=None, headers=None, params=None, timeout=None):
+        if self.fail:
+            return self.Response(503, {"error": {"message": "backend error"}})
+        import json as _json
+        import re
+        boundary = re.search(r"boundary=(\w+)", headers["Content-Type"]).group(1).encode()
+        parts = data.split(b"--" + boundary)
+        meta = _json.loads(parts[1].split(b"\r\n\r\n", 1)[1].strip())
+        body = parts[2].split(b"\r\n\r\n", 1)[1][:-2]
+        file_id = f"id{len(self.files) + 1}"
+        self.files[file_id] = (meta["name"], meta["parents"][0], body)
+        return self.Response(200, {"id": file_id})
+
+    def get(self, url, params=None, timeout=None):
+        params = params or {}
+        if params.get("alt") == "media":
+            file_id = url.rsplit("/", 1)[1]
+            return self.Response(200, content=self.files[file_id][2]) if file_id in self.files else self.Response(404)
+        name = params["q"].split("name = '", 1)[1].split("' and '", 1)[0].replace("\\'", "'")
+        return self.Response(200, {"files": [{"id": i} for i, f in self.files.items() if f[0] == name][:1]})
+
+    def delete(self, url, timeout=None):
+        return self.Response(204 if self.files.pop(url.rsplit("/", 1)[1], None) else 404)
+
+
+class DriveStorageTests(TestCase):
+    """Uploaded files kept in Google Drive, with the local media folder only as a cache."""
+
+    def setUp(self):
+        from unittest import mock
+        from django.core.cache import cache
+        from .drive import DriveStorage
+        cache.clear()
+        self.media = tempfile.mkdtemp()
+        self.fake = FakeDrive()
+        for target, value in (("catalogue.drive.session", self.fake), ("catalogue.drive.time.sleep", None)):
+            patcher = mock.patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.media, True)
+        self.storage = DriveStorage(folder_id="folder1", cache_dir=self.media)
+        self.storage.background = False
+
+    def _wait_for_uploads(self):
+        import threading
+        for t in threading.enumerate():
+            if t.name.startswith("drive-upload"):
+                t.join(10)
+
+    def test_save_redownload_delete(self):
+        from django.core.cache import cache
+        from django.core.files.base import ContentFile
+        name = self.storage.save("runs/1/iprs/report's file.xlsx", ContentFile(b"spreadsheet bytes"))
+        self.assertRegex(name, r"^runs/1/iprs/report's file_[0-9a-f]{8}\.xlsx$")   # unique name, no Drive lookup
+        self.assertEqual([(f[0], f[1], f[2]) for f in self.fake.files.values()], [(name, "folder1", b"spreadsheet bytes")])
+        Path(self.storage.path(name)).unlink()           # the server's disk was wiped
+        cache.clear()                                    # …and the id cache with it
+        self.assertEqual(Path(self.storage.path(name)).read_bytes(), b"spreadsheet bytes")
+        self.assertTrue(self.storage.exists(name))
+        self.storage.delete(name)
+        self.assertEqual(self.fake.files, {})
+        self.assertFalse(self.storage.exists(name))
+
+    def test_background_upload(self):
+        from django.core.files.base import ContentFile
+        self.storage.background = True
+        name = self.storage.save("runs/2/prs/works.csv", ContentFile(b"csv"))
+        self.assertEqual(Path(self.storage.path(name)).read_bytes(), b"csv")   # usable before Drive has it
+        self._wait_for_uploads()
+        self.assertEqual([f[0] for f in self.fake.files.values()], [name])
+
+    def test_background_upload_failure_keeps_local_copy_and_sync_sends_it(self):
+        from io import StringIO
+        from unittest import mock
+        from django.core.files.base import ContentFile
+        from django.core.management import call_command
+        self.storage.background = True
+        self.fake.fail = True
+        name = self.storage.save("clients/1/master/lnv.xlsx", ContentFile(b"master"))
+        self._wait_for_uploads()
+        self.assertEqual(self.fake.files, {})
+        self.assertTrue((Path(self.media) / name).exists())
+        self.fake.fail = False
+        keys = dict.fromkeys(("MRM_GDRIVE_CLIENT_ID", "MRM_GDRIVE_CLIENT_SECRET", "MRM_GDRIVE_REFRESH_TOKEN"), "x")
+        with override_settings(MEDIA_ROOT=self.media), mock.patch.dict(os.environ, {**keys, "MRM_GDRIVE_FOLDER_ID": "folder1"}), \
+                mock.patch("catalogue.drive.list_names", side_effect=lambda http, folder: {f[0] for f in self.fake.files.values()}):
+            out = StringIO()
+            call_command("drive_setup", "--sync", stdout=out)
+            self.assertIn("uploaded 1 file(s)", out.getvalue())
+            call_command("drive_setup", "--sync", stdout=out)
+            self.assertIn("uploaded 0 file(s); 1 already there", out.getvalue())
+        self.assertEqual([f[0] for f in self.fake.files.values()], [name])
+
+    def test_delete_during_background_upload_leaves_nothing(self):
+        from django.core.files.base import ContentFile
+        self.storage.background = True
+        name = self.storage.save("runs/3/iprs/x.xlsx", ContentFile(b"x"))
+        self.storage.delete(name)
+        self._wait_for_uploads()
+        self.assertEqual(self.fake.files, {})
+
+    def test_failed_master_upload_keeps_client_data(self):
+        from unittest import mock
+        from django.contrib.auth import get_user_model
+        from .models import Client, MasterEdit, MasterFile
+        self.fake.fail = True
+        self.client.force_login(get_user_model().objects.create_user("t@example.com", "t@example.com", "x"))
+        client = Client.objects.create(name="C")
+        MasterEdit.objects.create(client=client, master_row=3, field="Title", internal_no="1", choice="iprs")
+        if not MASTER.exists():
+            self.skipTest("sample master not in project root")
+        with mock.patch.object(MasterFile._meta.get_field("file"), "storage", self.storage), open(MASTER, "rb") as fh:
+            r = self.client.post(f"/api/clients/{client.id}/master/", {"file": fh})
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("Google Drive could not", r.json()["error"])
+        self.assertEqual(MasterFile.objects.count(), 0)
+        self.assertEqual(MasterEdit.objects.filter(client=client).count(), 1)
+
+    def test_setup_writes_env(self):
+        from .management.commands.drive_setup import write_env
+        env = Path(self.media) / ".env"
+        env.write_text("MRM_DATABASE_URL='postgres://x'\nMRM_GDRIVE_FOLDER_ID='old'\n")
+        write_env({"MRM_GDRIVE_FOLDER_ID": "new", "MRM_GDRIVE_REFRESH_TOKEN": "tok"}, path=env)
+        text = env.read_text()
+        self.assertIn("MRM_DATABASE_URL='postgres://x'", text)
+        self.assertNotIn("'old'", text)
+        self.assertIn("MRM_GDRIVE_FOLDER_ID='new'", text)
+        self.assertEqual(oct(env.stat().st_mode & 0o777), "0o600")

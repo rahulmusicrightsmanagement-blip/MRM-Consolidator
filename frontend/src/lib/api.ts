@@ -1,5 +1,5 @@
 import type {
-  ClientDetail, ClientRef, ClientRow, EditChoice, FileKind, RunPayload, RunSummary, TaskState, TaskT, VerifyResult, WorkDetail, WorkRow,
+  ClientDetail, ClientRef, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow,
 } from '../types'
 
 export class ApiError extends Error {
@@ -10,14 +10,26 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+/** Fired when the server says the session has ended, so the app can show the login page. */
+export const SIGNED_OUT_EVENT = 'mrm:signed-out'
+
+function csrfToken() {
+  return document.cookie.split('; ').find((c) => c.startsWith('csrftoken='))?.slice('csrftoken='.length) ?? ''
+}
+
+async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const method = (init.method ?? 'GET').toUpperCase()
+  const headers = new Headers(init.headers)
+  if (method !== 'GET' && method !== 'HEAD') headers.set('X-CSRFToken', decodeURIComponent(csrfToken()))
   let res: Response
   try {
-    res = await fetch(url, init)
+    res = await fetch(url, { ...init, headers, credentials: 'same-origin' })
   } catch {
     throw new ApiError('Cannot reach the server. Start it with ./start.sh')
   }
   const data = await res.json().catch(() => ({}))
+  if (res.status === 401 && data.auth === 'required') window.dispatchEvent(new Event(SIGNED_OUT_EVENT))
+  if (res.status === 403 && !data.error) throw new ApiError('This page was open too long – reload it and try again.')
   if (!res.ok) throw new ApiError(data.error || `Request failed (${res.status})`, data.checks)
   return data as T
 }
@@ -31,6 +43,14 @@ const send = (body: unknown, method = 'POST'): RequestInit => ({
 export interface TaskPatch { state?: TaskState; owner?: string; due_date?: string | null; note?: string }
 
 export const api = {
+  me: () => request<{ user: User | null }>('/api/auth/me/').then((d) => d.user),
+  login: (email: string, password: string) => request<{ user: User }>('/api/auth/login/', send({ email, password })).then((d) => d.user),
+  logout: () => request('/api/auth/logout/', send({})),
+  changePassword: (current: string, next: string) => request<{ user: User }>('/api/auth/password/', send({ current, new: next })),
+  users: () => request<{ users: User[] }>('/api/users/').then((d) => d.users),
+  createUser: (body: { email: string; name: string; password: string }) => request<User>('/api/users/', send(body)),
+  updateUser: (id: number, patch: { name?: string; is_active?: boolean; password?: string }) => request<User>(`/api/users/${id}/`, send(patch, 'PATCH')),
+  deleteUser: (id: number) => request(`/api/users/${id}/`, { method: 'DELETE' }),
   clients: () => request<{ clients: ClientRow[]; stages: string[] }>('/api/clients/'),
   client: (id: number) => request<ClientDetail>(`/api/clients/${id}/`),
   updateClient: (id: number, patch: Partial<Pick<ClientRef, 'name' | 'owner' | 'due_date'>>) =>
@@ -73,5 +93,7 @@ export const api = {
     request<RunPayload>(`/api/runs/${id}/decisions/`, send({ items })),
   flagSongs: (id: number, keys: string[], on: boolean) => request<RunPayload>(`/api/runs/${id}/song-flags/`, send({ keys, on })),
   verify: (id: number) => request<VerifyResult>(`/api/runs/${id}/verify/`),
+  pair: (id: number, work?: string | null, row?: number | null) =>
+    request<PairResult>(`/api/runs/${id}/pair/?${new URLSearchParams({ work: work ?? '', row: row ? String(row) : '' })}`),
   exportUrl: (id: number, name: string) => `/api/runs/${id}/export/${name}/`,
 }

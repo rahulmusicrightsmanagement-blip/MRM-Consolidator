@@ -9,9 +9,10 @@ For every song in the report's final list:
 Only the client's newest report changes task states, so re-opening an old report never undoes progress.
 """
 from django.db import transaction
+from django.utils import timezone
 
 from .engine.normalize import norm_title, same_party
-from .models import Registration, Run, Task, TaskEvent, Work, WorkEvent
+from .models import NEWEST_FIRST, Registration, Run, Task, TaskEvent, Work, WorkEvent
 
 TASK_FOR_ISSUE = {
     "NOT_FOUND": Task.REGISTER,
@@ -109,8 +110,42 @@ def _find_work(existing, ids, title):
 def is_latest(run):
     """Only the newest report of a society may change that society's statuses and tasks."""
     newest = Run.objects.filter(client=run.client, society=run.society).exclude(summary={}) \
-        .order_by("-report_date", "-created_at").first()
+        .order_by(*NEWEST_FIRST).first()
     return newest is None or newest.id == run.id
+
+
+class _Writes:
+    """Everything one sync changes, written with a handful of bulk queries at the end instead of one query per
+    song (the database can be far away – e.g. Neon – where every query costs a network round trip)."""
+
+    def __init__(self):
+        self.now = timezone.now()
+        self.new_regs, self.changed_regs = [], []
+        self.new_tasks, self.changed_tasks = [], {}
+        self.task_events = []   # (task, kind, text), in the order they happened
+        self.work_events = []   # WorkEvent objects whose work is saved
+
+    def task_changed(self, task):
+        task.updated_at = self.now
+        self.changed_tasks[id(task)] = task
+
+    def flush(self, changes):
+        Registration.objects.bulk_create(self.new_regs, batch_size=BATCH)
+        for reg in self.changed_regs:
+            reg.updated_at = self.now
+        Registration.objects.bulk_update(self.changed_regs, ["status", "codes", "found_by", "issues", "last_run", "updated_at"],
+                                         batch_size=BATCH)
+        Task.objects.bulk_create(self.new_tasks, batch_size=BATCH)   # fills in ids for the events below
+        changes["new_tasks"] += [t.id for t in self.new_tasks]
+        Task.objects.bulk_update(list(self.changed_tasks.values()), ["detail", "state", "closed_run", "updated_at"],
+                                 batch_size=BATCH)
+        TaskEvent.objects.bulk_create([TaskEvent(task=t, kind=k, text=x) for t, k, x in self.task_events], batch_size=BATCH)
+        WorkEvent.objects.bulk_create(self.work_events, batch_size=BATCH)
+
+
+BATCH = 200
+WORK_FIELDS = ["title", "alt_titles", "identifiers", "language", "category", "duration", "origin", "master_row",
+               "credits", "sources", "last_run", "updated_at"]
 
 
 @transaction.atomic
@@ -129,7 +164,8 @@ def sync_run(run, result):
     existing = list(client.works.all())
     next_no = 1 + max([int(w.mrm_id.split("-")[1]) for w in existing] + [0])
     changes = {"new_works": [], "status_changes": [], "verified": [], "reopened": [], "new_tasks": []}
-    seen_work_ids = set()
+    seen = set()       # id() of the Work objects this report covers (new ones have no database id yet)
+    planned = []       # (work, row, created) in report order
 
     for row in result["tunecodes"]["rows"]:
         final = finals[row["key"]]
@@ -137,7 +173,7 @@ def sync_run(run, result):
         master_song = songs_by_row.get(final["master_row"])
         prs_works = [prs_by_code[c] for c in row["societies"].get("PRS", {}).get("codes", []) if c in prs_by_code]
         ids = _ids(iprs_works, master_song, prs_works, row)
-        work = _find_work([w for w in existing if w.id not in seen_work_ids], ids, row["title"])
+        work = _find_work([w for w in existing if id(w) not in seen], ids, row["title"])
         created = work is None
         if created:
             work = Work(client=client, mrm_id=f"W-{next_no:04d}", first_run=run)
@@ -167,38 +203,59 @@ def sync_run(run, result):
         }
         if latest:
             work.last_run = run
-        work.save()
-        seen_work_ids.add(work.id)
+        seen.add(id(work))
         if created:
             existing.append(work)
-            WorkEvent.objects.create(work=work, run=run, kind="created",
-                                     text="Added from the IPRS report (not in our master)" if row["origin"] == "iprs" else "First seen in this report")
             changes["new_works"].append(work.mrm_id)
+        planned.append((work, row, created))
 
+    writes = _Writes()
+    new_works = [w for w, _, created in planned if created]
+    old_works = [w for w, _, created in planned if not created]
+    Work.objects.bulk_create(new_works, batch_size=BATCH)   # fills in their ids
+    for work in old_works:
+        work.updated_at = writes.now
+    Work.objects.bulk_update(old_works, WORK_FIELDS, batch_size=BATCH)
+
+    regs, tasks = {}, {}
+    if latest:
+        for reg in Registration.objects.filter(work__client=client):
+            regs[(reg.work_id, reg.society)] = reg
+        for task in Task.objects.filter(work__client=client).select_related("closed_run").order_by("id"):
+            tasks.setdefault(task.work_id, {})[(task.society, task.type)] = task
+
+    for work, row, created in planned:
+        if created:
+            writes.work_events.append(WorkEvent(work=work, run=run, kind="created",
+                                                text="Added from the IPRS report (not in our master)" if row["origin"] == "iprs" else "First seen in this report"))
+        if not latest:
+            continue
         # Registrations per society.
-        if latest:
-            for society, res in row["societies"].items():
-                status = _status(res)
-                reg, reg_created = Registration.objects.get_or_create(work=work, society=society, defaults={"status": status})
-                if not reg_created and reg.status != status:
-                    WorkEvent.objects.create(work=work, run=run, kind="status",
-                                             text=f"{society}: {reg.get_status_label()} → {Registration.label(status)}")
+        for society, res in row["societies"].items():
+            status = _status(res)
+            reg = regs.get((work.id, society))
+            if reg is None:
+                reg = Registration(work=work, society=society)
+                writes.new_regs.append(reg)
+            else:
+                if reg.status != status:
+                    writes.work_events.append(WorkEvent(work=work, run=run, kind="status",
+                                                        text=f"{society}: {reg.get_status_label()} → {Registration.label(status)}"))
                     changes["status_changes"].append({"work": work.mrm_id, "title": work.title, "society": society,
                                                       "from": reg.status, "to": status})
-                reg.status, reg.codes, reg.found_by, reg.issues, reg.last_run = status, res["codes"], res["method"], res["issues"], run
-                reg.save()
-            _reconcile_tasks(client, work, row, run, changes)
+                writes.changed_regs.append(reg)
+            reg.status, reg.codes, reg.found_by, reg.issues, reg.last_run = status, res["codes"], res["method"], res["issues"], run
+        _plan_tasks(client, work, tasks.get(work.id, {}), row, run, changes, writes)
 
     if latest:
         # Works the newest report no longer mentions keep their history but lose their open tasks' urgency.
-        for work in client.works.exclude(id__in=seen_work_ids):
-            for task in work.tasks.exclude(state__in=Task.CLOSED):
-                _event(task, "updated", "Song is not in the latest report any more")
+        covered = {w.id for w, _, _ in planned}
+        for work in sorted((w for w in existing if w.id not in covered), key=lambda w: w.title):
+            for task in tasks.get(work.id, {}).values():
+                if task.state not in Task.CLOSED:
+                    writes.task_events.append((task, "updated", "Song is not in the latest report any more"))
+    writes.flush(changes)
     return changes
-
-
-def _event(task, kind, text):
-    TaskEvent.objects.create(task=task, kind=kind, text=text)
 
 
 def _desired_tasks(row, society):
@@ -220,33 +277,40 @@ def _newer(run, other):
 
 
 def _reconcile_tasks(client, work, row, run, changes):
+    """Bring one work's tasks in line with one report row (writes straight away)."""
+    writes = _Writes()
+    current = {(t.society, t.type): t for t in work.tasks.select_related("closed_run")}
+    _plan_tasks(client, work, current, row, run, changes, writes)
+    writes.flush(changes)
+
+
+def _plan_tasks(client, work, current, row, run, changes, writes):
+    """Open, update, reopen or auto-verify the work's tasks; the writes are queued on `writes`."""
     wanted = _desired_tasks(row, getattr(run, "society", "IPRS"))
-    current = {(t.society, t.type): t for t in work.tasks.all()}
     when = run.report_date.isoformat() if run.report_date else "this report"
     for key, reasons in wanted.items():
         task = current.get(key)
         if task is None:
-            task = Task.objects.create(client=client, work=work, society=key[0], type=key[1], detail=reasons,
-                                       opened_run=run, owner=client.owner)
-            _event(task, "created", f"Found in report {when}")
-            changes["new_tasks"].append(task.id)
+            task = Task(client=client, work=work, society=key[0], type=key[1], detail=reasons, opened_run=run, owner=client.owner)
+            writes.new_tasks.append(task)
+            writes.task_events.append((task, "created", f"Found in report {when}"))
             continue
         if task.detail != reasons:
             task.detail = reasons
-            task.save(update_fields=["detail", "updated_at"])
+            writes.task_changed(task)
         # Reopen only when a newer report still shows the problem; never undo a dismissal.
         if task.state in (Task.VERIFIED, Task.DONE) and task.closed_run_id and task.closed_run_id != run.id \
                 and _newer(run, task.closed_run):
             previous = task.get_state_display()
             task.state, task.closed_run = Task.OPEN, None
-            task.save(update_fields=["state", "closed_run", "updated_at"])
-            _event(task, "reopened", f"Was '{previous}', but report {when} still shows the problem")
+            writes.task_changed(task)
+            writes.task_events.append((task, "reopened", f"Was '{previous}', but report {when} still shows the problem"))
             changes["reopened"].append(task.id)
     checked = set(row["societies"]) | {getattr(run, "society", "IPRS")}
     for key, task in current.items():
         # Only a society this report actually checked can prove a fix (a report without the PRS file proves nothing for PRS).
         if key not in wanted and key[0] in checked and task.state not in Task.CLOSED:
             task.state, task.closed_run = Task.VERIFIED, run
-            task.save(update_fields=["state", "closed_run", "updated_at"])
-            _event(task, "auto_verified", f"Report {when} no longer shows the problem – verified fixed")
+            writes.task_changed(task)
+            writes.task_events.append((task, "auto_verified", f"Report {when} no longer shows the problem – verified fixed"))
             changes["verified"].append(task.id)

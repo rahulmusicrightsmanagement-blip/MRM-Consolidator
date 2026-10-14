@@ -4,6 +4,10 @@ import { createBrowserRouter, Navigate, RouterProvider, useNavigate, useParams }
 import './index.css'
 import { api } from './lib/api'
 import { ToastProvider } from './lib/toast'
+import { AuthProvider, RequireAuth, RequireSuperAdmin } from './lib/auth'
+import Login from './pages/Login'
+import Users from './pages/Users'
+import Account from './pages/Account'
 import Tracker from './pages/Tracker'
 import { ErrorPage } from './components/ErrorPage'
 import ClientLayout from './pages/client/ClientLayout'
@@ -25,29 +29,36 @@ function RunRedirect() {
   return null
 }
 
-// Client tracker → add client (details · master · societies) → client home → one workspace per society.
+// Login → client tracker → add client (details · master · societies) → client home → one workspace per society.
 const router = createBrowserRouter([{ errorElement: <ErrorPage />, children: [
-  { path: '/', element: <Tracker /> },
-  { path: '/clients/new', element: <NewClient /> },
-  {
-    path: '/clients/:clientId',
-    element: <ClientLayout />,
-    children: [
-      { index: true, element: <ClientHome /> },
-      { path: 'societies/:society', element: <SocietyWorkspace /> },
-      { path: 'tasks', element: <Tasks /> },
-      { path: 'catalogue', element: <Catalogue /> },
-      { path: 'works/:workId', element: <WorkPage /> },
-    ],
-  },
-  { path: '/runs/:runId', element: <RunRedirect /> },
-  { path: '*', element: <Navigate to="/" replace /> },
+  { path: '/login', element: <Login /> },
+  { element: <RequireAuth />, children: [
+    { path: '/', element: <Tracker /> },
+    { path: '/clients/new', element: <NewClient /> },
+    {
+      path: '/clients/:clientId',
+      element: <ClientLayout />,
+      children: [
+        { index: true, element: <ClientHome /> },
+        { path: 'societies/:society', element: <SocietyWorkspace /> },
+        { path: 'tasks', element: <Tasks /> },
+        { path: 'catalogue', element: <Catalogue /> },
+        { path: 'works/:workId', element: <WorkPage /> },
+      ],
+    },
+    { path: '/account', element: <Account /> },
+    { element: <RequireSuperAdmin />, children: [{ path: '/users', element: <Users /> }] },
+    { path: '/runs/:runId', element: <RunRedirect /> },
+    { path: '*', element: <Navigate to="/" replace /> },
+  ] },
 ] }])
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ToastProvider>
-      <RouterProvider router={router} />
+      <AuthProvider>
+        <RouterProvider router={router} />
+      </AuthProvider>
     </ToastProvider>
   </StrictMode>,
 )
