@@ -155,9 +155,9 @@ def database_from_url(url):
     }
 
 
-# The only database is Neon Postgres: MRM_DATABASE_URL in .env (or the environment).
+# The only database is PostgreSQL (the team's server, or Neon): MRM_DATABASE_URL in .env (or the environment).
 if not os.environ.get('MRM_DATABASE_URL'):
-    raise RuntimeError('MRM_DATABASE_URL is not set. Put the Neon connection string in .env (see .env.example).')
+    raise RuntimeError('MRM_DATABASE_URL is not set. Put the Postgres connection string in .env (see .env.example).')
 DATABASES = {'default': database_from_url(os.environ['MRM_DATABASE_URL'])}
 if 'test' in sys.argv[1:2]:
     # Tests create and drop their own database; Neon only allows that on the direct host, not the pooler.

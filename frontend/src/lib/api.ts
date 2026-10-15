@@ -1,5 +1,5 @@
 import type {
-  ClientDetail, ClientRef, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow,
+  ClientDetail, ClientRef, Role, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow,
 } from '../types'
 
 export class ApiError extends Error {
@@ -48,8 +48,8 @@ export const api = {
   logout: () => request('/api/auth/logout/', send({})),
   changePassword: (current: string, next: string) => request<{ user: User }>('/api/auth/password/', send({ current, new: next })),
   users: () => request<{ users: User[] }>('/api/users/').then((d) => d.users),
-  createUser: (body: { email: string; name: string; password: string }) => request<User>('/api/users/', send(body)),
-  updateUser: (id: number, patch: { name?: string; is_active?: boolean; password?: string }) => request<User>(`/api/users/${id}/`, send(patch, 'PATCH')),
+  createUser: (body: { email: string; name: string; password: string; role?: Role }) => request<User>('/api/users/', send(body)),
+  updateUser: (id: number, patch: { name?: string; is_active?: boolean; password?: string; role?: Role }) => request<User>(`/api/users/${id}/`, send(patch, 'PATCH')),
   deleteUser: (id: number) => request(`/api/users/${id}/`, { method: 'DELETE' }),
   clients: () => request<{ clients: ClientRow[]; stages: string[] }>('/api/clients/'),
   client: (id: number) => request<ClientDetail>(`/api/clients/${id}/`),

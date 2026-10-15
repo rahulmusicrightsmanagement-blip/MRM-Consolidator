@@ -497,6 +497,32 @@ class AuthTests(TestCase):
         self.client.post("/api/auth/logout/")
         self.assertEqual(self._login("new@example.com", "New-pass-2026").status_code, 400)
 
+    def test_admin_manages_members_only(self):
+        from django.contrib.auth import get_user_model
+        admin = get_user_model().objects.create_user("admin@example.com", "admin@example.com", "Admin-pass-2026", is_staff=True)
+        other = get_user_model().objects.create_user("other@example.com", "other@example.com", "Other-pass-2026", is_staff=True)
+        self._login("admin@example.com", "Admin-pass-2026")
+        me = self.client.get("/api/auth/me/").json()["user"]
+        self.assertEqual((me["role"], me["is_admin"], me["is_super_admin"]), ("admin", True, False))
+        self.assertEqual(self.client.get("/api/users/").status_code, 200)
+        new = {"email": "new@example.com", "password": "New-pass-2026"}
+        self.assertEqual(self.client.post("/api/users/", new, content_type="application/json").json()["role"], "member")
+        as_admin = {**new, "email": "x@example.com", "role": "admin"}
+        self.assertEqual(self.client.post("/api/users/", as_admin, content_type="application/json").status_code, 403)
+        patch = lambda u, body: self.client.patch(f"/api/users/{u.id}/", body, content_type="application/json").status_code
+        self.assertEqual(patch(self.member, {"is_active": False}), 200)
+        self.assertEqual(patch(self.member, {"role": "admin"}), 403)
+        self.assertEqual(patch(other, {"is_active": False}), 403)
+        self.assertEqual(patch(admin, {"name": "Me"}), 403)
+        self.assertEqual(patch(self.boss, {"is_active": False}), 400)
+
+        self._login("boss@example.com", "Boss-pass-2026")
+        self.assertEqual(patch(self.member, {"role": "admin"}), 200)
+        roles = {u["email"]: u["role"] for u in self.client.get("/api/users/").json()["users"]}
+        self.assertEqual(roles["member@example.com"], "admin")
+        self.assertEqual(patch(other, {"role": "member"}), 200)
+        self.assertFalse(get_user_model().objects.get(id=other.id).is_staff)
+
     def test_disable_or_reset_signs_user_out(self):
         from django.test import Client as HttpClient
         member = HttpClient()

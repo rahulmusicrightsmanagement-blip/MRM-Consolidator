@@ -1,5 +1,11 @@
 # MRM changelog
 
+## 0.9.0 – 2026-10-15 (minor)
+- User roles: Rahul stays super admin; new Admin role (Durga) can add and manage members
+
+## 0.8.3 – 2026-10-15 (patch)
+- Super admin is now durgasingh.jr@gmail.com
+
 ## 0.8.2 – 2026-10-14 (patch)
 - Deleting a client removes all its data in Neon and its files in Google Drive, all or nothing.
 

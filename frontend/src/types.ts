@@ -422,12 +422,17 @@ export interface PairResult {
   master_filled: number
 }
 
+export type Role = 'super_admin' | 'admin' | 'member'
+
 export interface User {
   id: number
   email: string
   name: string
   is_active: boolean
+  role: Role
   is_super_admin: boolean
+  /** Admin or super admin: may open the Users page. */
+  is_admin: boolean
   last_login: string | null
   date_joined: string
 }

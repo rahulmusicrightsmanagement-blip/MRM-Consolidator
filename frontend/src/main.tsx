@@ -4,7 +4,7 @@ import { createBrowserRouter, Navigate, RouterProvider, useNavigate, useParams }
 import './index.css'
 import { api } from './lib/api'
 import { ToastProvider } from './lib/toast'
-import { AuthProvider, RequireAuth, RequireSuperAdmin } from './lib/auth'
+import { AuthProvider, RequireAuth, RequireAdmin } from './lib/auth'
 import Login from './pages/Login'
 import Users from './pages/Users'
 import Account from './pages/Account'
@@ -47,7 +47,7 @@ const router = createBrowserRouter([{ errorElement: <ErrorPage />, children: [
       ],
     },
     { path: '/account', element: <Account /> },
-    { element: <RequireSuperAdmin />, children: [{ path: '/users', element: <Users /> }] },
+    { element: <RequireAdmin />, children: [{ path: '/users', element: <Users /> }] },
     { path: '/runs/:runId', element: <RunRedirect /> },
     { path: '*', element: <Navigate to="/" replace /> },
   ] },

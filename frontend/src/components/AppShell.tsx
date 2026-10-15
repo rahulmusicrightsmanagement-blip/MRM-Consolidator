@@ -96,8 +96,8 @@ function UserMenu() {
       {open && (
         <div className="user-pop" role="menu">
           <div className="user-pop-head"><b>{label}</b>{user.name && <span className="muted small">{user.email}</span>}
-            {user.is_super_admin && <span className="muted small">Super admin</span>}</div>
-          {user.is_super_admin && <button type="button" role="menuitem" onClick={() => go('/users')}><Users size={15} />Users</button>}
+            {user.is_admin && <span className="muted small">{user.is_super_admin ? 'Super admin' : 'Admin'}</span>}</div>
+          {user.is_admin && <button type="button" role="menuitem" onClick={() => go('/users')}><Users size={15} />Users</button>}
           <button type="button" role="menuitem" onClick={() => go('/account')}><KeyRound size={15} />Change password</button>
           <button type="button" role="menuitem" onClick={async () => { setOpen(false); await signOut(); navigate('/login') }}><LogOut size={15} />Sign out</button>
         </div>

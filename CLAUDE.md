@@ -1,9 +1,9 @@
 # MRM-Consolidator – catalogue reconciliation app
 
 Django API in `backend/` (port 8010), React + Vite in `frontend/`. Run with `./start.sh` (dev) or `docker compose up -d --build` (production; settings via `MRM_*` env vars, see `.env.example`).
-Database: Neon Postgres only (`MRM_DATABASE_URL` in `.env`, Singapore region); there is no SQLite. Each query is a
-network round trip, so write in bulk and avoid per-row queries.
-Backend tests: `cd backend && ../.venv/bin/python manage.py test catalogue` (uses a temporary `test_neondb` on Neon). Frontend check: `cd frontend && npm run build`.
+Database: PostgreSQL only (`MRM_DATABASE_URL` in `.env`: the team's server; Neon also works); there is no SQLite.
+Each query is a network round trip, so write in bulk and avoid per-row queries.
+Backend tests: `cd backend && ../.venv/bin/python manage.py test catalogue` (uses a temporary `test_<dbname>` database on the same server). Frontend check: `cd frontend && npm run build`.
 
 ## Versioning – do this after every change
 

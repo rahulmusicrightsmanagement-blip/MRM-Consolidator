@@ -55,9 +55,9 @@ export function RequireAuth() {
   return <Outlet />
 }
 
-/** Route wrapper for pages only the super admin may open. */
-export function RequireSuperAdmin() {
+/** Route wrapper for pages only admins (and the super admin) may open. */
+export function RequireAdmin() {
   const { user } = useAuth()
-  if (!user?.is_super_admin) return <Navigate to="/" replace />
+  if (!user?.is_admin) return <Navigate to="/" replace />
   return <Outlet />
 }

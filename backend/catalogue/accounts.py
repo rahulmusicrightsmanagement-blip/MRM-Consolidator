@@ -1,7 +1,9 @@
 """Login, logout and user management.
 
-Everyone signs in with email + password. Only the super admin (settings.SUPER_ADMIN_EMAIL) can add,
-disable, reset or remove users; every other API call just needs a signed-in user.
+Everyone signs in with email + password. Three roles:
+  super admin – settings.SUPER_ADMIN_EMAIL; manages everyone and decides who is an admin.
+  admin       – a user with is_staff; adds, disables, resets or removes members.
+  member      – everyone else; every API call except user management just needs a signed-in user.
 """
 import json
 
@@ -30,6 +32,20 @@ def is_super_admin(user):
                 and user.email.strip().lower() == settings.SUPER_ADMIN_EMAIL)
 
 
+def is_admin(user):
+    """Admins and the super admin may manage users."""
+    return bool(user and user.is_authenticated and user.is_active and (user.is_staff or is_super_admin(user)))
+
+
+def role(user):
+    return "super_admin" if is_super_admin(user) else "admin" if user.is_staff else "member"
+
+
+def _can_manage(actor, user):
+    """The super admin manages everyone else; an admin manages members only."""
+    return actor.id != user.id and (is_super_admin(actor) or role(user) == "member")
+
+
 class LoginRequiredMiddleware:
     """Every /api/ call needs a signed-in user; the React app shows the login page on 401."""
 
@@ -51,7 +67,7 @@ def _body(request):
 
 def _user_json(user):
     return {"id": user.id, "email": user.email, "name": user.first_name, "is_active": user.is_active,
-            "is_super_admin": is_super_admin(user),
+            "role": role(user), "is_super_admin": is_super_admin(user), "is_admin": is_admin(user),
             "last_login": user.last_login.isoformat() if user.last_login else None,
             "date_joined": user.date_joined.isoformat()}
 
@@ -65,7 +81,7 @@ def _password_error(password, user=None):
 
 
 def _forbidden():
-    return JsonResponse({"error": "Only the super admin can manage users."}, status=403)
+    return JsonResponse({"error": "Only an admin can manage users."}, status=403)
 
 
 # ---------------------------------------------------------------- sign in / out
@@ -117,11 +133,11 @@ def change_password(request):
     return JsonResponse({"user": _user_json(user)})
 
 
-# ---------------------------------------------------------------- users (super admin only)
+# ---------------------------------------------------------------- users (admins and super admin)
 
 @require_http_methods(["GET", "POST"])
 def users(request):
-    if not is_super_admin(request.user):
+    if not is_admin(request.user):
         return _forbidden()
     if request.method == "GET":
         return JsonResponse({"users": [_user_json(u) for u in User.objects.order_by("email")]})
@@ -129,13 +145,18 @@ def users(request):
     email = (data.get("email") or "").strip().lower()
     name = (data.get("name") or "").strip()[:150]
     password = data.get("password") or ""
+    new_role = data.get("role") or "member"
+    if new_role not in ("member", "admin"):
+        return JsonResponse({"error": "Unknown role."}, status=400)
+    if new_role == "admin" and not is_super_admin(request.user):
+        return JsonResponse({"error": "Only the super admin can make someone an admin."}, status=403)
     try:
         validate_email(email)
     except ValidationError:
         return JsonResponse({"error": "Enter a valid email address."}, status=400)
     if User.objects.filter(username__iexact=email).exists() or User.objects.filter(email__iexact=email).exists():
         return JsonResponse({"error": "A user with this email already exists."}, status=400)
-    candidate = User(username=email, email=email, first_name=name)
+    candidate = User(username=email, email=email, first_name=name, is_staff=new_role == "admin")
     if error := _password_error(password, candidate):
         return JsonResponse({"error": error}, status=400)
     candidate.set_password(password)
@@ -145,11 +166,13 @@ def users(request):
 
 @require_http_methods(["PATCH", "DELETE"])
 def user_detail(request, user_id):
-    if not is_super_admin(request.user):
+    if not is_admin(request.user):
         return _forbidden()
     user = get_object_or_404(User, id=user_id)
     if is_super_admin(user):
         return JsonResponse({"error": "The super admin account cannot be changed here."}, status=400)
+    if not _can_manage(request.user, user):
+        return JsonResponse({"error": "Only the super admin can change an admin or your own account."}, status=403)
     if request.method == "DELETE":
         user.delete()
         return JsonResponse({"deleted": user_id})
@@ -158,6 +181,12 @@ def user_detail(request, user_id):
         user.first_name = (data["name"] or "").strip()[:150]
     if "is_active" in data:
         user.is_active = bool(data["is_active"])
+    if "role" in data:
+        if data["role"] not in ("member", "admin"):
+            return JsonResponse({"error": "Unknown role."}, status=400)
+        if not is_super_admin(request.user):
+            return JsonResponse({"error": "Only the super admin can change roles."}, status=403)
+        user.is_staff = data["role"] == "admin"
     if data.get("password"):
         if error := _password_error(data["password"], user):
             return JsonResponse({"error": error}, status=400)

@@ -12,9 +12,9 @@ The first start asks for the super admin's password.
 
 ## Database
 
-All data lives in Neon Postgres (Singapore). Put the connection string in `.env` as `MRM_DATABASE_URL`
-(see `.env.example`); the app does not start without it. Uploaded spreadsheets stay on disk in `backend/media/`.
-Tests create a temporary `test_neondb` database on the same Neon project and remove it afterwards.
+All data lives in PostgreSQL (the team's server; Neon also works). Put the connection string in `.env` as
+`MRM_DATABASE_URL` (see `.env.example`); the app does not start without it. Uploaded spreadsheets go to Google
+Drive (see below). Tests create a temporary `test_<dbname>` database on the same server and remove it afterwards.
 
 ## Uploaded spreadsheets in Google Drive
 
@@ -50,8 +50,8 @@ One-time setup (on your own computer, it opens a browser):
 ## Sign-in and users
 
 Everyone must sign in. The super admin (`rahuljadhav0417@gmail.com`, change with `MRM_SUPER_ADMIN_EMAIL`)
-is the only person who can add, disable, reset or remove users – from the avatar menu → **Users**.
-Other users can change their own password from the same menu.
+manages everyone and decides who is an **Admin** (avatar menu → **Users**). Admins can add, disable, reset
+or remove members, but not other admins. Everyone can change their own password from the same menu.
 
 - Forgotten super admin password: `cd backend && ../.venv/bin/python manage.py superadmin --reset`
   (Docker: `docker compose exec mrm python manage.py superadmin --reset`)
@@ -63,12 +63,12 @@ cp .env.example .env          # set MRM_SUPER_ADMIN_PASSWORD for the first start
 docker compose up -d --build  # → http://localhost:8010
 ```
 
-- The database is Neon (`MRM_DATABASE_URL` in `.env`); uploaded spreadsheets are in `backend/media/`,
-  mounted into the container, so rebuilding or restarting it does not lose anything.
+- The database is PostgreSQL (`MRM_DATABASE_URL` in `.env`); uploaded spreadsheets are in Google Drive, with a
+  local copy in `backend/media/` (mounted into the container). Rebuilding or restarting loses nothing.
 - Update to new code: `git pull && docker compose up -d --build`
 - Logs: `docker compose logs -f`  ·  Stop: `docker compose down`
-- Backup: the database is backed up by Neon (restore points in the Neon console); copy
-  `backend/media/` for the uploaded spreadsheets.
+- Backup: back up the PostgreSQL database (ask the team how their server is backed up); the spreadsheets are
+  already in Google Drive.
 
 On a server with a domain, set `MRM_ALLOWED_HOSTS` and `MRM_CSRF_TRUSTED_ORIGINS` in `.env`,
 put a reverse proxy with HTTPS (Caddy, nginx, Traefik) in front of port 8010, and set `MRM_HTTPS=1`.
