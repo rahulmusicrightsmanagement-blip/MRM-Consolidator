@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AlarmClock, CheckCircle2, FilePlus2, ListChecks, ShieldCheck, Trash2, UserPlus, Users } from 'lucide-react'
+import { AlarmClock, AlertTriangle, CheckCircle2, FilePlus2, ListChecks, RefreshCw, ShieldCheck, Trash2, UserPlus, Users } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { AppShell } from '../components/AppShell'
 import { Button, ConfirmDialog, DataTable, Empty } from '../components/ui'
@@ -66,13 +66,23 @@ function InlineOwner({ value, onSave }: { value: string; onSave: (v: string) => 
     onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} aria-label="Owner" />
 }
 
+/** The last list loaded, shown at once when the tracker is opened again while a fresh copy loads. */
+let lastClients: ClientRow[] | null = null
+
 export default function Tracker() {
-  const [clients, setClients] = useState<ClientRow[] | null>(null)
+  const [clients, setClients] = useState<ClientRow[] | null>(lastClients)
+  const [error, setError] = useState<string | null>(null)
   const [stage, setStage] = useState<number | null>(null)
   const [ask, setAsk] = useState<ClientRow | null>(null)
   const navigate = useNavigate()
   const toast = useToast()
-  useEffect(() => { api.clients().then((d) => setClients(d.clients)).catch(() => setClients([])) }, [])
+  const load = useCallback(() => {
+    setError(null)
+    api.clients().then((d) => setClients(d.clients)).catch((e) => setError((e as Error).message))
+  }, [])
+  useEffect(load, [load])
+  useEffect(() => { if (clients) lastClients = clients }, [clients])
+  const loading = clients === null
 
   const patch = async (c: ClientRow, p: { owner?: string; due_date?: string | null }) => {
     await api.updateClient(c.id, p)
@@ -105,7 +115,8 @@ export default function Tracker() {
   ]
 
   const tile = (icon: ReactNode, value: ReactNode, label: string, tone: string, hint?: string) => (
-    <div className={`tile ${tone}`}><span className="tile-icon">{icon}</span><span className="tile-value">{value}</span>
+    <div className={`tile ${tone}`}><span className="tile-icon">{icon}</span>
+      <span className="tile-value">{loading ? <span className="skeleton" aria-label="Loading" /> : value}</span>
       <span className="tile-label">{label}</span>{hint && <span className="tile-hint">{hint}</span>}</div>
   )
 
@@ -118,7 +129,7 @@ export default function Tracker() {
       </header>
 
       <div className="tiles six">
-        {tile(<Users size={18} />, stats.total, 'Clients', 'neutral', `${stats.works} works`)}
+        {tile(<Users size={18} />, stats.total, 'Clients', 'neutral', loading ? 'Loading…' : `${stats.works} works`)}
         {tile(<ShieldCheck size={18} />, `${stats.coverage}%`, 'Registered', 'good', 'across all societies checked')}
         {tile(<ListChecks size={18} />, stats.amend, 'To amend', 'warn', 'all clients, all societies')}
         {tile(<FilePlus2 size={18} />, stats.register, 'To register', 'bad', 'all clients, all societies')}
@@ -127,16 +138,21 @@ export default function Tracker() {
       </div>
 
       <div className="stage-filter" role="tablist" aria-label="Stage">
-        <button type="button" className={stage === null ? 'active' : ''} onClick={() => setStage(null)}>All<span>{stats.total}</span></button>
+        <button type="button" className={stage === null ? 'active' : ''} onClick={() => setStage(null)}>All<span>{loading ? '…' : stats.total}</span></button>
         {STAGES.map((label, i) => (
           <button key={label} type="button" className={stage === i ? 'active' : ''} onClick={() => setStage(stage === i ? null : i)}>
-            <span className={`stage-pip s${i}`} />{label}<span>{stats.byStage[i]}</span>
+            <span className={`stage-pip s${i}`} />{label}<span>{loading ? '…' : stats.byStage[i]}</span>
           </button>
         ))}
       </div>
 
       <section className="card flush">
-        {clients && clients.length === 0 ? (
+        {loading ? (error ? (
+          <Empty icon={<AlertTriangle size={22} />} title="Could not load the clients"
+            action={<Button icon={<RefreshCw size={14} />} onClick={load}>Try again</Button>}>{error}</Empty>
+        ) : (
+          <div className="loading"><span className="spinner" />Loading clients…</div>
+        )) : clients.length === 0 ? (
           <Empty icon={<Users size={22} />} title="No clients yet" action={<Button variant="primary" onClick={() => navigate('/clients/new')}>Add the first client</Button>}>
             Add a client, load our master, then work through IPRS and PRS one at a time.
           </Empty>

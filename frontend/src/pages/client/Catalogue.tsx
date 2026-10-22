@@ -26,6 +26,7 @@ export default function Catalogue() {
     { label: 'Source', options: [{ id: 'master', label: 'In our master' }, { id: 'iprs', label: 'Added from IPRS' }], test: (w, v) => w.origin === v },
     { label: 'ISWC', options: [{ id: 'yes', label: 'Has ISWC' }, { id: 'no', label: 'No ISWC' }], test: (w, v) => !!w.identifiers.ISWC?.length === (v === 'yes') },
   ]
+  if (!works) return <div className="loading"><span className="spinner" />Loading works…</div>
   return (
     <Card flush>
       {pre.length > 0 && (

@@ -8,7 +8,7 @@ For every song in the report's final list:
      and reopen ones that were marked done but still show up.
 Only the client's newest report changes task states, so re-opening an old report never undoes progress.
 """
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 from .engine.normalize import norm_title, same_party
@@ -144,6 +144,7 @@ class _Writes:
 
 
 BATCH = 200
+SYNC_LOCK = 7101   # namespace of the per-client lock below
 WORK_FIELDS = ["title", "alt_titles", "identifiers", "language", "category", "duration", "origin", "master_row",
                "credits", "sources", "last_run", "updated_at"]
 
@@ -154,6 +155,10 @@ def sync_run(run, result):
     if not run.client or not result.get("tunecodes"):
         return None
     client = run.client
+    # One sync per client at a time (an upload and a background refresh may overlap); the second one then sees the
+    # works the first one created instead of creating them again.
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s, %s)", [SYNC_LOCK, client.id])
     latest = is_latest(run)
     works_by_id = {w["internal_no"]: w for w in (result["iprs"] or {}).get("works", [])}
     songs_by_row = {s["row"]: s for s in result["master"]["songs"]}

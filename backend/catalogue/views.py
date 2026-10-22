@@ -2,14 +2,15 @@ import hashlib
 import json
 import logging
 import tempfile
+import threading
 from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import transaction
-from django.db.models import Prefetch
+from django.db import connection, transaction
+from django.db.models import Count, Prefetch, Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -41,6 +42,9 @@ XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 TASK_STATES = dict(Task.STATES)
 # Large JSON columns of a work, left out of queries that do not show them (the database may be far away).
 HEAVY = ("sources", "credits")
+# What a work's row in a list shows of its registrations and tasks (not their issue / detail JSON).
+ROW_REGS = Prefetch("registrations", Registration.objects.only("id", "work_id", "society", "status", "codes"))
+ROW_TASKS = Prefetch("tasks", Task.objects.only("id", "work_id", "type", "state"))
 TASK_WORK_HEAVY = ("work__sources", "work__credits")
 # A task only shows its reports' dates; their summaries would be sent again with every task row.
 TASK_RUN_HEAVY = ("opened_run__summary", "closed_run__summary")
@@ -248,23 +252,38 @@ def _master_json(master):
 def _runs(client):
     """The client's reports, newest first, with their files – loaded once per request (the database may be far away)."""
     if not hasattr(client, "_runs"):
-        client._runs = list(client.runs.order_by(*NEWEST_FIRST).prefetch_related("files"))
+        _load([client])
     return client._runs
 
 
 def _societies(client):
     if not hasattr(client, "_societies"):
-        client._societies = list(client.societies.all())
+        _load([client])
     return client._societies
 
 
 def _master(client):
     if not hasattr(client, "_master"):
-        client._master = client.active_master()
+        _load([client])
     return client._master
 
 
-def society_summaries(client, coverage, tasks):
+def _load(clients):
+    """Reports (with files), societies and newest master of many clients in three queries, not three per client."""
+    by_id = {c.id: c for c in clients}
+    for c in clients:
+        c._runs, c._societies, c._master = [], [], None
+    for run in Run.objects.filter(client_id__in=by_id).order_by(*NEWEST_FIRST).prefetch_related("files"):
+        run.client = by_id[run.client_id]
+        run.client._runs.append(run)
+    for cs in ClientSociety.objects.filter(client_id__in=by_id):
+        by_id[cs.client_id]._societies.append(cs)
+    for master in MasterFile.objects.filter(client_id__in=by_id).order_by("-uploaded_at"):
+        if by_id[master.client_id]._master is None:
+            by_id[master.client_id]._master = master
+
+
+def society_summaries(client, coverage, task_counts):
     """Where the client stands with each society it is reconciled with."""
     out = []
     for cs in _societies(client):
@@ -277,12 +296,12 @@ def society_summaries(client, coverage, tasks):
             status = "in_progress"
         else:
             status = "not_started"
-        own = [t for t in tasks if t.society == cs.society]
+        own = [t for t in task_counts if t["society"] == cs.society]
         out.append({
             "code": cs.society, "meta": SOCIETY_META.get(cs.society, {"code": cs.society, "name": cs.society}),
             "status": status, "steps": STEPS.get(cs.society, []), "report": _run_json(latest) if latest else None,
             "report_count": len(runs), "coverage": coverage.get(cs.society),
-            "open_tasks": sum(1 for t in own if t.state not in Task.CLOSED), "tasks": len(own),
+            "open_tasks": sum(t["n"] for t in own if t["state"] not in Task.CLOSED), "tasks": sum(t["n"] for t in own),
             "review": (latest.summary or {}).get("review", 0) if latest and cs.society == "IPRS" else 0,
         })
     return out
@@ -294,27 +313,43 @@ def latest_run(client):
 
 
 def client_metrics(client):
-    # Only the fields the counts use: the tracker loads this for every client, and the JSON columns (task details,
-    # registration issues) made up most of its time.
-    works = list(client.works.only("id", "client_id", "last_run_id", "identifiers").prefetch_related(
-        Prefetch("registrations", Registration.objects.only("id", "work_id", "society", "status")),
-        Prefetch("tasks", Task.objects.only("id", "work_id", "society", "type", "state", "due_date"))))
-    in_latest = [w for w in works if w.last_run_id]
-    tasks = [t for w in works for t in w.tasks.all()]
-    open_tasks = [t for t in tasks if t.state not in Task.CLOSED]
+    return metrics([client])[client.id]
+
+
+def metrics(clients):
+    """{client id: headline numbers}. The database counts (one query per kind of count for all clients together);
+    loading every work, registration and task to count them in Python was most of the tracker's time."""
+    ids = [c.id for c in clients]
+    _load([c for c in clients if not hasattr(c, "_runs")])
+    in_latest = Work.objects.filter(client_id__in=ids, last_run__isnull=False)
+    works = {r["client_id"]: r for r in in_latest.values("client_id").annotate(
+        works=Count("id"), with_iswc=Count("id", filter=Q(identifiers__has_key="ISWC") & ~Q(identifiers__ISWC=[])
+                                           & ~Q(identifiers__ISWC=None)))}
+    coverage = defaultdict(dict)
+    regs = Registration.objects.filter(work__in=in_latest).values("work__client_id", "society", "status").annotate(n=Count("id"))
+    for r in sorted(regs, key=lambda r: (r["society"], r["status"])):
+        coverage[r["work__client_id"]].setdefault(r["society"], Counter())[r["status"]] = r["n"]
     today = date.today()
-    coverage = {}
-    for society in sorted({r.society for w in in_latest for r in w.registrations.all()}):
-        regs = [r for w in in_latest for r in w.registrations.all() if r.society == society]
-        counts = Counter(r.status for r in regs)
-        coverage[society] = {"total": len(regs), "registered": len(regs) - counts[Registration.NOT_REGISTERED],
-                             "clean": counts[Registration.REGISTERED], "statuses": dict(counts)}
+    tasks = defaultdict(list)
+    for t in Task.objects.filter(work__client_id__in=ids).values("work__client_id", "society", "type", "state").annotate(
+            n=Count("id"), overdue=Count("id", filter=Q(due_date__lt=today))):
+        tasks[t["work__client_id"]].append(t)
+    no_credit = dict(Task.objects.filter(work__in=in_latest, type=Task.ADD_CREDIT).exclude(state__in=Task.CLOSED)
+                     .values("work__client_id").annotate(n=Count("work_id", distinct=True)).values_list("work__client_id", "n"))
+    return {c.id: _metrics(c, works.get(c.id, {}), coverage[c.id], tasks[c.id], no_credit.get(c.id, 0)) for c in clients}
+
+
+def _metrics(client, works, counts, task_counts, no_credit):
+    coverage = {society: {"total": sum(n.values()), "registered": sum(n.values()) - n[Registration.NOT_REGISTERED],
+                          "clean": n[Registration.REGISTERED], "statuses": dict(n)} for society, n in counts.items()}
     by_type = defaultdict(lambda: {"open": 0, "closed": 0})
-    for t in tasks:
-        by_type[f"{t.society}|{t.type}"]["closed" if t.state in Task.CLOSED else "open"] += 1
+    for t in task_counts:
+        by_type[f"{t['society']}|{t['type']}"]["closed" if t["state"] in Task.CLOSED else "open"] += t["n"]
+    total = sum(t["n"] for t in task_counts)
+    open_count = sum(t["n"] for t in task_counts if t["state"] not in Task.CLOSED)
     run = latest_run(client)
     s = (run.summary if run else {}) or {}
-    societies = society_summaries(client, coverage, tasks)
+    societies = society_summaries(client, coverage, task_counts)
     master = _master(client)
     if not master:
         stage = 0
@@ -327,13 +362,13 @@ def client_metrics(client):
     return {
         "master": _master_json(master),
         "societies": societies,
-        "works": len(in_latest),
-        "with_iswc": sum(1 for w in in_latest if w.identifiers.get("ISWC")),
-        "credited": sum(1 for w in in_latest if not any(t.type == Task.ADD_CREDIT and t.state not in Task.CLOSED for t in w.tasks.all())),
+        "works": works.get("works", 0),
+        "with_iswc": works.get("with_iswc", 0),
+        "credited": works.get("works", 0) - no_credit,
         "coverage": coverage,
-        "tasks": {"open": len(open_tasks), "closed": len(tasks) - len(open_tasks), "total": len(tasks),
-                  "overdue": sum(1 for t in open_tasks if t.due_date and t.due_date < today),
-                  "verified": sum(1 for t in tasks if t.state == Task.VERIFIED),
+        "tasks": {"open": open_count, "closed": total - open_count, "total": total,
+                  "overdue": sum(t["overdue"] for t in task_counts if t["state"] not in Task.CLOSED),
+                  "verified": sum(t["n"] for t in task_counts if t["state"] == Task.VERIFIED),
                   "by_type": dict(by_type)},
         "stage": {"index": stage, "label": STAGES[stage]},
         "review": s.get("review", 0),
@@ -357,11 +392,40 @@ def clients(request):
                                        due_date=parse_date(data.get("due_date") or "") or None,
                                        home_society=data.get("home_society") or "IPRS")
         return JsonResponse(_client_json(client), status=201)
-    out = []
-    for c in Client.objects.all():
-        _refresh(c)
-        out.append({**_client_json(c), **client_metrics(c), "report_count": len(_runs(c))})
+    everyone = list(Client.objects.all())
+    _load(everyone)
+    for c in everyone:
+        _refresh_soon(c)
+    numbers = metrics(everyone)
+    out = [{**_client_json(c), **numbers[c.id], "report_count": len(_runs(c))} for c in everyone]
     return JsonResponse({"clients": out, "stages": STAGES})
+
+
+# Pages show what is in the database straight away; re-processing the latest reports (which may download them from
+# Google Drive) runs after the response, at most every REFRESH_EVERY seconds per client. Uploads and the report
+# screens still process their report before answering. Tests set this off to get the old, synchronous behaviour.
+REFRESH_IN_BACKGROUND = "test" not in __import__("sys").argv[1:2]
+REFRESH_EVERY = 5 * 60
+
+
+def _refresh_soon(client):
+    if not REFRESH_IN_BACKGROUND:
+        _refresh(client)
+        return
+    if not cache.add(f"refresh-client-{client.id}", 1, REFRESH_EVERY):
+        return   # done (or tried) recently, by this or another worker
+    threading.Thread(target=_refresh_in_background, args=(client.id,), name=f"refresh client {client.id}", daemon=True).start()
+
+
+def _refresh_in_background(client_id):
+    try:
+        client = Client.objects.filter(pk=client_id).first()
+        if client:
+            _refresh(client)
+    except Exception:
+        logger.exception("Background refresh of client %s failed", client_id)
+    finally:
+        connection.close()   # this thread's own database connection
 
 
 def _refresh(client):
@@ -410,10 +474,11 @@ def client_detail(request, client_id):
         if "due_date" in data:
             client.due_date = parse_date(data["due_date"]) if data["due_date"] else None
         client.save()
-    _refresh(client)
+    _refresh_soon(client)
     run = latest_run(client)
     changes = (run.summary.get("changes") if run else None) or {}
-    task_titles = {t.id: t for t in Task.objects.filter(id__in=changes.get("verified", []) + changes.get("reopened", []) + changes.get("new_tasks", [])).select_related("work")}
+    task_titles = {t.id: t for t in Task.objects.filter(id__in=changes.get("verified", []) + changes.get("reopened", []) + changes.get("new_tasks", []))
+                   .select_related("work").only("id", "type", "society", "work__id", "work__title")}
     def task_list(ids):
         return [{"id": i, "title": task_titles[i].work.title, "label": f"{TASK_LABEL[task_titles[i].type]} · {task_titles[i].society}"}
                 for i in ids if i in task_titles]
@@ -513,7 +578,8 @@ def client_society(request, client_id, society):
 # ---------------------------------------------------------------- tasks
 
 def _tasks_qs(client):
-    return client.tasks.select_related("work", "opened_run", "closed_run").defer(*TASK_WORK_HEAVY, *TASK_RUN_HEAVY).prefetch_related("work__registrations")
+    return client.tasks.select_related("work", "opened_run", "closed_run").defer(*TASK_WORK_HEAVY, *TASK_RUN_HEAVY).prefetch_related(
+        Prefetch("work__registrations", Registration.objects.only("id", "work_id", "society", "codes")))
 
 
 def client_tasks(request, client_id):
@@ -565,7 +631,7 @@ def task_detail(request, task_id):
 
 def client_works(request, client_id):
     client = get_object_or_404(Client, pk=client_id)
-    works = client.works.defer("sources").prefetch_related("registrations", "tasks")
+    works = client.works.defer("sources", "alt_titles").prefetch_related(ROW_REGS, ROW_TASKS)
     return JsonResponse({"works": [_work_row(w) for w in works]})
 
 

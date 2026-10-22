@@ -331,6 +331,10 @@ select.set { border-color: var(--brand); background: var(--brand-soft); }
 .file-summary { margin-top: 12px; font-weight: 550; }
 .spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--brand-soft); border-top-color: var(--brand); animation: spin .8s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Placeholder for a number that is still loading. */
+.skeleton { display: inline-block; width: 56px; height: 0.9em; border-radius: 6px; background: var(--border); vertical-align: middle; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .skeleton, .spinner { animation-duration: 2.4s; } }
 
 .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
 .checks li { display: flex; gap: 10px; align-items: flex-start; }

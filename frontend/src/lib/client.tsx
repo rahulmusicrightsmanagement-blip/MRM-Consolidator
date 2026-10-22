@@ -18,11 +18,14 @@ interface ClientContextValue {
 
 const ClientContext = createContext<ClientContextValue | null>(null)
 
+/** Each client's last loaded data, shown at once when it is opened again while a fresh copy loads. */
+const lastLoaded = new Map<number, { detail: ClientDetail | null; tasks: TaskT[] | null; works: WorkRow[] | null }>()
+
 /** Everything about one client: detail + metrics, tasks and works. Pages read from here and call refresh() after changes. */
 export function ClientProvider({ clientId, children }: { clientId: number; children: ReactNode }) {
-  const [detail, setDetail] = useState<ClientDetail | null>(null)
-  const [tasks, setTasks] = useState<TaskT[] | null>(null)
-  const [works, setWorks] = useState<WorkRow[] | null>(null)
+  const [detail, setDetail] = useState<ClientDetail | null>(() => lastLoaded.get(clientId)?.detail ?? null)
+  const [tasks, setTasks] = useState<TaskT[] | null>(() => lastLoaded.get(clientId)?.tasks ?? null)
+  const [works, setWorks] = useState<WorkRow[] | null>(() => lastLoaded.get(clientId)?.works ?? null)
   const [error, setError] = useState<string | null>(null)
   const toast = useToast()
 
@@ -35,7 +38,12 @@ export function ClientProvider({ clientId, children }: { clientId: number; child
     }
   }, [clientId])
 
-  useEffect(() => { setDetail(null); setTasks(null); setWorks(null); refresh() }, [refresh])
+  useEffect(() => {
+    const last = lastLoaded.get(clientId)
+    setDetail(last?.detail ?? null); setTasks(last?.tasks ?? null); setWorks(last?.works ?? null)
+    refresh()
+  }, [clientId, refresh])
+  useEffect(() => { if (detail) lastLoaded.set(clientId, { detail, tasks, works }) }, [clientId, detail, tasks, works])
 
   const updateTasks = useCallback(async (ids: number[], patch: TaskPatch) => {
     try {

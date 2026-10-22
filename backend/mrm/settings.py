@@ -103,6 +103,8 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     # First, so it times everything below (database, Google Drive, report processing per request).
     'catalogue.timing.TimingMiddleware',
+    # Compress responses: client pages send ~1 MB of JSON, ~10x smaller gzipped (Django adds BREACH padding).
+    'django.middleware.gzip.GZipMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',

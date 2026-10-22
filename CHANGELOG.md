@@ -1,5 +1,8 @@
 # MRM changelog
 
+## 0.9.3 – 2026-10-22 (patch)
+- Client pages load about 10x faster and show a loading screen until the data arrives
+
 ## 0.9.2 – 2026-10-22 (patch)
 - Each slow page request now logs where its time went (database, Google Drive, processing); tracker counts load faster
 
