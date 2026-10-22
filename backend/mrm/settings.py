@@ -101,6 +101,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # First, so it times everything below (database, Google Drive, report processing per request).
+    'catalogue.timing.TimingMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',

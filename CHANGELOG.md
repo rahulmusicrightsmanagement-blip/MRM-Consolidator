@@ -1,5 +1,8 @@
 # MRM changelog
 
+## 0.9.2 – 2026-10-22 (patch)
+- Each slow page request now logs where its time went (database, Google Drive, processing); tracker counts load faster
+
 ## 0.9.1 – 2026-10-22 (patch)
 - Pages load faster: processed reports stay cached, task lists skip report data, and an expired Google Drive sign-in no longer breaks the client list
 

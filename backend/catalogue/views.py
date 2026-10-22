@@ -9,6 +9,7 @@ from pathlib import Path
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
+from django.db.models import Prefetch
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -27,6 +28,7 @@ from .engine.pipeline import run_pipeline
 from .engine.prs import SocietyFormatError, parse_prs
 from .models import NEWEST_FIRST, OLDEST_FIRST, SOCIETIES, SOCIETY_CODES, Client, ClientSociety, LinkDecision, MasterEdit, MasterFile, Registration, Run, SongFlag, SourceFile, Task, TaskEvent, Work
 from .sync import TASK_LABEL, is_latest, sync_run
+from .timing import measure
 
 logger = logging.getLogger(__name__)
 
@@ -179,13 +181,14 @@ def compute(run):
     result = cache.get(key)
     if result is None:
         client = run.client
-        result = run_pipeline(
-            iprs_path=paths["iprs"].file.path if paths["iprs"] else None,
-            master_path=paths["master"].file.path if paths["master"] else None,
-            prs_path=paths["prs"].file.path if paths["prs"] else None,
-            decisions=decisions, societies=(run.society,),
-            client={"name": client.name.upper(), "ipi_name_no": client.ipi} if client else None,
-        )
+        # Local paths first: a file missing on this computer is downloaded from Drive (timed as "drive").
+        local = {k: paths[k].file.path if paths.get(k) else None for k in ("iprs", "master", "prs")}
+        with measure("processing"):
+            result = run_pipeline(
+                iprs_path=local["iprs"], master_path=local["master"], prs_path=local["prs"],
+                decisions=decisions, societies=(run.society,),
+                client={"name": client.name.upper(), "ipi_name_no": client.ipi} if client else None,
+            )
         summary = snapshot(result)
         changes = sync_run(run, result)
         if changes is not None:
@@ -291,7 +294,11 @@ def latest_run(client):
 
 
 def client_metrics(client):
-    works = list(client.works.defer(*HEAVY).prefetch_related("registrations", "tasks"))
+    # Only the fields the counts use: the tracker loads this for every client, and the JSON columns (task details,
+    # registration issues) made up most of its time.
+    works = list(client.works.only("id", "client_id", "last_run_id", "identifiers").prefetch_related(
+        Prefetch("registrations", Registration.objects.only("id", "work_id", "society", "status")),
+        Prefetch("tasks", Task.objects.only("id", "work_id", "society", "type", "state", "due_date"))))
     in_latest = [w for w in works if w.last_run_id]
     tasks = [t for w in works for t in w.tasks.all()]
     open_tasks = [t for t in tasks if t.state not in Task.CLOSED]

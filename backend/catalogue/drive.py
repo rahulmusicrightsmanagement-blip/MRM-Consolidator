@@ -23,6 +23,8 @@ from django.core.files import File
 from django.core.files.storage import Storage
 from django.utils.deconstruct import deconstructible
 
+from .timing import measure
+
 API = "https://www.googleapis.com/drive/v3/files"
 UPLOAD = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id"
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
@@ -74,7 +76,8 @@ def _send(method, url, what, **kwargs):
     import requests
     from google.auth.exceptions import GoogleAuthError, RefreshError
     try:
-        return getattr(session(), method)(url, timeout=TIMEOUT, **kwargs)
+        with measure("drive"):
+            return getattr(session(), method)(url, timeout=TIMEOUT, **kwargs)
     except RefreshError as e:
         raise DriveError(f"Google Drive could not {what}: the sign-in has expired or was revoked – "
                          f"run `manage.py drive_setup` again ({e})") from e
