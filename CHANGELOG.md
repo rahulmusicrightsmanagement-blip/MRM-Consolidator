@@ -1,5 +1,8 @@
 # MRM changelog
 
+## 0.9.1 – 2026-10-22 (patch)
+- Pages load faster: processed reports stay cached, task lists skip report data, and an expired Google Drive sign-in no longer breaks the client list
+
 ## 0.9.0 – 2026-10-15 (minor)
 - User roles: Rahul stays super admin; new Admin role (Durga) can add and manage members
 

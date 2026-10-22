@@ -60,12 +60,18 @@ class Command(BaseCommand):
         if not creds.refresh_token:
             raise CommandError("Google did not return a refresh token – run the command again.")
         http = drive.session(creds)
-        folder_id = drive.create_folder(http, FOLDER_NAME)
+        # Signing in again (the old sign-in expired) keeps the folder that already holds the uploaded files.
+        folder_id = os.environ.get("MRM_GDRIVE_FOLDER_ID", "")
+        reused = bool(folder_id) and http.get(f"{drive.API}/{folder_id}", params={"fields": "id"},
+                                              timeout=drive.TIMEOUT).status_code == 200
+        if not reused:
+            folder_id = drive.create_folder(http, FOLDER_NAME)
         values = {"MRM_GDRIVE_CLIENT_ID": creds.client_id, "MRM_GDRIVE_CLIENT_SECRET": creds.client_secret,
                   "MRM_GDRIVE_REFRESH_TOKEN": creds.refresh_token, "MRM_GDRIVE_FOLDER_ID": folder_id}
         write_env(values)
         os.environ.update(values)
-        self.stdout.write(self.style.SUCCESS(f"Connected. Folder \"{FOLDER_NAME}\" created in your Drive; keys saved to {ENV_FILE}."))
+        done = "kept (signed in again)" if reused else "created in your Drive"
+        self.stdout.write(self.style.SUCCESS(f"Connected. Folder \"{FOLDER_NAME}\" {done}; keys saved to {ENV_FILE}."))
 
     def _check(self):
         if not drive.configured():

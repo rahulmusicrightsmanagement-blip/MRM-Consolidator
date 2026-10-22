@@ -68,6 +68,20 @@ def _check(response, what):
     return response
 
 
+def _send(method, url, what, **kwargs):
+    """One call to Drive with the app's sign-in. An expired sign-in or a network failure becomes a DriveError, so a
+    page can skip the file instead of failing."""
+    import requests
+    from google.auth.exceptions import GoogleAuthError, RefreshError
+    try:
+        return getattr(session(), method)(url, timeout=TIMEOUT, **kwargs)
+    except RefreshError as e:
+        raise DriveError(f"Google Drive could not {what}: the sign-in has expired or was revoked – "
+                         f"run `manage.py drive_setup` again ({e})") from e
+    except (GoogleAuthError, requests.RequestException) as e:
+        raise DriveError(f"Google Drive could not {what}: {e}") from e
+
+
 def create_folder(http, name, parent=None):
     meta = {"name": name, "mimeType": "application/vnd.google-apps.folder", **({"parents": [parent]} if parent else {})}
     return _check(http.post(API, params={"fields": "id"}, json=meta, timeout=TIMEOUT), "create the folder").json()["id"]
@@ -114,8 +128,8 @@ class DriveStorage(Storage):
             return file_id
         escaped = name.replace("\\", "\\\\").replace("'", "\\'")
         q = f"name = '{escaped}' and '{self.folder_id}' in parents and trashed = false"
-        r = _check(session().get(API, params={"q": q, "fields": "files(id)", "pageSize": 1, "spaces": "drive"},
-                                  timeout=TIMEOUT), f"look up {name}")
+        what = f"look up {name}"
+        r = _check(_send("get", API, what, params={"q": q, "fields": "files(id)", "pageSize": 1, "spaces": "drive"}), what)
         files = r.json().get("files", [])
         file_id = files[0]["id"] if files else None
         if file_id:
@@ -170,7 +184,8 @@ class DriveStorage(Storage):
             file_id = self._find(name)
             if not file_id:
                 raise FileNotFoundError(f"{name} is not in the Google Drive folder")
-            r = _check(session().get(f"{API}/{file_id}", params={"alt": "media"}, timeout=TIMEOUT), f"download {name}")
+            what = f"download {name}"
+            r = _check(_send("get", f"{API}/{file_id}", what, params={"alt": "media"}), what)
             local.parent.mkdir(parents=True, exist_ok=True)
             tmp = local.with_name(local.name + ".part")
             tmp.write_bytes(r.content)
@@ -186,7 +201,7 @@ class DriveStorage(Storage):
     def delete(self, name):
         file_id = self._find(name)
         if file_id:
-            r = session().delete(f"{API}/{file_id}", timeout=TIMEOUT)
+            r = _send("delete", f"{API}/{file_id}", f"delete {name}")
             if r.status_code != 404:
                 _check(r, f"delete {name}")
         cache.delete(self._key(name))

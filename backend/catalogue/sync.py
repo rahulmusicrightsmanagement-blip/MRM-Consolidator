@@ -221,7 +221,7 @@ def sync_run(run, result):
     if latest:
         for reg in Registration.objects.filter(work__client=client):
             regs[(reg.work_id, reg.society)] = reg
-        for task in Task.objects.filter(work__client=client).select_related("closed_run").order_by("id"):
+        for task in Task.objects.filter(work__client=client).select_related("closed_run").defer("closed_run__summary").order_by("id"):
             tasks.setdefault(task.work_id, {})[(task.society, task.type)] = task
 
     for work, row, created in planned:
@@ -279,7 +279,7 @@ def _newer(run, other):
 def _reconcile_tasks(client, work, row, run, changes):
     """Bring one work's tasks in line with one report row (writes straight away)."""
     writes = _Writes()
-    current = {(t.society, t.type): t for t in work.tasks.select_related("closed_run")}
+    current = {(t.society, t.type): t for t in work.tasks.select_related("closed_run").defer("closed_run__summary")}
     _plan_tasks(client, work, current, row, run, changes, writes)
     writes.flush(changes)
 

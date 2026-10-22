@@ -40,6 +40,13 @@ TASK_STATES = dict(Task.STATES)
 # Large JSON columns of a work, left out of queries that do not show them (the database may be far away).
 HEAVY = ("sources", "credits")
 TASK_WORK_HEAVY = ("work__sources", "work__credits")
+# A task only shows its reports' dates; their summaries would be sent again with every task row.
+TASK_RUN_HEAVY = ("opened_run__summary", "closed_run__summary")
+# A processed report is keyed by its files, decisions, client and app version, so it stays valid until one of those
+# changes; a short expiry only made a page load after an idle hour re-process (and re-save) every client's reports.
+VERSION_FILE = settings.BASE_DIR.parent / "VERSION"
+APP_VERSION = VERSION_FILE.read_text().strip() if VERSION_FILE.exists() else ""
+RESULT_TTL = 30 * 24 * 60 * 60
 STAGES = ["Needs master", "Master loaded", "Societies in progress", "All societies complete"]
 # What the user sees: three steps per society. One-line conversion, gap filling, tune-code checks and
 # task creation run behind them as part of the process.
@@ -165,7 +172,8 @@ def compute(run):
     paths = _inputs(run)
     decisions = _decisions(run)
     stamp = (run.created_at.isoformat(), tuple((k, f.id if f else 0, f.file.name if f else "") for k, f in paths.items()),
-             json.dumps(decisions, sort_keys=True), run.report_date)
+             json.dumps(decisions, sort_keys=True), run.report_date,
+             (run.client.name, run.client.ipi) if run.client else None, APP_VERSION)
     # A stable key (Python's hash() differs per process), so every worker finds what another one computed.
     key = f"run-{run.id}-{hashlib.sha1(repr(stamp).encode()).hexdigest()}"
     result = cache.get(key)
@@ -187,7 +195,7 @@ def compute(run):
                                   for k, v in changes.items()}
         run.summary = summary
         Run.objects.filter(pk=run.pk).update(summary=summary)
-        cache.set(key, result, 60 * 60)
+        cache.set(key, result, RESULT_TTL)
     return result
 
 
@@ -498,7 +506,7 @@ def client_society(request, client_id, society):
 # ---------------------------------------------------------------- tasks
 
 def _tasks_qs(client):
-    return client.tasks.select_related("work", "opened_run", "closed_run").defer(*TASK_WORK_HEAVY).prefetch_related("work__registrations")
+    return client.tasks.select_related("work", "opened_run", "closed_run").defer(*TASK_WORK_HEAVY, *TASK_RUN_HEAVY).prefetch_related("work__registrations")
 
 
 def client_tasks(request, client_id):
@@ -556,7 +564,7 @@ def client_works(request, client_id):
 
 def work_detail(request, work_id):
     work = get_object_or_404(Work.objects.select_related("client", "first_run", "last_run"), pk=work_id)
-    tasks = work.tasks.select_related("work", "opened_run", "closed_run").defer(*TASK_WORK_HEAVY).prefetch_related("events", "work__registrations")
+    tasks = work.tasks.select_related("work", "opened_run", "closed_run").defer(*TASK_WORK_HEAVY, *TASK_RUN_HEAVY).prefetch_related("events", "work__registrations")
     return JsonResponse({
         **_work_row(work), "client": _client_json(work.client), "alt_titles": work.alt_titles, "language": work.language,
         "category": work.category, "duration": work.duration, "master_row": work.master_row, "credits": work.credits,
