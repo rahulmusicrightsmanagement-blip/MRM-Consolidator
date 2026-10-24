@@ -17,8 +17,9 @@ from .normalize import clean_text, norm_isrc, norm_iswc, norm_title, same_party,
 
 PASS, WARN, FAIL, INFO = "pass", "warn", "fail", "info"
 STATUSES = {UPLOADED, AMEND, NOT_REGISTERED, NOT_OUR_WORK}
-EDIT_FIELD = {"title": "Title", "duration": "Duration", "iswc": "ISWC", "isrc": "ISRC"}
-SLOT_GROUP = {"composers": "Composers", "authors": "Authors", "publishers": "Publishers"}
+EDIT_FIELD = {"title": "Title", "alt_title": "Alternate title", "duration": "Duration", "iswc": "ISWC", "isrc": "ISRC",
+              "language": "Language", "movie": "Film / album"}
+SLOT_GROUP = {"composers": "Composers", "authors": "Authors", "publishers": "Publishers", "singers": "Singers"}
 
 
 def _text(v):
@@ -89,9 +90,12 @@ def verify(master_path, out_bytes, iprs, mapping, final, fill, tunecodes, edits,
                    "client": _text(after.cell(r, f["client_status"] + 1).value) if "client_status" in f else "",
                    "general": _text(after.cell(r, f["general_status"] + 1).value) if "general_status" in f else "",
                    "purpose": _text(after.cell(r, f["amendment_purpose"] + 1).value) if "amendment_purpose" in f else ""}
-            if any(v for k, v in got.items() if k != "slot"):
+            # Untouched: the block reads exactly as in the uploaded master (an earlier round the app leaves alone).
+            got["untouched"] = r <= before.max_row and all(
+                _text(after.cell(r, c + 1).value) == _text(before.cell(r, c + 1).value) for c in (b["code"], b["iswc"], b["isrc"]))
+            if any(v for k, v in got.items() if k not in ("slot", "untouched")):
                 out_blocks[r].append(got)
-            if got["code"]:
+            if got["code"] and r not in code_rows[got["code"]]:  # a later amendment round repeats the code in the same row
                 code_rows[got["code"]].append(r)
 
     # ================= Step 1 · Upload file & check headers
@@ -161,7 +165,7 @@ def verify(master_path, out_bytes, iprs, mapping, final, fill, tunecodes, edits,
     for r, blocks in out_blocks.items():
         for b in blocks:
             w = works.get(b["code"])
-            if not b["code"]:
+            if not b["code"] or b["untouched"]:
                 continue
             if not w:
                 foreign.append({"code": b["code"], "row": r, "title": title_of(after, r), "detail": f"IPRS block {b['slot']} – already in the master, not in this IPRS report"})
@@ -197,7 +201,7 @@ def verify(master_path, out_bytes, iprs, mapping, final, fill, tunecodes, edits,
     unmarked = [r for r in no_code if not any(b["client"] or b["general"] for b in out_blocks.get(r, []))]
     check(3, "unregistered", "Songs with no IPRS registration are marked", WARN if unmarked else PASS,
           f"{len(no_code)} songs without an IPRS tune code – {len(no_code) - len(unmarked)} marked Not registered / Not our work",
-          [{"row": r, "title": title_of(after, r), "detail": "waiting for your decision in Map with master" if norm_title(title_of(after, r)) in pending_titles else "no status written"} for r in unmarked])
+          [{"row": r, "title": title_of(after, r), "detail": "waiting for your decision in Match & review" if norm_title(title_of(after, r)) in pending_titles else "no status written"} for r in unmarked])
 
     titles = Counter(norm_title(title_of(after, r)) for r in after_rows)
     dup_titles = [{"row": r, "title": title_of(after, r), "detail": f"title appears {titles[norm_title(title_of(after, r))]} times"}
@@ -243,11 +247,11 @@ def verify(master_path, out_bytes, iprs, mapping, final, fill, tunecodes, edits,
                 code = _text(after.cell(r, info["block"]["code"] + 1).value)
                 why = f"IPRS block {info['block']['slot']} · from IPRS work {code}" if code else f"IPRS block {info['block']['slot']} · status for a song IPRS does not have"
             elif info["group"] == "Work details" and EDIT_FIELD.get(info["role"]) and (r, EDIT_FIELD[info["role"]]) in edit_by:
-                why = f"You chose the IPRS {EDIT_FIELD[info['role']]} in Map with master"
+                why = f"You chose the IPRS {EDIT_FIELD[info['role']]} in Match & review"
             elif info["group"].lower() in SLOT_GROUP and (r, SLOT_GROUP[info["group"].lower()]) in edit_by:
-                why = f"You chose the IPRS {SLOT_GROUP[info['group'].lower()]} in Map with master"
+                why = f"You chose the IPRS {SLOT_GROUP[info['group'].lower()]} in Match & review"
             elif info.get("block") is not None and info["role"] in ("iswc", "isrc") and (r, info["role"].upper()) in edit_by:
-                why = f"You chose the IPRS {info['role'].upper()} in Map with master"
+                why = f"You chose the IPRS {info['role'].upper()} in Match & review"
             state = "changed" if why else "unexpected"
             if not why:
                 unexplained.append({"row": r, "title": title_of(after, r),

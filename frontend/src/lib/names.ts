@@ -8,9 +8,18 @@ function tokens(name: string) {
   return meaningful.length ? meaningful : all
 }
 
+// Each word pairs with its own word (same word, or a one-letter initial of it); at least one full word must agree.
 function covers(small: string[], big: string[]) {
-  const match = (x: string, y: string) => x === y || (x.length === 1 && y.startsWith(x)) || (y.length === 1 && x.startsWith(y))
-  return small.every((x) => big.some((y) => match(x, y)))
+  const pool = [...big]
+  let exact = 0
+  for (const x of [...small].sort((a, b) => b.length - a.length)) {
+    const i = pool.indexOf(x) >= 0 ? pool.indexOf(x)
+      : pool.findIndex((y) => (x.length === 1 && y.startsWith(x)) || (y.length === 1 && x.startsWith(y)))
+    if (i < 0) return false
+    if (pool[i] === x && x.length > 1) exact++
+    pool.splice(i, 1)
+  }
+  return exact > 0
 }
 
 const digits = (ipi: string) => ipi.replace(/\D/g, '').padStart(11, '0')

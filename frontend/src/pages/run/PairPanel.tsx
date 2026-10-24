@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Check, Plus } from 'lucide-react'
+import { Plus, Undo2 } from 'lucide-react'
 import { api } from '../../lib/api'
+import { samePerson } from '../../lib/names'
 import { useRun } from '../../lib/run'
 import type { EditChoice, FieldCompare, Link as MapLink, PairPerson, PairResult, PairRow, PairStatus } from '../../types'
 
 /** Fields where the reviewer can pick which value our master keeps. */
-const EDITABLE = ['Title', 'Duration', 'ISWC', 'ISRC', 'Authors', 'Composers', 'Publishers']
+const EDITABLE = ['Title', 'Alternate title', 'Duration', 'ISWC', 'ISRC', 'Language', 'Film / album', 'Singers', 'Authors', 'Composers', 'Publishers']
 export const editable = (f: FieldCompare) => EDITABLE.includes(f.field) && (f.result === 'different' || f.result === 'missing_master')
 
 // Plain names for the rows, in the words of someone who works in the Excel files.
@@ -15,8 +16,11 @@ const NAMES: Record<string, string> = {
   Language: 'Language', Category: 'Category', 'Production / movie': 'Film / album', 'Performer / singers': 'Singers',
   'IPRS status': 'Status at IPRS',
 }
-// Which of these rows the "Use IPRS / Keep ours" choice belongs to.
-const CHOICE_FIELD: Record<string, string> = { Title: 'Title', Duration: 'Duration', ISWC: 'ISWC', ISRC: 'ISRC' }
+// Which of these rows the "Use IPRS / Keep ours" choice belongs to (the field name the server stores).
+const CHOICE_FIELD: Record<string, string> = {
+  Title: 'Title', 'Alternate title': 'Alternate title', Duration: 'Duration', ISWC: 'ISWC', ISRC: 'ISRC',
+  Language: 'Language', 'Production / movie': 'Film / album', 'Performer / singers': 'Singers',
+}
 const GROUPS: { id: PairPerson['group']; title: string; one: string; field?: string }[] = [
   { id: 'authors', title: 'Authors (lyrics)', one: 'Author', field: 'Authors' },
   { id: 'composers', title: 'Composers (music)', one: 'Composer', field: 'Composers' },
@@ -42,7 +46,8 @@ const personReason = (p: PairPerson) => (p.diffs.includes('perf') && p.diffs.inc
 })[d])
 
 /** One song, both files, one Excel-like table: what IPRS says next to what our master says. */
-export function PairPanel({ work, row, rowNote, link }: { work: string | null; row: number | null; rowNote?: string; link?: MapLink }) {
+/** focus: the amendment reasons this song was opened for – shown first, in plain words, with where to look. */
+export function PairPanel({ work, row, rowNote, link, focus }: { work: string | null; row: number | null; rowNote?: string; link?: MapLink; focus?: string[] }) {
   const { runId, payload, editMaster, busy } = useRun()
   const [data, setData] = useState<PairResult | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -60,7 +65,6 @@ export function PairPanel({ work, row, rowNote, link }: { work: string | null; r
 
   const both = !!data.internal_no && !!data.master_row
   const linkedRow = link?.state === 'linked' ? link.master_row : null
-  const compare = (field: string) => link?.comparison?.fields.find((f) => f.field === field)
   const choiceOf = (field: string) => payload!.master_edits.find((e) => e.master_row === linkedRow && e.field === field)?.choice
   const pick = (field: string, choice: EditChoice) =>
     editMaster([{ master_row: linkedRow!, field, internal_no: link!.internal_no, choice: choiceOf(field) === choice ? null : choice }])
@@ -68,38 +72,49 @@ export function PairPanel({ work, row, rowNote, link }: { work: string | null; r
   const iprsOnlyColumns = data.sections.flatMap((s) => s.rows).filter((r) => r.status === 'only_iprs' && !r.master_col).length
   const diffCount = (data.counts.different ?? 0) + (data.counts.only_iprs ?? 0) - iprsOnlyColumns
 
-  /** "Use IPRS / Keep ours" (or "Add to our master") for a field our master can take from IPRS. */
-  const actions = (field?: string) => {
-    const f = field && linkedRow ? compare(field) : undefined
-    if (!f || !editable(f)) return null
-    const c = choiceOf(f.field)
-    if (f.result === 'missing_master') {
-      return <button type="button" className={`x-btn ${c === 'iprs' ? 'on' : ''}`} disabled={!!busy} onClick={() => pick(f.field, 'iprs')}>
-        {c === 'iprs' ? <><Check size={13} />Added</> : <><Plus size={13} />Add to our master</>}</button>
-    }
+  /** A row the reviewer can settle: values differ, or IPRS has one our master lacks (and our master has the column). */
+  const choosable = (field: string | undefined, status: PairStatus, hasCol: boolean) =>
+    !!field && !!linkedRow && !!link && (status === 'different' || (status === 'only_iprs' && (hasCol || field === 'Singers')))
+
+  /** "Use IPRS / Keep ours" – once chosen, the buttons give way to the result and an Undo. */
+  const actions = (field: string | undefined, missing: boolean) => {
+    if (!field) return null
+    const c = choiceOf(field)
+    if (c) return <button type="button" className="x-btn ghost" disabled={!!busy} onClick={() => pick(field, c)} title="Undo this choice"><Undo2 size={13} />Undo</button>
     return (
       <span className="x-pick">
-        <button type="button" className={`x-btn ${c === 'iprs' ? 'on' : ''}`} disabled={!!busy} onClick={() => pick(f.field, 'iprs')}>{c === 'iprs' && <Check size={13} />}Use IPRS</button>
-        <button type="button" className={`x-btn ${c === 'master' ? 'on' : ''}`} disabled={!!busy} onClick={() => pick(f.field, 'master')}>{c === 'master' && <Check size={13} />}Keep ours</button>
+        <button type="button" className="x-btn use" disabled={!!busy} onClick={() => pick(field, 'iprs')}>{missing ? <><Plus size={13} />Add IPRS value</> : 'Use IPRS'}</button>
+        {!missing && <button type="button" className="x-btn" disabled={!!busy} onClick={() => pick(field, 'master')}>Keep ours</button>}
       </span>
     )
   }
 
+  /** The value our master ends up with, in place of the two values. */
+  const finalCell = (c: EditChoice, iprs: ReactNode, master: ReactNode, empty: boolean) => (
+    <td className="x-val x-final" colSpan={2}>
+      <span className={`x-chosen ${c}`}>{c === 'iprs' ? 'From IPRS' : 'Ours kept'}</span>
+      <b>{c === 'iprs' ? iprs : master}</b>
+      <span className="x-sub">{c === 'iprs' ? (empty ? 'our master was empty' : <>was <s>{master}</s></>) : <>IPRS has <s>{iprs || '—'}</s> – not used</>}</span>
+    </td>
+  )
+
   const line = (r: PairRow) => {
     const field = CHOICE_FIELD[r.label]
-    const c = field && linkedRow ? choiceOf(field) : undefined
+    const can = choosable(field, r.status, !!r.master_col)
+    const c = can && field ? choiceOf(field) : undefined
     // A column only the IPRS file has (e.g. its status) is not something our master is missing.
-    const look = r.status === 'only_iprs' && !r.master_col ? { cls: '', text: 'Only in the IPRS file' } : LOOK[r.status]
+    const look = r.status === 'only_iprs' && !r.master_col && field !== 'Singers' ? { cls: '', text: 'Only in the IPRS file' } : LOOK[r.status]
     return (
-      <tr key={r.label + r.letter} className={c === 'iprs' ? 'x-same' : look.cls}>
+      <tr key={r.label + r.letter} className={c ? `x-decided ${c}` : look.cls}>
         <td className="x-col">{r.letter}</td>
         <td className="x-what">{NAMES[r.label] ?? r.label.replace(/^IPRS block (\d+) · /, 'IPRS $1 – ')}</td>
-        {data.internal_no && <td className="x-val">{r.iprs}</td>}
-        {data.master_row && <td className="x-val">{c === 'iprs'
-          ? <><b>{r.iprs}</b><span className="x-sub">{r.master ? <>was <s>{r.master}</s></> : 'was empty'}</span></>
-          : r.master}</td>}
-        {both && <td className="x-result">{c === 'iprs' ? 'Will use IPRS' : c === 'master' ? 'Keeping ours' : look.text}</td>}
-        {both && <td className="x-act">{actions(field)}</td>}
+        {c && both ? finalCell(c, r.iprs, r.master, !r.master) : <>
+          {data.internal_no && <td className="x-val">{r.iprs}</td>}
+          {data.master_row && <td className="x-val">{r.master}</td>}
+        </>}
+        {both && <td className="x-result">{c === 'iprs' ? <span className="x-pill good">Will use IPRS</span> : c === 'master' ? <span className="x-pill">Keeping ours</span>
+          : look.text && <span className={`x-pill ${look.cls}`}>{look.text}</span>}{r.note && !c && <span className="x-sub">{r.note}</span>}</td>}
+        {both && <td className="x-act">{can ? actions(field, r.status === 'only_iprs') : null}</td>}
       </tr>
     )
   }
@@ -107,10 +122,27 @@ export function PairPanel({ work, row, rowNote, link }: { work: string | null; r
   const heading = (key: string, text: string, act?: ReactNode) => (
     <tr key={key} className="x-head"><td colSpan={both ? 5 : 3}>{text}</td>{both && <td className="x-act">{act}</td>}</tr>
   )
+  const clientName = payload!.result.iprs?.client.name ?? ''
+  const isClient = (p: PairPerson) => !!clientName && [p.iprs?.name, p.master?.name].some((n) => n && samePerson(n, clientName))
+  const masterIssues = (payload!.result.master?.issues ?? []).filter((i) => i.row === data.master_row)
+  // The column type a master slot sits in ("Author 1" → Author) – when it is not the row's role, say so.
+  const slotKind = (p: PairPerson) => p.master?.slot.replace(/\s*\d+$/, '') ?? ''
   const [details, blocks, rest] = ['work', 'blocks', 'rest'].map((id) => data.sections.find((s) => s.id === id)!.rows.filter((r) => show(r.status, r)))
 
   return (
     <div className="x-pair">
+      {(!!focus?.length || masterIssues.length > 0) && (
+        <div className="x-focus">
+          <b className="x-focus-title">What to look at</b>
+          {focus?.map((t) => (
+            <div key={t} className="x-focus-line amend"><span className="x-focus-tag">Amend at IPRS</span><span>{t}
+              {/^Client/.test(t) && <span className="x-sub">See the rows tagged <b>Client</b> below – IPRS on the left, our master on the right.</span>}</span></div>
+          ))}
+          {masterIssues.map((i) => (
+            <div key={i.code + i.message} className="x-focus-line master"><span className="x-focus-tag">Fix our master</span><span>{i.message}</span></div>
+          ))}
+        </div>
+      )}
       <div className="x-top">
         <p className="x-say">
           {both ? <>IPRS work <b>{data.internal_no}</b> next to row <b>{data.master_row}</b> of our master. {diffCount === 0
@@ -134,21 +166,40 @@ export function PairPanel({ work, row, rowNote, link }: { work: string | null; r
             {details.length > 0 && heading('h-work', 'Song details')}
             {details.map(line)}
             {GROUPS.map((g) => {
-              const people = data.people.filter((p) => p.group === g.id && show(personStatus(p)))
+              const all = data.people.filter((p) => p.group === g.id)
+              const differs = all.some((p) => personStatus(p) !== 'same')
+              const can = !!g.field && differs && choosable(g.field, all.some((p) => p.master) ? 'different' : 'only_iprs', true)
+              const c = can ? choiceOf(g.field!) : undefined
+              // Once settled, only the side our master keeps is listed.
+              const people = all.filter((p) => c === 'iprs' ? !!p.iprs : c === 'master' ? !!p.master : show(personStatus(p)))
               if (!people.length) return null
-              const c = g.field && linkedRow ? choiceOf(g.field) : undefined
+              const sideIprs = all.some((p) => p.iprs), missing = !all.some((p) => p.master)
               return [
-                heading(`h-${g.id}`, g.title, actions(g.field)),
+                heading(`h-${g.id}`, c ? `${g.title} – ${c === 'iprs' ? 'IPRS list will replace ours' : 'keeping our list'}` : g.title, can ? actions(g.field, missing) : undefined),
                 ...people.map((p, i) => {
                   const s = personStatus(p)
+                  const client = isClient(p)
+                  const wrongColumn = !!p.master && g.id !== 'publishers' && g.id !== 'others' && slotKind(p) !== g.one
+                  const person = (x: { name: string; ipi: string } | null, share: number | null | undefined, side: 'iprs' | 'master') => x && <>
+                    {x.name}{client && <span className="x-client">Client</span>}
+                    <span className="x-sub">IPI {x.ipi || '—'} · share {pct(share) || '—'}{side === 'iprs' && p.iprs ? ` · role ${p.iprs.role}` : ''}
+                      {side === 'master' && p.master ? ` · role ${p.master.role || '—'}` : ''}</span>
+                    {side === 'master' && p.master && <span className={`x-slot ${wrongColumn ? 'warn' : ''}`}>{p.master.slot} column ({p.master.col}){wrongColumn ? ` – but this is a ${g.one.toLowerCase()}` : ''}</span>}</>
                   return (
-                    <tr key={`${g.id}${i}`} className={c === 'iprs' ? 'x-same' : LOOK[s].cls}>
+                    <tr key={`${g.id}${i}`} className={`${c ? `x-decided ${c}` : wrongColumn ? 'x-missing' : LOOK[s].cls} ${client ? 'x-is-client' : ''}`}>
                       <td className="x-col">{p.master?.col}</td>
                       <td className="x-what">{g.one}</td>
-                      {data.internal_no && <td className="x-val">{p.iprs && <>{p.iprs.name}<span className="x-sub">IPI {p.iprs.ipi || '—'} · share {pct(p.iprs.per_own) || '—'}</span></>}</td>}
-                      {data.master_row && <td className="x-val">{p.master && <>{p.master.name}<span className="x-sub">IPI {p.master.ipi || '—'} · share {pct(p.master.perf) || '—'}</span></>}</td>}
-                      {both && <td className="x-result">{c === 'iprs' ? 'Will use IPRS' : c === 'master' ? 'Keeping ours'
-                        : s === 'different' ? personReason(p).map((t) => <div key={t}>{t}</div>) : LOOK[s].text}</td>}
+                      {c && both && sideIprs ? (
+                        <td className="x-val x-final" colSpan={2}><span className={`x-chosen ${c}`}>{c === 'iprs' ? 'From IPRS' : 'Ours kept'}</span>
+                          {c === 'iprs' ? person(p.iprs, p.iprs?.per_own, 'iprs') : person(p.master, p.master?.perf, 'master')}</td>
+                      ) : <>
+                        {data.internal_no && <td className="x-val">{person(p.iprs, p.iprs?.per_own, 'iprs')}</td>}
+                        {data.master_row && <td className="x-val">{person(p.master, p.master?.perf, 'master')}</td>}
+                      </>}
+                      {both && <td className="x-result">{c ? <span className={`x-pill ${c === 'iprs' ? 'good' : ''}`}>{c === 'iprs' ? 'Will use IPRS' : 'Keeping ours'}</span>
+                        : s === 'different' ? personReason(p).map((t) => <div key={t} className="x-reason">{t}</div>)
+                        : wrongColumn ? <span className="x-pill x-missing">Fix our master: wrong column</span>
+                        : LOOK[s].text && <span className={`x-pill ${LOOK[s].cls}`}>{LOOK[s].text}</span>}</td>}
                       {both && <td />}
                     </tr>
                   )

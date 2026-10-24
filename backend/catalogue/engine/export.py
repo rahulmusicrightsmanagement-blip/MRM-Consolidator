@@ -9,7 +9,7 @@ from openpyxl.utils import get_column_letter
 
 from .iprs import SHARE_KEYS
 from .master import read_layout
-from .normalize import clean_text, norm_ipi, same_party
+from .normalize import clean_text, norm_ipi, norm_title, same_party
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E46")
 HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -289,7 +289,26 @@ def apply_master_edits(ws, layout, edits, works):
     for row, picks in chosen.items():
         for field, w in picks.items():
             detail = f"From IPRS work {w['internal_no']}"
-            if field in ("Title", "Duration"):
+            if field == "Alternate title":
+                # The IPRS title joins the master's "Alternate Work" names, so the next report matches by itself.
+                old = clean_text(ws.cell(row, fields["alt_title"] + 1).value) if "alt_title" in fields else ""
+                value = w["title"] if not old else old if norm_title(w["title"]) in {norm_title(t) for t in old.split(";")} \
+                    else f"{old}; {w['title']}"
+                _put(ws, row, fields.get("alt_title"), value, FILLED_FILL)
+            elif field in ("Language", "Film / album"):
+                value = w["language"] if field == "Language" else w["production"]
+                _put(ws, row, fields.get("language" if field == "Language" else "movie"), value, FILLED_FILL)
+            elif field == "Singers":
+                names = [n.strip() for n in re.split(r"[,;]", w["performer"] or "") if n.strip()]
+                group_slots = slots.get("singers", [])
+                for slot in group_slots:
+                    ws.cell(row, slot["name"] + 1).value = None
+                for n, name in enumerate(names[:len(group_slots)]):
+                    _put(ws, row, group_slots[n]["name"], name, FILLED_FILL)
+                value = "; ".join(names)
+                if len(names) > len(group_slots):
+                    detail += f" (only {len(group_slots)} of {len(names)} fit the master's slots)"
+            elif field in ("Title", "Duration"):
                 value = w["title"] if field == "Title" else w["duration"]
                 _put(ws, row, fields.get(field.lower()), value, FILLED_FILL)
             elif field in ("ISWC", "ISRC"):
@@ -332,7 +351,7 @@ def _write_fill_row(ws, iprs_blocks, row, f):
     changes = []
     for b in f["blocks"]:
         block = iprs_blocks[b["slot"] - 1] if b["slot"] <= len(iprs_blocks) else None
-        if block is None:
+        if block is None or b.get("round") == "kept":  # an earlier amendment round stays exactly as it was
             continue
         _put(ws, row, block["isrc"], b["isrc"], FILLED_FILL)
         _put(ws, row, block["iswc"], b["iswc"], FILLED_FILL)
@@ -343,12 +362,13 @@ def _write_fill_row(ws, iprs_blocks, row, f):
         changes.append([row, f["title"], f"IPRS block {b['slot']}",
                         f"{b['internal_no']} · Client: {b['client_status']} · General: {b['general_status']}"
                         + (f" · {b['purpose']}" if b["purpose"] else "")])
-    if not f["blocks"] and f["state"] in ("not_registered", "not_our_work") and iprs_blocks:
-        block = iprs_blocks[0]
+    slot = f.get("status_slot")
+    if not f["blocks"] and f["state"] in ("not_registered", "not_our_work") and slot and slot <= len(iprs_blocks):
+        block = iprs_blocks[slot - 1]  # the first empty block – a block with anything in it is never written
         text = "Not our work" if f["state"] == "not_our_work" else "Not registered"
         _put(ws, row, block["fields"].get("client_status"), text, FILLED_FILL)
         _put(ws, row, block["fields"].get("general_status"), text, FILLED_FILL)
-        changes.append([row, f["title"], "IPRS block 1", text])
+        changes.append([row, f["title"], f"IPRS block {slot}", text])
     for code in f["overflow"]:
         changes.append([row, f["title"], "Not filled", f"IPRS work {code}: all {len(iprs_blocks)} IPRS blocks are used"])
     return changes

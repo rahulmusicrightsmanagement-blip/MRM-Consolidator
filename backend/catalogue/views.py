@@ -56,7 +56,7 @@ RESULT_TTL = 30 * 24 * 60 * 60
 STAGES = ["Needs master", "Master loaded", "Societies in progress", "All societies complete"]
 # What the user sees: three steps per society. One-line conversion, gap filling, tune-code checks and
 # task creation run behind them as part of the process.
-STEPS = {"IPRS": ["Upload file & check headers", "Map with master", "Fill IPRS columns", "Reports"],
+STEPS = {"IPRS": ["Upload file & check headers", "Match & review", "Reports"],
          "PRS": ["Upload file & check headers", "Map with master", "Reports"]}
 SOCIETY_META = {s["code"]: s for s in SOCIETIES}
 
@@ -125,7 +125,8 @@ def _decisions(run):
         if r.id != run.id and (r.report_date, r.created_at) > (run.report_date, run.created_at):
             continue
         for d in r.decisions.all():
-            out[d.internal_no] = {"master_row": d.master_row, "master_title": d.master_title, "rejected_rows": d.rejected_rows}
+            out[d.internal_no] = {"master_row": d.master_row, "master_title": d.master_title, "rejected_rows": d.rejected_rows,
+                                  "also_rows": d.also_rows}
     return out
 
 
@@ -759,14 +760,30 @@ def decide(request, run_id):
     """Reviewer links an IPRS work to a master row, rejects a suggestion, or clears the decision."""
     run = get_object_or_404(Run, pk=run_id)
     data = _body(request)
-    if data.get("items"):  # "Confirm all": [{internal_no, master_row}, …] linked in one go
+    if data.get("items"):
+        # Many decisions in one go (one reprocessing instead of one per click):
+        #   {internal_no, master_row, also_rows?}          link to that master song ("Confirm all"); also_rows are
+        #                                                  further master rows that are the same song
+        #   {internal_no, action: "new", rejected_rows}    none of the suggestions – the IPRS work is a new song
         titles = {s["row"]: s["title"] for s in compute(run)["master"]["songs"]}
-        for item in data["items"]:
-            row = int(item["master_row"])
-            decision, _ = LinkDecision.objects.get_or_create(run=run, internal_no=str(item["internal_no"]))
-            decision.master_row, decision.master_title = row, titles.get(row, "")
-            decision.rejected_rows = [r for r in decision.rejected_rows if r != row]
-            decision.save()
+        items = {str(i["internal_no"]): i for i in data["items"]}
+        existing = {d.internal_no: d for d in LinkDecision.objects.filter(run=run, internal_no__in=items)}
+        for internal_no, item in items.items():
+            decision = existing.get(internal_no) or LinkDecision(run=run, internal_no=internal_no)
+            if item.get("action") == "new":
+                rows = [int(r) for r in item.get("rejected_rows") or []]
+                decision.master_row, decision.master_title, decision.also_rows = None, "", []
+                decision.rejected_rows = list(dict.fromkeys(decision.rejected_rows + rows))
+            else:
+                row = int(item["master_row"])
+                also = [int(r) for r in item.get("also_rows") or [] if int(r) != row]
+                decision.master_row, decision.master_title, decision.also_rows = row, titles.get(row, ""), also
+                decision.rejected_rows = [r for r in decision.rejected_rows if r != row and r not in also]
+            decision.updated_at = timezone.now()
+            existing[internal_no] = decision
+        LinkDecision.objects.bulk_create([d for d in existing.values() if d.pk is None])
+        LinkDecision.objects.bulk_update([d for d in existing.values() if d.pk is not None],
+                                         ["master_row", "master_title", "rejected_rows", "also_rows", "updated_at"])
         run.save()
         return JsonResponse(_payload(run))
     internal_no = str(data.get("internal_no") or "")
@@ -780,10 +797,10 @@ def decide(request, run_id):
         row = int(data["master_row"]) if data.get("master_row") is not None else None
         title = next((s["title"] for s in compute(run)["master"]["songs"] if s["row"] == row), "") if row else ""
         if action == "link":
-            decision.master_row, decision.master_title = row, title
+            decision.master_row, decision.master_title, decision.also_rows = row, title, []
             decision.rejected_rows = [r for r in decision.rejected_rows if r != row]
         else:
-            decision.master_row, decision.master_title = None, ""
+            decision.master_row, decision.master_title, decision.also_rows = None, "", []
             if row is not None and row not in decision.rejected_rows:
                 decision.rejected_rows = decision.rejected_rows + [row]
         decision.save()

@@ -104,6 +104,7 @@ def parse_master(path):
             song[kind] = people
 
         registrations, isrcs, iswcs = [], set(), set()
+        occupied = []  # [society, slot] of every block with anything in it – the export never writes into those
         for top in ("isrc", "iswc"):
             value = song.get(top, "")
             (isrcs if top == "isrc" else iswcs).add((norm_isrc if top == "isrc" else norm_iswc)(value))
@@ -118,13 +119,22 @@ def parse_master(path):
             isrcs.add(isrc)
             iswcs.add(iswc)
             extra = {f: clean_text(get(row, idx)) for f, idx in block["fields"].items()}
+            if code or isrc_raw or iswc_raw or any(extra.values()):
+                occupied.append([block["society"], block["slot"]])
             if code or any(extra.values()):
                 registrations.append({"society": block["society"], "slot": block["slot"], "code": code,
                                       "isrc": isrc_raw, "iswc": iswc_raw, **extra})
         song["registrations"] = registrations
+        song["occupied"] = occupied
         song["isrcs"] = sorted(i for i in isrcs if i)
         song["iswcs"] = sorted(i for i in iswcs if i)
         song["has_credits"] = bool(song.get("composers") or song.get("authors") or song.get("publishers"))
+        for col, other, code in (("authors", "Composer", "C"), ("composers", "Author", "A")):
+            for p in song.get(col, []):
+                if p["role"] == code:
+                    issues.append({"row": row_no, "title": song["title"], "severity": "warning", "code": "MASTER_ROLE_COLUMN",
+                                   "message": f"{p['name']} is in the {col[:-1].title()} column but has role code {code} "
+                                              f"({other.lower()}) – move them to {'an' if other == 'Author' else 'a'} {other} column or fix the role code"})
         if not song["has_credits"]:
             issues.append({"row": row_no, "title": song["title"], "severity": "warning", "code": "NO_CREDITS",
                            "message": "No composer, author or publisher filled in"})

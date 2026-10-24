@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, ArrowRight, Ban, Check, CheckCheck, CircleCheckBig, Download, FileSpreadsheet, Plus, RotateCcw, Trash2, UploadCloud, XCircle } from 'lucide-react'
+import { AlertTriangle, ArrowRight, CalendarDays, Check, CircleCheckBig, Download, FileSpreadsheet, Plus, RotateCcw, Trash2, UploadCloud, XCircle } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Badge, Button, Card, ConfirmDialog, DataTable, Empty, Mono, StatusBadge } from '../../components/ui'
 import { api } from '../../lib/api'
@@ -9,9 +9,10 @@ import { samePerson } from '../../lib/names'
 import { RunProvider, useRun } from '../../lib/run'
 import { useToast } from '../../lib/toast'
 import type { Song } from '../../lib/model'
-import type { FillBlock, FillRow, FillState, PrsWork, RunSummary, SocietySummary } from '../../types'
+import type { PrsWork, RunSummary, SocietySummary } from '../../types'
 import { Stepper } from '../NewClient'
-import { GapsTab, ImportTab, MapTab, OneLineTab, ReviewTab, TunecodeTab } from '../run/Panels'
+import { ImportTab, OneLineTab, TunecodeTab } from '../run/Panels'
+import { IprsMatchStep } from '../run/MatchStep'
 import { VerifyAndPreview } from './Verify'
 
 /** /clients/:id/societies/:society – one society's own space: its steps, its tasks, its reports. */
@@ -50,7 +51,8 @@ function SocietyDrop({ s, runId, onUploaded }: { s: SocietySummary; runId?: numb
   }
   return (
     <div className="stack">
-      {!runId && <label className="inline-label">Report date<input type="date" className="inline-input date" value={date} onChange={(e) => setDate(e.target.value)} /></label>}
+      {!runId && <label className="field date-field">Report date
+        <span className="field-box"><CalendarDays size={16} /><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></span></label>}
       <div className={`start-drop ${over ? 'over' : ''}`} role="button" tabIndex={0}
         onDragOver={(e) => { e.preventDefault(); setOver(true) }} onDragLeave={() => setOver(false)}
         onDrop={(e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer.files[0]; if (f) handle(f) }}
@@ -151,14 +153,14 @@ function Workspace({ s, reports }: { s: SocietySummary; reports: RunSummary[] })
       ) : (
         <>
           {steps[step - 1] === 'Upload file & check headers' && (s.code === 'IPRS' ? <IprsUploadStep s={s} /> : <PrsUploadStep s={s} />)}
-          {steps[step - 1] === 'Map with master' && (s.code === 'IPRS' ? <IprsMapStep /> : <PrsMatch />)}
-          {steps[step - 1] === 'Fill IPRS columns' && <FillStep onBack={() => set({ step: String(step - 1) })} />}
+          {steps[step - 1] === 'Match & review' && <IprsMatchStep />}
+          {steps[step - 1] === 'Map with master' && <PrsMatch />}
           {steps[step - 1] === 'Reports' && <ReportsStep s={s} />}
           <div className="step-footer">
             {step > 1 && <Button variant="ghost" onClick={() => set({ step: String(step - 1) })}>Back</Button>}
             <span className="grow small muted">Step {step} of {steps.length} · {steps[step - 1]}</span>
             {step < steps.length ? (
-              <Button variant="primary" onClick={next}>{step <= run.confirmed_step ? 'Next step' : 'Confirm & continue'}<ArrowRight size={15} /></Button>
+              <Button variant="primary" onClick={next}>Continue to {steps[step].replace('Map with master', 'mapping').replace('Match & review', 'match & review').replace(/^Reports$/, 'reports')}<ArrowRight size={15} /></Button>
             ) : run.completed_at ? <Badge tone="good">Completed</Badge> : (
               <Button variant="primary" icon={<Check size={15} />} onClick={() => complete(true)}>Mark {s.code} complete</Button>
             )}
@@ -204,25 +206,36 @@ function FileLine({ s }: { s: SocietySummary }) {
 /* ---------------- Step 1 · Upload file & check headers ---------------- */
 
 function IprsUploadStep({ s }: { s: SocietySummary }) {
-  const { payload } = useRun()
+  const { payload, runId } = useRun()
+  const { refresh } = useClient()
+  const navigate = useNavigate()
+  const [replace, setReplace] = useState(false)
   const iprs = payload!.result.iprs!
+  const f = payload!.run.files.iprs!
+  const failed = iprs.checks.filter((c) => !c.passed)
   const errors = iprs.issues.filter((i) => i.severity === 'error').length
   const warnings = iprs.issues.filter((i) => i.severity === 'warning').length
   return (
     <div className="stack">
-      <div className="grid-2">
-        <FileLine s={s} />
-        <Card title="Header check" description="The fixed IPRS column format."><CheckList checks={iprs.checks} /></Card>
-      </div>
+      <section className="card file-card">
+        <span className="file-card-icon"><FileSpreadsheet size={20} /></span>
+        <div className="grow"><b>{f.name}</b><span className="small muted block">Uploaded {new Date(f.uploaded_at).toLocaleString()}</span></div>
+        <Button size="sm" onClick={() => setReplace(!replace)}>{replace ? 'Cancel' : 'Replace file'}</Button>
+        {replace && <div className="file-card-drop"><SocietyDrop s={s} runId={runId} onUploaded={async () => { await refresh(); navigate(0) }} /></div>}
+      </section>
+      <div className={`check-banner ${failed.length ? 'warn' : 'good'}`}>{failed.length ? <AlertTriangle size={20} /> : <CircleCheckBig size={20} />}
+        <div><b>{failed.length ? `${failed.length} of ${iprs.checks.length} header checks need a look` : `All ${iprs.checks.length} header checks passed`}</b>
+          <span>{iprs.stats.works.toLocaleString()} works from {iprs.stats.contributor_rows.toLocaleString()} rows
+            {iprs.client.name && <> · report for <b>{iprs.client.name}</b>{iprs.client.ipi_name_no && <> (IPI {iprs.client.ipi_name_no})</>}</>}</span></div></div>
+      {failed.length > 0 && <CheckList checks={failed} />}
       <div className="master-check">
-        <div className="mc-item"><b>{iprs.stats.works}</b><span>works in the report</span></div>
-        <div className="mc-item"><b>{iprs.stats.contributor_rows}</b><span>rows, turned into one line per work</span></div>
-        <div className="mc-item"><b>{iprs.cleanup.length}</b><span>cells cleaned (spaces, numbers, split names)</span></div>
+        <div className="mc-item"><b>{iprs.stats.works.toLocaleString()}</b><span>works in the report</span></div>
+        <div className="mc-item"><b>{iprs.cleanup.length.toLocaleString()}</b><span>cells cleaned (spaces, numbers, split names)</span></div>
         <div className={`mc-item ${errors ? 'bad' : ''}`}><b>{errors}</b><span>errors in the data</span></div>
-        <div className={`mc-item ${warnings ? 'warn' : ''}`}><b>{warnings}</b><span>warnings (missing ISWC / ISRC / IPI…)</span></div>
+        <div className={`mc-item ${warnings ? 'warn' : ''}`}><b>{warnings.toLocaleString()}</b><span>warnings (missing ISWC / ISRC / IPI…)</span></div>
       </div>
-      <details className="more-detail"><summary>See the data issues, clean-up log and one-line works</summary>
-        <div className="stack"><ImportTab /><OneLineTab /></div>
+      <details className="more-detail"><summary>See every header check, the data issues, clean-up log and one-line works</summary>
+        <div className="stack"><CheckList checks={iprs.checks} /><ImportTab /><OneLineTab /></div>
       </details>
     </div>
   )
@@ -241,135 +254,14 @@ function PrsUploadStep({ s }: { s: SocietySummary }) {
   )
 }
 
-/* ---------------- Step 2 · Map with master ---------------- */
-
-function IprsMapStep() {
-  const { model, confirmAll, busy } = useRun()
-  const review = model?.review.length ?? 0
-  // The suggested master song of every waiting work: the current link, else the top candidate.
-  const suggested = (model?.review ?? []).map((i) => ({ internal_no: i.id, master_row: i.link.master_row ?? i.link.candidates[0]?.row }))
-    .filter((x): x is { internal_no: string; master_row: number } => !!x.master_row)
-  return (
-    <div className="stack">
-      {review > 0 && <Card title={`${review} match${review === 1 ? '' : 'es'} need your decision`} description="Linked without full proof. Confirm or reject – your decision is remembered for every later report."
-        actions={suggested.length > 0 && <Button variant="primary" size="sm" icon={<CheckCheck size={15} />} disabled={!!busy} onClick={() => confirmAll(suggested)}>Confirm all {suggested.length} suggestions</Button>}><ReviewTab /></Card>}
-      <MapTab />
-      <details className="more-detail"><summary>See the songs added from IPRS and the gaps filled in our master</summary><GapsTab /></details>
-    </div>
-  )
-}
-
-/* ---------------- Step 3 · Fill IPRS columns ---------------- */
-
-const FILL_FILTERS: { id: FillState | 'all'; label: string; tone: string; explain: string }[] = [
-  { id: 'all', label: 'All songs', tone: '', explain: 'Every song of the final master and what goes into its IPRS columns. One song keeps one row – each IPRS registration of it fills the next IPRS block (1, 2, 3 …).' },
-  { id: 'uploaded', label: 'Uploaded', tone: 'good', explain: 'Registered at IPRS and the registration agrees with our master – Client status and General Status "Uploaded".' },
-  { id: 'amend', label: 'Amend', tone: 'warn', explain: 'Registered, but something is wrong. Client status "Amend" = the client\'s own credit (missing, share, role, IPI). General Status "Amend" = other writers, publishers, shares, ISWC, or one ISWC on two works. The reason goes into "Purpose of amendment".' },
-  { id: 'not_registered', label: 'Not registered', tone: 'bad', explain: 'No IPRS registration found – block 1 gets "Not registered". These are in the Registration report.' },
-  { id: 'not_our_work', label: 'Not our work', tone: '', explain: 'Songs you marked "Not our work" (or already marked so in the master) – both statuses "Not our work", nothing to amend.' },
-  { id: 'pending', label: 'Waiting', tone: 'brand', explain: 'A possible IPRS registration still waits for your decision in "Map with master". Nothing is written for these until you decide.' },
-]
-
-function BlockLine({ b }: { b: FillBlock }) {
-  return (
-    <div className="fill-block">
-      <span className="fb-slot">{b.slot}</span>
-      <span className="mono">{b.internal_no}</span>
-      <span className="mono small muted">{b.iswc || 'no ISWC'} · {b.isrc || 'no ISRC'}</span>
-    </div>
-  )
-}
-
-const statusTone = (v: string) => v === 'Uploaded' ? 'good' : v === 'Amend' ? 'warn' : v === 'Not registered' ? 'bad' : 'neutral'
-
-function FillStep({ onBack }: { onBack: () => void }) {
-  const { payload, exportUrl, flagSongs, busy } = useRun()
-  const [filter, setFilter] = useState<FillState | 'all'>('all')
-  const fill = payload!.result.fill
-  if (!fill) return <Empty title="Nothing to fill yet">Upload the IPRS report and our master first.</Empty>
-  const sm = fill.summary
-  const rows = fill.rows.filter((r) => filter === 'all' || r.state === filter)
-  const count = (id: FillState | 'all') => id === 'all' ? fill.rows.length : sm[id]
-  const current = FILL_FILTERS.find((f) => f.id === filter)!
-  return (
-    <div className="stack">
-      <div className="explain"><div>The IPRS columns of our master (from <b>ISRC 1</b> onwards: ISRC · ISWC · IPRS TUNECODE · Client status · General Status · Purpose of amendment)
-        are filled from the IPRS report, using the links from "Map with master". A song IPRS has registered more than once keeps <b>one row</b> and
-        fills block 1, 2, 3 … Columns IPRS does not report (Society No, Production ID, distribution dates, ENJW, ICE key) stay as they are.</div></div>
-      {sm.pending > 0 && (
-        <div className="alert warn-alert"><span className="grow"><b>{sm.pending} song{sm.pending === 1 ? '' : 's'} wait for your decision</b> in "Map with master" – their IPRS columns are not filled until you confirm or reject the suggested IPRS work.</span>
-          <Button size="sm" icon={<ArrowLeft size={14} />} onClick={onBack}>Back to Map with master</Button></div>
-      )}
-      <div className="master-check">
-        <div className="mc-item"><b>{sm.blocks}</b><span>IPRS blocks filled</span></div>
-        <div className="mc-item"><b>{sm.multi}</b><span>songs with 2+ IPRS registrations (one row each)</span></div>
-        <div className={`mc-item ${sm.client_amend ? 'warn' : ''}`}><b>{sm.client_amend}</b><span>Client status: Amend</span></div>
-        <div className={`mc-item ${sm.general_amend ? 'warn' : ''}`}><b>{sm.general_amend}</b><span>General Status: Amend</span></div>
-        {sm.overflow > 0 && <div className="mc-item bad"><b>{sm.overflow}</b><span>registrations with no free IPRS block</span></div>}
-      </div>
-      <div className="map-filters fill-filters" role="tablist">
-        {FILL_FILTERS.map((f) => (
-          <button key={f.id} type="button" role="tab" aria-selected={filter === f.id} className={`${f.tone} ${filter === f.id ? 'active' : ''}`} onClick={() => setFilter(f.id)}>
-            <b>{count(f.id)}</b><span>{f.label}</span>
-          </button>
-        ))}
-      </div>
-      <div className="filter-bar">
-        <p className="filter-explain grow">{current.explain}</p>
-        <a className="btn primary sm" href={exportUrl('final')}><Download size={14} />Download master with IPRS columns filled</a>
-      </div>
-      <Card flush>
-        <DataTable<FillRow> rows={rows} rowKey={(r) => r.key} search={(r) => `${r.title} ${r.blocks.map((b) => `${b.internal_no} ${b.iswc} ${b.isrc}`).join(' ')}`}
-          selectable bulk={(sel, clear) => (
-            <>
-              <Button size="sm" icon={<Ban size={14} />} disabled={!!busy} onClick={async () => { await flagSongs(sel.map((r) => r.key), true); clear() }}>Mark {sel.length} Not our work</Button>
-              <Button size="sm" variant="ghost" disabled={!!busy} onClick={async () => { await flagSongs(sel.map((r) => r.key), false); clear() }}>Remove Not our work</Button>
-            </>
-          )}
-          columns={[
-            { key: 'title', header: 'Song', sort: (r) => r.title, render: (r) => <div><strong>{r.title}</strong><span className="small muted block">{r.master_row ? `master row ${r.master_row}` : 'new row – added from IPRS'}</span></div> },
-            { key: 'blocks', header: 'IPRS blocks (block · tune code · ISWC · ISRC)', sort: (r) => r.blocks.length, render: (r) => r.blocks.length
-              ? <div>{r.blocks.map((b) => <BlockLine key={b.slot} b={b} />)}{r.overflow.length > 0 && <Badge tone="bad">{r.overflow.length} more – no free block</Badge>}</div>
-              : r.state === 'pending' ? <Badge tone="brand" icon={false}>waiting for your decision</Badge> : <span className="muted small">block 1: status only</span> },
-            { key: 'client', header: 'Client status', render: (r) => <StatusList r={r} pick={(b) => b.client_status} /> },
-            { key: 'general', header: 'General Status', render: (r) => <StatusList r={r} pick={(b) => b.general_status} /> },
-            { key: 'nw', header: '', render: (r) => r.marked_in_master ? <span className="small muted">marked in master</span> : r.state === 'pending' ? null : (
-              <Button size="sm" variant={r.not_our_work ? 'default' : 'ghost'} disabled={!!busy} onClick={(e) => { e.stopPropagation(); flagSongs([r.key], !r.not_our_work) }}>
-                {r.not_our_work ? 'Undo Not our work' : 'Not our work'}</Button>) },
-          ]}
-          expand={(r) => r.blocks.length ? (
-            <table className="kv-table">
-              <thead><tr><th>Block</th><th>IPRS TUNECODE</th><th>ISWC</th><th>ISRC</th><th>Client status</th><th>General Status</th><th>Purpose of amendment</th></tr></thead>
-              <tbody>{r.blocks.map((b) => (
-                <tr key={b.slot}><td>{b.slot}{b.already_in_master && <span className="tag">already in master</span>}</td><td><Mono>{b.internal_no}</Mono><span className="small muted block">{b.title}</span></td>
-                  <td><Mono>{b.iswc || '—'}</Mono></td><td><Mono>{b.isrc || '—'}</Mono></td>
-                  <td><Badge tone={statusTone(b.client_status)} icon={false}>{b.client_status}</Badge></td>
-                  <td><Badge tone={statusTone(b.general_status)} icon={false}>{b.general_status}</Badge></td>
-                  <td className="small">{[...b.client_reasons.map((x) => `Client: ${x}`), ...b.general_reasons].map((x) => <div key={x}>{x}</div>)}{!b.purpose && <span className="muted">—</span>}</td></tr>
-              ))}</tbody>
-            </table>
-          ) : <p className="small muted">{r.state === 'pending' ? 'Decide the suggested IPRS work in "Map with master" first.' : `No IPRS registration – block 1 gets Client status and General Status "${r.not_our_work ? 'Not our work' : 'Not registered'}".`}</p>} />
-      </Card>
-    </div>
-  )
-}
-
-function StatusList({ r, pick }: { r: FillRow; pick: (b: FillBlock) => string }) {
-  if (!r.blocks.length) {
-    if (r.state === 'pending') return <span className="muted">—</span>
-    return <Badge tone={r.not_our_work ? 'neutral' : 'bad'} icon={false}>{r.not_our_work ? 'Not our work' : 'Not registered'}</Badge>
-  }
-  return <div className="status-list">{r.blocks.map((b) => <Badge key={b.slot} tone={statusTone(pick(b))} icon={false}>{r.blocks.length > 1 ? `${b.slot}: ` : ''}{pick(b)}</Badge>)}</div>
-}
-
-/* ---------------- Step 4 · Reports ---------------- */
+/* ---------------- Last step · Reports ---------------- */
 
 const REPORT_FILES: Record<string, { name: string; label: string; hint: string; count?: 'Amend' | 'Registration' }[]> = {
   IPRS: [
     { name: 'step2', label: 'IPRS one-line', hint: 'The IPRS report as one row per work, with every writer, publisher and share' },
     { name: 'amend_lnv', label: 'Amend report (LNV format)', hint: 'Songs registered at IPRS whose registration differs from ours – in our master format, reason in "Purpose of amendment"', count: 'Amend' },
     { name: 'registration_lnv', label: 'Registration report (LNV format)', hint: 'Songs with no IPRS tune code – in our master format, ready to register', count: 'Registration' },
-    { name: 'final', label: 'Master with IPRS columns filled (LNV)', hint: 'Our full master: IPRS blocks (ISRC, ISWC, tune code, Client / General status, Purpose of amendment) filled, missing songs added in green, and the values you chose in "Map with master"' },
+    { name: 'final', label: 'Master with IPRS columns filled (LNV)', hint: 'Our full master: IPRS blocks (ISRC, ISWC, tune code, Client / General status, Purpose of amendment) filled, missing songs added in green, and the values you chose in "Match & review"' },
   ],
   PRS: [
     { name: 'amend_lnv', label: 'Amend report (LNV format)', hint: 'Songs registered at PRS whose registration differs from ours – reason in "Purpose of amendment"', count: 'Amend' },

@@ -1,5 +1,50 @@
 # MRM changelog
 
+## 0.16.2 – 2026-10-24 (patch)
+- Removed unused files and old code; all spreadsheet types (xlsx, csv, ods …) kept out of git
+
+## 0.16.1 – 2026-10-24 (patch)
+- Updated master never changes a filled cell: any IPRS block with data stays untouched, new data and statuses go into the next empty block
+
+## 0.16.0 – 2026-10-23 (minor)
+- Earlier amendments in the master are kept: nothing new = block untouched; new problems or a changed status go into the next free IPRS block with only the new reasons
+
+## 0.15.2 – 2026-10-23 (patch)
+- Fix false amendments: a name initial no longer matches two words (S Rafeeq Ahmed ≠ Sushin Shyamprakash); a full word must agree
+
+## 0.15.1 – 2026-10-23 (patch)
+- Role code now beats the column in our master (no false 'role differs' amend; flagged as Fix our master); Excel view shows What to look at, Client tags and the master column of each writer
+
+## 0.15.0 – 2026-10-23 (minor)
+- Amend tabs explain each reason (impact, what to ask IPRS, proof, priority) and show the Purpose of amendment; Use IPRS / Keep ours on every differing row, choice replaces the other value; Excel view restyled
+
+## 0.14.0 – 2026-10-23 (minor)
+- IPRS steps 2 and 3 merged into one 'Match & review' step: outcome bar, To decide, new Client amend and General amend tabs grouped by reason, Not registered, New from IPRS
+
+## 0.13.0 – 2026-10-23 (minor)
+- Suggestion review: tick every master row that is the same song (versions sharing the IPRS code); all ticked rows get the IPRS work
+
+## 0.12.0 – 2026-10-23 (minor)
+- New suggestion review: IPRS vs master side by side, one-key decisions saved in batches, multi-select, Accept strong; LNV Alternate Work used for matching and IPRS title can be saved into it
+
+## 0.11.0 – 2026-10-23 (minor)
+- IPRS upload about 5x faster; Add client step 3 is Societies again – one upload lane per society (IPRS, PRS) with its own check and mapping button
+
+## 0.10.0 – 2026-10-23 (minor)
+- Add client now goes client → master → IPRS report → straight to mapping, resumes after a reload; simpler IPRS file-check step and step bar
+
+## 0.9.7 – 2026-10-23 (patch)
+- Fix: Continue on the Add client master step did nothing
+
+## 0.9.6 – 2026-10-23 (patch)
+- Add client page redesigned: step rail, live preview, icon fields, due-date quick picks and duplicate-client warning
+
+## 0.9.5 – 2026-10-23 (patch)
+- Sign-in page redesigned: split layout with brand panel, icon fields and Caps Lock warning
+
+## 0.9.4 – 2026-10-23 (patch)
+- Client tracker redesigned: total cards removed, richer client table with progress ring, society cards, owner chips and due-date pills
+
 ## 0.9.3 – 2026-10-22 (patch)
 - Client pages load about 10x faster and show a loading screen until the data arrives
 

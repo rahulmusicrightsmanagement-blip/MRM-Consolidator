@@ -5,7 +5,7 @@ a fuzzy-only link always waits for a reviewer.
 """
 from .iprs import PUBLISHER_ROLES
 from .master import codes_for
-from .normalize import norm_title, same_party, title_similarity
+from .normalize import alternate_titles, norm_title, same_party, title_similarity
 
 AUTO_TITLE_SCORE = 100      # exact title (after normalisation) + shared contributor links automatically
 SUGGEST_TITLE_SCORE = 85    # anything from here up is offered to the reviewer
@@ -15,14 +15,24 @@ CA_ROLES = {"CA", "C|A", "AC", "A|C"}
 GROUPS = [("authors", "Authors"), ("composers", "Composers"), ("publishers", "Publishers")]
 
 
+def role_group(person, column):
+    """The writer group a master slot really holds. The role code wins over the column it sits in: a name in an
+    "Author" column with role code C is a composer (MASTER_ROLE_COLUMN flags that row). CA counts for both."""
+    role = person["role"]
+    if role in CA_ROLES:
+        return {"authors", "composers"}
+    if role == "A":
+        return {"authors"}
+    if role == "C":
+        return {"composers"}
+    return {column}
+
+
 def master_people(song, group):
-    """Master contributors for a role group; CA (composer+author) counts for both."""
-    people = list(song.get(group, []))
-    if group == "authors":
-        people += [p for p in song.get("composers", []) if p["role"] in CA_ROLES]
-    if group == "composers":
-        people += [p for p in song.get("authors", []) if p["role"] in CA_ROLES]
-    return people
+    """Master contributors for a role group (authors / composers by role code, publishers by column)."""
+    if group == "publishers":
+        return list(song.get("publishers", []))
+    return [p for col in ("authors", "composers") for p in song.get(col, []) if group in role_group(p, col)]
 
 
 def all_master_people(song):
@@ -111,6 +121,23 @@ WEIGHTS = {"tunecode": 4.0, "iswc": 3.0, "iswc_conflict": -3.0, "isrc": 2.0, "ti
            "duration": 0.5}
 
 
+def title_match(work, song):
+    """Best title similarity, also counting the master's "Alternate Work" names and the IPRS alternate title.
+    Returns (score, the alternate name that gave it – "" when the main titles did)."""
+    best, via = title_similarity(work["title"], song["title"]), ""
+    if best == 100:
+        return best, via
+    for alt in alternate_titles(song.get("alt_title") or ""):
+        s = title_similarity(work["title"], alt)
+        if s > best:
+            best, via = s, alt
+    for alt in alternate_titles(work.get("alt_title") or ""):
+        s = title_similarity(alt, song["title"])
+        if s > best:
+            best, via = s, alt
+    return best, via
+
+
 def score_pair(work, song):
     """0–10 score for 'this IPRS work is this master song', with the points behind it."""
     evidence = []
@@ -129,8 +156,11 @@ def score_pair(work, song):
             add("ISWC", 0, "not in master – not comparable")
     if work["isrc_valid"] and work["isrc_valid"] in song["isrcs"]:
         add("ISRC", WEIGHTS["isrc"], f"{work['isrc_valid']} on both")
-    t = title_similarity(work["title"], song["title"])
-    if t == 100:
+    t, via = title_match(work, song)
+    if via and t >= 85:
+        add("Title", WEIGHTS["title_exact"] if t == 100 else WEIGHTS["title_core"] if t >= 92 else WEIGHTS["title_close"],
+            f"same as the alternate title “{via}”" if t >= 92 else f"{t}% similar to the alternate title “{via}”")
+    elif t == 100:
         add("Title", WEIGHTS["title_exact"], "same title")
     elif t >= 92:
         add("Title", WEIGHTS["title_core"], "same title without version text")
@@ -168,11 +198,11 @@ def _candidates(work, songs):
             methods.append("ISWC")
         if work["isrc_valid"] and work["isrc_valid"] in song["isrcs"]:
             methods.append("ISRC")
-        score = title_similarity(work["title"], song["title"])
+        score, via = title_match(work, song)
         if not methods and score < SUGGEST_TITLE_SCORE:
             continue
         found[song["row"]] = {"row": song["row"], "title": song["title"], "methods": methods,
-                              "title_score": score, "shared_contributors": shared_contributors(work, song),
+                              "title_score": score, "alt_title": via, "shared_contributors": shared_contributors(work, song),
                               "match": score_pair(work, song)}
     return sorted(found.values(), key=lambda c: (len(c["methods"]), c["match"]["score"], c["title_score"]), reverse=True)
 
@@ -212,6 +242,9 @@ def map_to_master(iprs, master, decisions):
         other_rows = {c["row"] for c in cands if c["methods"]} - id_rows
         if decision and decision.get("master_row") in by_row:
             link.update(master_row=decision["master_row"], state="linked", method="Confirmed by reviewer")
+            also = [r for r in decision.get("also_rows") or [] if r in by_row and r != decision["master_row"]]
+            if also:
+                link["also_rows"] = also
         elif len(id_rows) == 1:
             best = next(c for c in cands if c["row"] in id_rows)
             link.update(master_row=best["row"], state="linked", method=" + ".join(best["methods"]))
@@ -244,7 +277,7 @@ def map_to_master(iprs, master, decisions):
             link["needs_code_fill"] = work["internal_no"] not in codes_for(by_row[link["master_row"]], "IPRS")
         links.append(link)
 
-    linked_rows = {l["master_row"] for l in links if l["master_row"] is not None}
+    linked_rows = {l["master_row"] for l in links if l["master_row"] is not None} | {r for l in links for r in l.get("also_rows", [])}
     # A song suggested for a work that waits for the reviewer is not "only in master" yet.
     waiting_rows = {l["candidates"][0]["row"] for l in links if l["state"] == "review" and l["candidates"]}
     master_only = [{"row": s["row"], "title": s["title"], "iprs_codes": codes_for(s, "IPRS")}
@@ -270,13 +303,16 @@ def fill_gaps(iprs, master, mapping):
     links_by_row = {}
     for link in mapping["links"]:
         if link["master_row"] is not None:
-            links_by_row.setdefault(link["master_row"], []).append(link)
+            # One IPRS work can be several master rows (versions the reviewer marked as the same song).
+            for row in [link["master_row"], *link.get("also_rows", [])]:
+                links_by_row.setdefault(row, []).append(link)
 
     rows = []
     for song in master["songs"]:
         linked = links_by_row.get(song["row"], [])
+        codes = codes_for(song, "IPRS")
         fills = [{"field": "IPRS TUNECODE", "value": l["internal_no"], "reason": f"Linked by {l['method']}"}
-                 for l in linked if l.get("needs_code_fill")]
+                 for l in linked if l["internal_no"] not in codes]
         # Other fields (ISWC, writers, …) go into the master only when the reviewer picks them (MasterEdit).
         rows.append({"key": f"M{song['row']}", "origin": "master", "master_row": song["row"], "title": song["title"],
                      "iprs_works": [l["internal_no"] for l in linked], "fills": fills})

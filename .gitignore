@@ -25,11 +25,15 @@ backend/cache/
 !.env.example
 client_secret*.json
 
-# Excel files (client spreadsheets / samples stay on this computer only)
+# Spreadsheets – client data and test samples stay on this computer only
 *.xlsx
 *.xlsm
 *.xls
 *.xlsb
+*.xltx
+*.ods
+*.csv
+*.tsv
 
 # Logs
 *.log

@@ -40,6 +40,9 @@ const send = (body: unknown, method = 'POST'): RequestInit => ({
   body: JSON.stringify(body),
 })
 
+export type DecisionItem = { internal_no: string; master_row: number; also_rows?: number[] } | { internal_no: string; action: 'new'; rejected_rows: number[] }
+export type MasterEditIn = { master_row: number; field: string; internal_no: string; choice: EditChoice | null }
+
 export interface TaskPatch { state?: TaskState; owner?: string; due_date?: string | null; note?: string }
 
 export const api = {
@@ -91,6 +94,8 @@ export const api = {
     request<RunPayload>(`/api/runs/${id}/master-edits/`, send({ edits })),
   confirmAll: (id: number, items: { internal_no: string; master_row: number }[]) =>
     request<RunPayload>(`/api/runs/${id}/decisions/`, send({ items })),
+  /** Many review decisions in one request: links, and "new song" (every suggestion rejected). */
+  decideMany: (id: number, items: DecisionItem[]) => request<RunPayload>(`/api/runs/${id}/decisions/`, send({ items })),
   flagSongs: (id: number, keys: string[], on: boolean) => request<RunPayload>(`/api/runs/${id}/song-flags/`, send({ keys, on })),
   verify: (id: number) => request<VerifyResult>(`/api/runs/${id}/verify/`),
   pair: (id: number, work?: string | null, row?: number | null) =>

@@ -5,7 +5,7 @@ import { api } from '../../lib/api'
 import { useRun } from '../../lib/run'
 import type { CheckStatus, PreviewCell, PreviewColumn, PreviewRow, VerifyCheck, VerifyResult } from '../../types'
 
-const STEP_NAMES: Record<number, string> = { 1: 'Step 1 · Upload file & check headers', 2: 'Step 2 · Map with master', 3: 'Step 3 · Fill IPRS columns (read back from the generated master)', 4: 'Step 4 · Reports' }
+const STEP_NAMES: Record<number, string> = { 1: 'Step 1 · Upload file & check headers', 2: 'Step 2 · Match & review – links to our master', 3: 'Step 2 · Match & review – IPRS columns (read back from the generated master)', 4: 'Step 3 · Reports' }
 const ICON: Record<CheckStatus, React.ReactNode> = {
   pass: <CheckCircle2 size={17} />, warn: <AlertTriangle size={17} />, fail: <XCircle size={17} />, info: <Info size={17} />,
 }

@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, ApiError } from './api'
+import type { DecisionItem, MasterEditIn } from './api'
 import { buildModel } from './model'
 import { saveWorkList } from './worklist'
 import type { RunModel } from './model'
@@ -20,6 +21,8 @@ interface RunContextValue {
   decide: (internalNo: string, action: 'link' | 'reject' | 'clear', row?: number | null) => Promise<void>
   /** Choose which value our master keeps for fields that differ (null clears the choice). */
   editMaster: (edits: { master_row: number; field: string; internal_no: string; choice: EditChoice | null }[]) => Promise<void>
+  /** Save a batch of review decisions (and master edits such as the IPRS title as alternate title) in one go. */
+  saveDecisions: (items: DecisionItem[], edits?: MasterEditIn[]) => Promise<boolean>
   /** Link many IPRS works at once to the master song suggested for each. */
   confirmAll: (items: { internal_no: string; master_row: number }[]) => Promise<void>
   /** Mark songs "Not our work" (on) or clear the mark. */
@@ -93,6 +96,24 @@ export function RunProvider({ runId, children, onChange }: { runId: number; chil
     }
   }, [runId, toast])
 
+  const saveDecisions = useCallback(async (items: DecisionItem[], edits: MasterEditIn[] = []) => {
+    if (!items.length && !edits.length) return true
+    setBusy('decision')
+    try {
+      let next = items.length ? await api.decideMany(runId, items) : null
+      if (edits.length) next = await api.masterEdits(runId, edits)
+      if (next) setPayload(next)
+      onChange?.()
+      toast(`${items.length} decision${items.length === 1 ? '' : 's'} saved`, 'good')
+      return true
+    } catch (e) {
+      toast((e as Error).message, 'bad')
+      return false
+    } finally {
+      setBusy(null)
+    }
+  }, [runId, toast, onChange])
+
   const confirmAll = useCallback(async (items: { internal_no: string; master_row: number }[]) => {
     setBusy('decision')
     try {
@@ -134,7 +155,7 @@ export function RunProvider({ runId, children, onChange }: { runId: number; chil
   }, [payload, navigate])
 
   const value: RunContextValue = {
-    runId, payload, model, loading, error, busy, rejected, upload, decide, editMaster, confirmAll, flagSongs, updateRun, openSong,
+    runId, payload, model, loading, error, busy, rejected, upload, decide, editMaster, saveDecisions, confirmAll, flagSongs, updateRun, openSong,
     exportUrl: (name) => api.exportUrl(runId, name),
   }
   return <RunContext.Provider value={value}>{children}</RunContext.Provider>

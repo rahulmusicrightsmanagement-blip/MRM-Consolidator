@@ -148,7 +148,7 @@ export interface FieldCompare {
   note: string
 }
 
-export interface Candidate { row: number; title: string; methods: string[]; title_score: number; shared_contributors: number; match?: MatchEvidence }
+export interface Candidate { row: number; title: string; methods: string[]; title_score: number; shared_contributors: number; alt_title?: string; match?: MatchEvidence }
 
 export interface Link {
   internal_no: string
@@ -162,6 +162,8 @@ export interface Link {
   needs_code_fill?: boolean
   comparison?: { fields: FieldCompare[]; differences: number; status: 'matched' | 'differences' }
   match?: MatchEvidence
+  /** Further master rows the reviewer marked as the same song. */
+  also_rows?: number[]
 }
 
 export interface MappingResult {
@@ -240,6 +242,10 @@ export interface FillBlock {
   general_reasons: string[]
   purpose: string
   already_in_master: boolean
+  /** first: written into this block now · kept: an earlier amendment round, left as it is · new: next block after it */
+  round: 'first' | 'kept' | 'new'
+  earlier: number[]
+  date?: string
 }
 export type FillState = 'uploaded' | 'amend' | 'not_registered' | 'not_our_work' | 'pending'
 export interface FillRow {
@@ -252,11 +258,13 @@ export interface FillRow {
   overflow: string[]
   not_our_work: boolean
   marked_in_master: boolean
+  /** Where a "Not registered" / "Not our work" status is written: the first empty IPRS block; null = already marked. */
+  status_slot: number | null
 }
 export interface FillResult {
   rows: FillRow[]
   slots: number
-  summary: Record<FillState, number> & { blocks: number; multi: number; overflow: number; client_amend: number; general_amend: number }
+  summary: Record<FillState, number> & { blocks: number; multi: number; overflow: number; client_amend: number; general_amend: number; new_rounds: number; kept: number }
 }
 
 export type CheckStatus = 'pass' | 'warn' | 'fail' | 'info'

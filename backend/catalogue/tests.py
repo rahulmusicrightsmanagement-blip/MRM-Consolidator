@@ -11,7 +11,7 @@ from unittest import skipUnless
 from django.test import TestCase, override_settings
 
 from .engine.iprs import IPRSFormatError, parse_iprs
-from .engine.normalize import norm_ipi, norm_isrc, norm_iswc, same_party
+from .engine.normalize import alternate_titles, norm_ipi, norm_isrc, norm_iswc, same_party
 from .engine.pipeline import run_pipeline
 from .models import Work
 
@@ -30,11 +30,25 @@ class NormalizeTests(TestCase):
         self.assertEqual(norm_ipi("1076531558"), "01076531558")
         self.assertEqual(norm_iswc("In-H10-24-07886"), "")
 
+    def test_alternate_titles(self):
+        self.assertEqual(alternate_titles("Navarasam By Vipin Lal; Nava"), ("Navarasam By Vipin Lal", "Navarasam", "Nava"))
+        self.assertEqual(alternate_titles(""), ())
+
+    def test_role_code_beats_column(self):
+        from .engine.mapping import master_people
+        song = {"authors": [{"name": "S Rafeeq Ahmed", "role": "C"}], "composers": [{"name": "Vidya Sagar", "role": "C"}],
+                "publishers": []}
+        self.assertEqual([p["name"] for p in master_people(song, "composers")], ["S Rafeeq Ahmed", "Vidya Sagar"])
+        self.assertEqual(master_people(song, "authors"), [])
+
     def test_names(self):
         self.assertTrue(same_party("SURESH, DHANYA", "Dhanya Suresh Menon"))
         self.assertTrue(same_party("PEETHAMBARAN, PARIYADATH", "PARIYADATH, PEETHAMBARAN"))
         self.assertTrue(same_party("P, RAJAT", "Rajat Prakash"))
         self.assertFalse(same_party("NELSON, ASHOK BETTY", "ANISH, T N"))
+        # One initial cannot stand for two words, and at least one full word must agree.
+        self.assertFalse(same_party("Sushin Shyamprakash", "S RAFEEQ AHMED"))
+        self.assertTrue(same_party("AHMED, S RAFEEQ", "S Rafeeq Ahmed"))
 
 
 @needs_samples
@@ -220,6 +234,88 @@ class ApiTests(TestCase):
         res = self.client.post(f"/api/runs/{run_id}/master-edits/", {"edits": [{**e, "choice": None} for e in edits]}, content_type="application/json")
         self.assertEqual(res.json()["master_edits"], [])
 
+    def test_batch_decisions_and_alternate_title(self):
+        cid = self._client(("IPRS",))
+        run_id, res = self._society_report(cid, "IPRS", IPRS)
+        withc = [l for l in res["result"]["mapping"]["links"] if l["candidates"]]
+        res_works = res["result"]["iprs"]["works"]
+        new, link = withc[0], withc[1]
+        items = [{"internal_no": new["internal_no"], "action": "new", "rejected_rows": [c["row"] for c in new["candidates"]]},
+                 {"internal_no": link["internal_no"], "master_row": link["candidates"][0]["row"]}]
+        res = self.client.post(f"/api/runs/{run_id}/decisions/", {"items": items}, content_type="application/json").json()
+        by_no = {l["internal_no"]: l for l in res["result"]["mapping"]["links"]}
+        self.assertEqual(by_no[new["internal_no"]]["state"], "unmatched")       # added to the final report as a new song
+        self.assertEqual(by_no[link["internal_no"]]["method"], "Confirmed by reviewer")
+        # The IPRS title goes into the master's "Alternate Work" column of the linked song.
+        row = link["candidates"][0]["row"]
+        edit = {"master_row": row, "field": "Alternate title", "internal_no": link["internal_no"], "choice": "iprs"}
+        self.client.post(f"/api/runs/{run_id}/master-edits/", {"edits": [edit]}, content_type="application/json")
+        ws = openpyxl.load_workbook(io.BytesIO(self.client.get(f"/api/runs/{run_id}/export/final/").content)).worksheets[0]
+        col = next(i + 1 for i, c in enumerate(ws[1]) if isinstance(c.value, str) and c.value.strip().upper() == "ALTERNATE WORK")
+        self.assertIn(link["title"], ws.cell(row, col).value)
+        v = self.client.get(f"/api/runs/{run_id}/verify/").json()
+        self.assertFalse([c for c in v["checks"] if c["id"] == "lineage" and c["status"] == "fail"], "alternate title is explained")
+        # Film / album and singers can be taken from IPRS too; the verifier explains those cells.
+        work = next(w for w in res_works if w["internal_no"] == link["internal_no"])
+        edits = [{"master_row": row, "field": f, "internal_no": link["internal_no"], "choice": "iprs"} for f in ("Film / album", "Singers")]
+        self.client.post(f"/api/runs/{run_id}/master-edits/", {"edits": edits}, content_type="application/json")
+        ws = openpyxl.load_workbook(io.BytesIO(self.client.get(f"/api/runs/{run_id}/export/final/").content)).worksheets[0]
+        movie = next(i + 1 for i, c in enumerate(ws[1]) if isinstance(c.value, str) and c.value.strip().upper().startswith("MOVIE NAME"))
+        if work["production"]:
+            self.assertEqual(ws.cell(row, movie).value, work["production"])
+        v = self.client.get(f"/api/runs/{run_id}/verify/").json()
+        self.assertFalse([c for c in v["checks"] if c["id"] == "lineage" and c["status"] == "fail"], "film / singers are explained")
+        # One IPRS work can be several master rows (a version of the same song): every ticked row gets the work.
+        other = next(s["row"] for s in res["result"]["master"]["songs"] if s["row"] != row)
+        items = [{"internal_no": link["internal_no"], "master_row": row, "also_rows": [other]}]
+        res = self.client.post(f"/api/runs/{run_id}/decisions/", {"items": items}, content_type="application/json").json()
+        finals = {f["master_row"]: f for f in res["result"]["final"]["rows"] if f["master_row"]}
+        self.assertIn(link["internal_no"], finals[row]["iprs_works"])
+        self.assertIn(link["internal_no"], finals[other]["iprs_works"])
+        self.assertNotIn(other, [m["row"] for m in res["result"]["mapping"]["master_only"]])
+
+    def test_updated_master_never_changes_a_filled_cell(self):
+        """Every non-empty cell of the uploaded master reads the same in the updated master – new data only
+        goes into empty blocks (e.g. the 'Not our work' rows keep their block 1 and get nothing new)."""
+        cid = self._client(("IPRS",))
+        run_id, res = self._society_report(cid, "IPRS", IPRS)
+        before = openpyxl.load_workbook(MASTER).worksheets[0]
+        after = openpyxl.load_workbook(io.BytesIO(self.client.get(f"/api/runs/{run_id}/export/final/").content)).worksheets[0]
+        text = lambda v: "" if v is None else str(v).strip()
+        changed = [(r, c) for r in range(1, before.max_row + 1) for c in range(1, before.max_column + 1)
+                   if text(before.cell(r, c).value) and text(after.cell(r, c).value) != text(before.cell(r, c).value)]
+        self.assertEqual(changed, [])
+        marked = [f for f in res["result"]["fill"]["rows"] if f["marked_in_master"]]
+        self.assertTrue(marked)
+        self.assertTrue(all(b["round"] == "kept" for f in marked for b in f["blocks"]))
+
+    def test_earlier_amendment_is_kept_and_new_findings_go_to_the_next_block(self):
+        """A block that already records an amendment stays as it is; something new opens the next free block."""
+        wb = openpyxl.load_workbook(MASTER)
+        ws = wb.worksheets[0]
+        head = [c.value.strip().upper() if isinstance(c.value, str) else "" for c in ws[1]]
+        code1 = head.index("IPRS TUNECODE 1") + 1
+        status = next(i for i in range(code1, len(head)) if head[i] == "CLIENT STATUS") + 1
+        purpose = next(i for i in range(code1, len(head)) if head[i] == "PURPOSE OF AMENDMENT") + 1
+        code2 = head.index("IPRS TUNECODE 2") + 1
+        row = next(r for r in range(2, ws.max_row + 1) if ws.cell(r, code1).value and not ws.cell(r, code2).value)
+        code = str(ws.cell(row, code1).value).split(".")[0]
+        ws.cell(row, status).value, ws.cell(row, status + 1).value = "Uploaded", "Amend"
+        ws.cell(row, purpose).value = "An amendment sent last year"
+        with tempfile.NamedTemporaryFile(suffix=".xlsx") as tmp:
+            wb.save(tmp.name)
+            cid = self.client.post("/api/clients/", {"name": "Dhanya Suresh", "ipi": "1076531558"}, content_type="application/json").json()["id"]
+            self.assertEqual(self._post_file(f"/api/clients/{cid}/master/", tmp.name).status_code, 200)
+        self.client.post(f"/api/clients/{cid}/societies/", {"societies": ["IPRS"]}, content_type="application/json")
+        run_id, res = self._society_report(cid, "IPRS", IPRS)
+        blocks = next(f for f in res["result"]["fill"]["rows"] if f["master_row"] == row)["blocks"]
+        self.assertEqual([(b["slot"], b["round"]) for b in blocks if b["internal_no"] == code], [(1, "kept"), (2, "new")])
+        out = openpyxl.load_workbook(io.BytesIO(self.client.get(f"/api/runs/{run_id}/export/final/").content)).worksheets[0]
+        self.assertEqual(out.cell(row, purpose).value, "An amendment sent last year")      # the earlier round, untouched
+        self.assertEqual(str(out.cell(row, code2).value), code)                             # the new round, next block
+        v = self.client.get(f"/api/runs/{run_id}/verify/").json()
+        self.assertFalse([c for c in v["checks"] if c["id"] in ("once", "status") and c["status"] == "fail"])
+
     def test_fill_iprs_columns_into_an_empty_master(self):
         """A master with every society column empty gets its IPRS blocks rebuilt from the IPRS report –
         the same tune codes in the same rows as the hand-filled master."""
@@ -238,7 +334,7 @@ class ApiTests(TestCase):
             self.assertEqual(self._post_file(f"/api/clients/{cid}/master/", tmp.name).status_code, 200)
         self.client.post(f"/api/clients/{cid}/societies/", {"societies": ["IPRS"]}, content_type="application/json")
         run_id, res = self._society_report(cid, "IPRS", IPRS)
-        self.assertEqual(res["run"]["steps"][2], "Fill IPRS columns")
+        self.assertEqual(res["run"]["steps"], ["Upload file & check headers", "Match & review", "Reports"])
         links = res["result"]["mapping"]["links"]
         self.assertEqual(sum(1 for l in links if l["method"] == "Title + writers"), 37)
         # "Confirm all": every waiting work takes its top suggestion.

@@ -1,18 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
-  Check, CheckCircle2, Download, ExternalLink, Info, PartyPopper, Plus, RotateCcw, X,
+  Check, CheckCircle2, Download, ExternalLink, Info, Plus, RotateCcw, X,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { StatusBar } from '../../components/StatusBar'
 import {
-  Badge, Button, Card, DataTable, Empty, FileDrop, Kbd, Mono, StatusBadge, Tabs,
+  Badge, Button, Card, DataTable, Mono, StatusBadge, Tabs,
 } from '../../components/ui'
 import { useRun } from '../../lib/run'
 import { songForWork } from '../../lib/model'
 import { PairPanel, editable } from './PairPanel'
 import type { Song } from '../../lib/model'
-import type { Check as CheckT, Contributor, EditChoice, IprsWork, Link as MapLink, Status } from '../../types'
+import type { Check as CheckT, Contributor, IprsWork, Link as MapLink, Status } from '../../types'
 
 /* =================================================================== */
 /* Step 5 – tune code check (read-only; follow-up lives in Tasks)       */
@@ -66,114 +66,6 @@ export function TunecodeTab() {
           ]} />
       </Card>
     </div>
-  )
-}
-
-/* =================================================================== */
-/* Review                                                              */
-/* =================================================================== */
-
-const KIND_LABEL = { choose: 'Choose a master song', confirm_title: 'Matched by title only', conflict: 'Conflicting identifiers' } as const
-
-export function ReviewTab() {
-  const { model, decide, busy, openSong } = useRun()
-  const items = model?.review ?? []
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const index = Math.max(0, items.findIndex((i) => i.id === selectedId))
-  const item = items[index] ?? null
-
-  useEffect(() => {
-    if (!item) return
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest('input, select, textarea, .drawer') || busy) return
-      if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); setSelectedId(items[Math.min(index + 1, items.length - 1)].id) }
-      if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); setSelectedId(items[Math.max(index - 1, 0)].id) }
-      if (e.key === 'a' && item.link.master_row) decide(item.id, 'link', item.link.master_row)
-      if (e.key === 'r' && item.link.master_row) decide(item.id, 'reject', item.link.master_row)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [item, items, index, busy, decide])
-
-  if (!items.length) return <Empty icon={<PartyPopper size={22} />} title="Nothing to review">Every IPRS work is linked by an identifier or has been confirmed by you.</Empty>
-  return (
-    <div className="review">
-      <ul className="review-list" role="listbox" aria-label="Review items">
-        {items.map((i) => (
-          <li key={i.id} role="option" aria-selected={i.id === item?.id} className={i.id === item?.id ? 'active' : ''} onClick={() => setSelectedId(i.id)}>
-            <span className={`kind-dot ${i.kind}`} />
-            <div className="grow"><strong>{i.title}</strong><span className="small muted block">{KIND_LABEL[i.kind]}</span></div>
-          </li>
-        ))}
-      </ul>
-      {item && (
-        <Card className="review-panel" title={item.title}
-          description={<><Badge tone="info">{KIND_LABEL[item.kind]}</Badge> <span className="small">{item.why}</span></>}
-          actions={(() => { const s = model ? songForWork(model, item.id) : null; return s ? <Button size="sm" variant="ghost" onClick={() => openSong(s.key)}>Open song<ExternalLink size={13} /></Button> : null })()}>
-          {item.link.comparison && <CompareTable link={item.link} />}
-          {item.link.master_row ? (
-            <div className="review-actions">
-              <Button variant="primary" icon={<Check size={15} />} disabled={!!busy} onClick={() => decide(item.id, 'link', item.link.master_row)}>Same song<Kbd>A</Kbd></Button>
-              <Button variant="danger" icon={<X size={15} />} disabled={!!busy} onClick={() => decide(item.id, 'reject', item.link.master_row)}>Different song<Kbd>R</Kbd></Button>
-              <span className="small muted grow right">Next / previous <Kbd>J</Kbd> <Kbd>K</Kbd></span>
-            </div>
-          ) : (
-            <Candidates link={item.link} />
-          )}
-          <p className="small muted">"Different song" adds the IPRS work to the final report as a new song.</p>
-        </Card>
-      )}
-    </div>
-  )
-}
-
-
-function CompareTable({ link }: { link: MapLink }) {
-  const { payload, editMaster, busy } = useRun()
-  const row = link.state === 'linked' ? link.master_row : null
-  const choiceOf = (field: string) => payload!.master_edits.find((e) => e.master_row === row && e.field === field)?.choice
-  const pick = (field: string, choice: EditChoice) =>
-    editMaster([{ master_row: row!, field, internal_no: link.internal_no, choice: choiceOf(field) === choice ? null : choice }])
-  return (
-    <table className="kv-table compare">
-      <thead><tr><th>Field</th><th>IPRS {link.internal_no}</th><th>Master{link.master_row ? ` row ${link.master_row}` : ''}</th><th />{row && <th>Our master keeps</th>}</tr></thead>
-      <tbody>
-        {link.comparison!.fields.map((f) => {
-          const c = row && editable(f) ? choiceOf(f.field) : undefined
-          return (
-            <tr key={f.field} className={`${f.result} ${c ? 'decided' : ''}`}>
-              <th>{f.field}</th>
-              <td className={c === 'master' ? 'dropped' : ''}>{f.iprs || <span className="muted">—</span>}</td>
-              {c === 'iprs' ? (
-                // Show our master as it will be: the IPRS value in place of the old one.
-                <td className="replaced"><span className="new-val">{f.iprs}</span>
-                  <span className="old-val">{f.master ? <>was <s>{f.master}</s></> : 'was empty'}</span></td>
-              ) : <td className={c === 'master' ? 'kept' : ''}>{f.master || <span className="muted">—</span>}</td>}
-              <td>{c === 'iprs' ? <Badge tone="good">{f.result === 'missing_master' ? 'Added to master' : 'Replaced in master'}</Badge>
-                : c === 'master' ? <Badge tone="neutral">Kept our value</Badge>
-                : <><StatusBadge value={f.result} />{f.note && <div className="small muted">{f.note}</div>}</>}</td>
-              {row && (
-                <td className="keep-cell">
-                  {editable(f) && (f.result === 'missing_master' ? (
-                    <div className="keep">
-                      <button type="button" className={c === 'iprs' ? 'on' : ''} disabled={!!busy} onClick={() => pick(f.field, 'iprs')}
-                        title={c === 'iprs' ? 'Click again to undo' : 'Copy the IPRS value into our master'}>
-                        {c === 'iprs' ? <><Check size={13} />Added to master</> : <><Plus size={13} />Add to master</>}
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="keep" role="group" aria-label={`Which ${f.field} our master keeps`}>
-                      <button type="button" className={c === 'iprs' ? 'on' : ''} disabled={!!busy} onClick={() => pick(f.field, 'iprs')}>{c === 'iprs' && <Check size={13} />}Keep IPRS</button>
-                      <button type="button" className={c === 'master' ? 'on' : ''} disabled={!!busy} onClick={() => pick(f.field, 'master')}>{c === 'master' && <Check size={13} />}Keep master</button>
-                    </div>
-                  ))}
-                </td>
-              )}
-            </tr>
-          )
-        })}
-      </tbody>
-    </table>
   )
 }
 
@@ -307,7 +199,7 @@ export function MapTab() {
                 if (!l.master_row) return <Badge tone="bad">not in master</Badge>
                 const renamed = l.state === 'linked' && payload!.master_edits.some((e) => e.master_row === l.master_row && e.field === 'Title' && e.choice === 'iprs')
                 return renamed ? <div>{l.title}<span className="small muted block">row {l.master_row} · was <s>{l.master_title}</s></span></div>
-                  : <div>{l.master_title}<span className="small muted block">row {l.master_row}</span></div>
+                  : <div>{l.master_title}<span className="small muted block">row {l.master_row}{l.also_rows?.length ? ` + also row${l.also_rows.length === 1 ? '' : 's'} ${l.also_rows.join(', ')}` : ''}</span></div>
               } },
               { key: 'type', header: 'Result', sort: (l) => diffType(l) ?? l.comparison?.status ?? l.state, render: (l) => {
                 const d = DIFF_TYPES.find((x) => x.id === diffType(l))
@@ -363,7 +255,7 @@ const ISSUE_LABELS: Record<string, string> = {
   NO_IPI: 'No IPI number', NON_MEMBER: 'Non-member (NS)', DUPLICATE_ISWC: 'Same ISWC on 2+ works', DUPLICATE_TITLE: 'Same title on 2+ works',
   NAME_WRAPPED: 'Name split over rows', MULTIPLE_SETS: 'Several share sets', CLIENT_NOT_ON_WORK: 'Client not on work',
   FOOTER_MISMATCH: 'Work count mismatch', MISSING_TITLE: 'Missing title', NO_CONTRIBUTORS: 'No contributors',
-  NO_CREDITS: 'No credits in master', DUPLICATE_CODE: 'Tune code used twice', ID_IN_WRONG_COLUMN: 'ID in wrong column',
+  NO_CREDITS: 'No credits in master', MASTER_ROLE_COLUMN: 'Role code in the wrong column', DUPLICATE_CODE: 'Tune code used twice', ID_IN_WRONG_COLUMN: 'ID in wrong column',
 }
 const issueLabel = (c: string) => ISSUE_LABELS[c] ?? c
 const roleName = (c: string) => ({ A: 'Author', C: 'Composer', CA: 'Composer/Author', E: 'Publisher' } as Record<string, string>)[c] ?? c
@@ -520,36 +412,5 @@ function CheckList({ checks }: { checks: CheckT[] }) {
         </li>
       ))}
     </ul>
-  )
-}
-
-/* =================================================================== */
-/* Files                                                               */
-/* =================================================================== */
-
-export function FilesTab() {
-  const { payload, upload, busy, rejected } = useRun()
-  const run = payload!.run
-  const r = payload!.result
-  const items: { kind: 'iprs' | 'master' | 'prs'; title: string; accept: string; summary: string | null }[] = [
-    { kind: 'iprs', title: 'IPRS work listing', accept: '.xlsx,.xlsm', summary: r.iprs ? `${r.iprs.client.name} · ${r.iprs.stats.works} works` : null },
-    { kind: 'master', title: 'Our master (LNV report)', accept: '.xlsx,.xlsm', summary: r.master ? `${r.master.stats.songs} songs · ${r.master.stats.columns} columns` : null },
-    { kind: 'prs', title: 'PRS works export', accept: '.csv,.xlsx', summary: r.prs ? `${r.prs.stats.works} works` : null },
-  ]
-  return (
-    <div className="stack">
-      <p className="muted">Replace a file and everything is recalculated. Your review decisions and action progress are kept.</p>
-      <div className="source-grid">
-        {items.map((it) => (
-          <Card key={it.kind} title={it.title} actions={run.files[it.kind] ? <Badge tone="good">Loaded</Badge> : <Badge tone="neutral">{it.kind === 'prs' ? 'Optional' : 'Missing'}</Badge>}>
-            {it.summary && <p className="small">{it.summary}</p>}
-            {run.files[it.kind] && <p className="small muted">{run.files[it.kind]!.name} · {new Date(run.files[it.kind]!.uploaded_at).toLocaleString()}</p>}
-            <FileDrop compact title={run.files[it.kind] ? 'Replace file' : 'Upload'} hint="Drop or click" accept={it.accept}
-              fileName={null} busy={busy === it.kind} onFile={(f) => upload(it.kind, f)} />
-            {rejected[it.kind] && <div className="alert bad small"><b>Rejected:</b> {rejected[it.kind]!.message}{rejected[it.kind]!.checks && <CheckList checks={rejected[it.kind]!.checks!} />}</div>}
-          </Card>
-        ))}
-      </div>
-    </div>
   )
 }

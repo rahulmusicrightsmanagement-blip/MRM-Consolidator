@@ -4,6 +4,7 @@ Originals are always kept by callers; these functions only produce
 comparison-ready values.
 """
 import re
+from functools import lru_cache
 
 from rapidfuzz import fuzz
 
@@ -41,20 +42,44 @@ def to_number(value):
         return None
 
 
+_NOT_ALNUM = re.compile(r"[^a-z0-9]")
+_TITLE_TAIL = re.compile(r"\s+-\s+|\(|\bfeat\.?\b|\bft\.?\b")
+
+
+# Cached: mapping compares every IPRS work with every master song, so each title would otherwise be cleaned
+# thousands of times per report.
+@lru_cache(maxsize=65536)
 def norm_title(title):
     """Case, spacing and punctuation free title used for exact title comparison."""
-    return re.sub(r"[^a-z0-9]", "", clean_text(title).lower())
+    return _NOT_ALNUM.sub("", clean_text(title).lower())
 
 
 VERSION_TAIL = re.compile(r"(\s+(live(\s+sessions?)?|lyric(al)?\s+video|video|unplugged|acoustic|reprise|remix|cover|version))+\s*$")
 
 
+@lru_cache(maxsize=65536)
 def title_core(title):
     """Title without featuring/version tails: 'KANNE - FEAT X' -> 'kanne', 'CHATHE LIVE' -> 'chathe'."""
     text = clean_text(title).lower()
-    text = re.split(r"\s+-\s+|\(|\bfeat\.?\b|\bft\.?\b", text)[0]
+    text = _TITLE_TAIL.split(text)[0]
     text = VERSION_TAIL.sub("", text)
-    return re.sub(r"[^a-z0-9]", "", text)
+    return _NOT_ALNUM.sub("", text)
+
+
+_BY_TAIL = re.compile(r"\s+by\s+\S.*$", re.I)
+
+
+@lru_cache(maxsize=65536)
+def alternate_titles(text):
+    """Names in an "Alternate Work" / "Alternate Title" cell, each also without a trailing "By <artist>":
+    'Navarasam By Vipin Lal; Nava' -> ('Navarasam By Vipin Lal', 'Navarasam', 'Nava')."""
+    out = []
+    for part in re.split(r"[;|]", clean_text(text)):
+        part = part.strip()
+        for name in (part, _BY_TAIL.sub("", part)):
+            if name and name not in out:
+                out.append(name)
+    return tuple(out)
 
 
 def title_similarity(a, b):
@@ -64,7 +89,8 @@ def title_similarity(a, b):
         return 0
     if na == nb:
         return 100
-    if title_core(a) and title_core(a) == title_core(b):
+    ca = title_core(a)
+    if ca and ca == title_core(b):
         return 92
     return round(fuzz.ratio(na, nb))
 
@@ -110,10 +136,19 @@ def same_party(name_a, name_b, ipi_a="", ipi_b=""):
 
 
 def _covers(small, big):
-    """Every word of `small` appears in `big`; a one-letter word matches as an initial."""
-    def word_match(x, y):
-        return x == y or (len(x) == 1 and y.startswith(x)) or (len(y) == 1 and x.startswith(y))
-    return all(any(word_match(x, y) for y in big) for x in small)
+    """Every word of `small` pairs with its own word of `big`: the same word, or a one-letter initial of it.
+    Each word is used once and at least one full word must be the same, so 'S Rafeeq Ahmed' never matches
+    'Sushin Shyamprakash' (one initial "S" cannot stand for two words)."""
+    pool = list(big)
+    exact = 0
+    for x in sorted(small, key=len, reverse=True):  # full words first, initials last
+        y = next((y for y in pool if y == x), None) \
+            or next((y for y in pool if (len(x) == 1 and y.startswith(x)) or (len(y) == 1 and x.startswith(y))), None)
+        if y is None:
+            return False
+        pool.remove(y)
+        exact += x == y and len(x) > 1
+    return exact > 0
 
 
 def display_name(name):

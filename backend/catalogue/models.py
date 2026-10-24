@@ -116,6 +116,8 @@ class LinkDecision(models.Model):
     master_row = models.IntegerField(null=True, blank=True)
     master_title = models.CharField(max_length=300, blank=True)
     rejected_rows = models.JSONField(default=list, blank=True)
+    # Other master rows that are the same song (e.g. a pathos or reprise version sharing the IPRS tunecode).
+    also_rows = models.JSONField(default=list, blank=True)
     note = models.TextField(blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -227,7 +229,8 @@ class MasterEdit(models.Model):
     empty): "iprs" writes the IPRS value into the master, "master" keeps ours. Kept per client so it carries to
     later reports; applied when the updated master (LNV) is downloaded."""
     IPRS, MASTER = "iprs", "master"
-    FIELDS = ["Title", "Duration", "ISWC", "ISRC", "Authors", "Composers", "Publishers"]
+    FIELDS = ["Title", "Alternate title", "Duration", "ISWC", "ISRC", "Language", "Film / album", "Singers",
+              "Authors", "Composers", "Publishers"]
 
     client = models.ForeignKey(Client, related_name="master_edits", on_delete=models.CASCADE)
     master_row = models.IntegerField()
