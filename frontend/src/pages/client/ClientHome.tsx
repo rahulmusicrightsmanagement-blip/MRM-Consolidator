@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowRight, FileSpreadsheet, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { ArrowRight, FileSpreadsheet, Plus, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
 import { Button, Card, ConfirmDialog } from '../../components/ui'
 import { api } from '../../lib/api'
 import { fmtDate, pct, useClient } from '../../lib/client'
@@ -59,6 +59,41 @@ function SocietyCard({ s, clientId }: { s: SocietySummary; clientId: number }) {
         </ul>
         <p className="small muted">Our master and the other societies are not affected. You can add {s.code} again later. This cannot be undone.</p>
       </ConfirmDialog>
+    </div>
+  )
+}
+
+/** Step 1 – today's LNV against one DSP sheet: what is still open in the review. */
+function CleanTile({ clientId }: { clientId: number }) {
+  const { detail } = useClient()
+  const navigate = useNavigate()
+  const c = detail?.clean
+  const open = c?.summary.open
+  const left = open ? open.duplicates + open.names + open.missing + open.check : 0
+  return (
+    <div className={`soc-tile ${!c ? 'not_started' : left ? 'in_progress' : 'completed'}`}>
+      <div className="soc-tile-head">
+        <div><b>Data clean</b><small>Step 1 · compare the LNV with the Muso / Spotify / Apple export</small></div>
+        <span className={`badge ${!c ? 'neutral' : left ? 'info' : 'good'}`}>{!c ? 'Not started' : left ? 'In review' : 'Reviewed'}</span>
+      </div>
+      {c ? (
+        <>
+          <p className="small"><Sparkles size={14} className="inline-icon" />{c.source} · {c.name}</p>
+          {open && (
+            <div className="soc-tile-figs">
+              <span><b>{c.summary.matched ?? 0}</b> songs found</span>
+              <span><b className="t-warn">{open.duplicates}</b> duplicates</span>
+              <span><b className="t-bad">{open.missing}</b> missing</span>
+              <span><b>{open.names}</b> name spellings</span>
+            </div>
+          )}
+        </>
+      ) : <p className="small muted">Compare today's LNV with the client's DSP sheet from MRM-Extractor: duplicates, name spellings and missing songs in one pass.</p>}
+      <div className="soc-tile-actions">
+        <Button variant={c && !left ? 'default' : 'primary'} disabled={!detail?.master} onClick={() => navigate(`/clients/${clientId}/clean`)}>
+          {c ? (left ? `Continue – ${left.toLocaleString()} to decide` : 'Open') : 'Start data clean'}<ArrowRight size={15} />
+        </Button>
+      </div>
     </div>
   )
 }
@@ -128,6 +163,7 @@ export default function ClientHome() {
               {m && <><span className="grow" /><Button variant="ghost" icon={<Trash2 size={15} />} aria-label="Delete master" title="Delete master" onClick={() => setAskMaster(true)} /></>}
             </div>
           </div>
+          <CleanTile clientId={clientId} />
           {d.societies.map((s) => <SocietyCard key={s.code} s={s} clientId={clientId} />)}
           <AddSociety />
         </div>

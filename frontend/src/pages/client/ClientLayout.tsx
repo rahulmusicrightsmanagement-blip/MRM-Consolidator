@@ -27,6 +27,7 @@ function ClientFrame() {
   const c = detail.client
   const overdue = !!c.due_date && c.due_date < today() && detail.stage.index < 5
   const base = `/clients/${clientId}`
+  const cleanOpen = Object.entries(detail.clean?.summary.open ?? {}).reduce((n, [q, v]) => n + (q === 'matched' || q === 'fills' ? 0 : v), 0)
   return (
     <AppShell trail={<span className="trail-name">{c.name}</span>}>
       <header className="client-header card">
@@ -50,6 +51,7 @@ function ClientFrame() {
 
       <nav className="sub-tabs" aria-label="Client sections">
         <NavLink to={base} end>Home</NavLink>
+        <NavLink to={`${base}/clean`}>Data clean{cleanOpen > 0 && <span className="mv-count warn">{cleanOpen.toLocaleString()}</span>}</NavLink>
         {detail.societies.map((s) => (
           <NavLink key={s.code} to={`${base}/societies/${s.code}`} className={({ isActive }) => `soc-link ${isActive ? 'active' : ''}`}>
             <span className={`soc-dot ${s.status}`} />{s.code}

@@ -1,5 +1,26 @@
 # MRM changelog
 
+## 0.18.1 – 2026-10-28 (patch)
+- Data clean is now a side-by-side compare: LNV on the left, the export on the right, one line per song with a coloured status and an Outcome menu the app pre-fills; filters for To decide, Duplicates, Missing, ISRC problems; no more questions
+
+## 0.18.0 – 2026-10-28 (minor)
+- Data clean answers what it is sure of by itself (same ISRC + title, same title + writer, certain duplicates, clean missing songs, empty cells) and asks only the rest – Laxmikant: 1,918 questions down to 437; every app answer shows why and can be changed
+
+## 0.17.2 – 2026-10-28 (patch)
+- Data clean shows every problem of a check at once in one clear list – plain question and answer buttons on each row, To answer / Answered / All, search, tick-boxes to answer many together; one-question-at-a-time mode removed
+
+## 0.17.1 – 2026-10-28 (patch)
+- Data clean made simple: the two sheets clearly labelled (LNV vs export), a plain-language summary, a numbered list of checks, and one question at a time with Yes / No / Skip buttons (keys Y N S) – table view still there for doing many at once
+
+## 0.17.0 – 2026-10-28 (minor)
+- New Data clean step: today's LNV vs one Muso / Apple Music / Spotify sheet – matching and duplicate finding in one pass, review tabs for ISRC & duplicates, artist names, missing details and links to check, plus a discrepancy & duplicate report
+
+## 0.16.4 – 2026-10-24 (patch)
+- Opening a big report is much faster: catalogue save looks works up by index and only rewrites what changed; processed reports survive app updates
+
+## 0.16.3 – 2026-10-24 (patch)
+- Much faster matching for big catalogues (Laxmikant: ~7.5 min → ~23 s): master index for codes and titles, cached name clean-up; results unchanged
+
 ## 0.16.2 – 2026-10-24 (patch)
 - Removed unused files and old code; all spreadsheet types (xlsx, csv, ods …) kept out of git
 

@@ -255,3 +255,33 @@ class SongFlag(models.Model):
 
     class Meta:
         unique_together = [("client", "key", "flag")]
+
+
+def dsp_path(instance, filename):
+    return f"clients/{instance.client_id}/dsp/{filename}"
+
+
+class DspFile(models.Model):
+    """One DSP sheet (Muso, Apple Music or Spotify, from MRM-Extractor) checked against the client's LNV in Data clean.
+    One sheet at a time: the newest is used, older ones are kept."""
+    client = models.ForeignKey(Client, related_name="dsp_files", on_delete=models.CASCADE)
+    file = models.FileField(upload_to=dsp_path, max_length=300)
+    original_name = models.CharField(max_length=255)
+    source = models.CharField(max_length=20)          # Muso / Apple Music / Spotify / DSP
+    sheet = models.CharField(max_length=100, blank=True)
+    stats = models.JSONField(default=dict, blank=True)
+    summary = models.JSONField(default=dict, blank=True)  # headline numbers of the latest match, for the client page
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+
+class CleanDecision(models.Model):
+    """A reviewer's decision on one Data clean review item (key = dup:… / isrc:… / name:… / junk:… / missing:… /
+    fill:… / link:…). Kept per client; "same person" and link decisions also teach the next match."""
+    client = models.ForeignKey(Client, related_name="clean_decisions", on_delete=models.CASCADE)
+    key = models.CharField(max_length=300)
+    choice = models.CharField(max_length=20)
+    data = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [("client", "key")]

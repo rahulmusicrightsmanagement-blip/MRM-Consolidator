@@ -15,10 +15,11 @@ from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from django.views.decorators.gzip import gzip_page
 from django.views.decorators.http import require_http_methods
 
 from .drive import DriveError
-from .engine import export
+from .engine import dataclean, export
 from .engine.fill import fill_iprs_columns
 from .engine.verify import verify as verify_run
 from .engine.iprs import IPRSFormatError, parse_iprs
@@ -27,7 +28,7 @@ from .engine.pair import build_pair
 from .engine.master import MasterFormatError, parse_master
 from .engine.pipeline import run_pipeline
 from .engine.prs import SocietyFormatError, parse_prs
-from .models import NEWEST_FIRST, OLDEST_FIRST, SOCIETIES, SOCIETY_CODES, Client, ClientSociety, LinkDecision, MasterEdit, MasterFile, Registration, Run, SongFlag, SourceFile, Task, TaskEvent, Work
+from .models import NEWEST_FIRST, OLDEST_FIRST, SOCIETIES, SOCIETY_CODES, CleanDecision, Client, ClientSociety, DspFile, LinkDecision, MasterEdit, MasterFile, Registration, Run, SongFlag, SourceFile, Task, TaskEvent, Work
 from .sync import TASK_LABEL, is_latest, sync_run
 from .timing import measure
 
@@ -48,10 +49,12 @@ ROW_TASKS = Prefetch("tasks", Task.objects.only("id", "work_id", "type", "state"
 TASK_WORK_HEAVY = ("work__sources", "work__credits")
 # A task only shows its reports' dates; their summaries would be sent again with every task row.
 TASK_RUN_HEAVY = ("opened_run__summary", "closed_run__summary")
-# A processed report is keyed by its files, decisions, client and app version, so it stays valid until one of those
-# changes; a short expiry only made a page load after an idle hour re-process (and re-save) every client's reports.
-VERSION_FILE = settings.BASE_DIR.parent / "VERSION"
-APP_VERSION = VERSION_FILE.read_text().strip() if VERSION_FILE.exists() else ""
+# A processed report is keyed by its files, decisions, client and the processing code, so it stays valid until one
+# of those changes; a short expiry only made a page load after an idle hour re-process (and re-save) every client's
+# reports. Keyed on the engine's own source (not the app version), a release that only changes screens keeps every
+# processed report – a 13,000-song catalogue is not processed again after each update.
+_ENGINE_FILES = sorted((Path(__file__).parent / "engine").glob("*.py")) + [Path(__file__).parent / "sync.py"]
+ENGINE_VERSION = hashlib.sha1(b"".join(f.read_bytes() for f in _ENGINE_FILES)).hexdigest()[:12]
 RESULT_TTL = 30 * 24 * 60 * 60
 STAGES = ["Needs master", "Master loaded", "Societies in progress", "All societies complete"]
 # What the user sees: three steps per society. One-line conversion, gap filling, tune-code checks and
@@ -180,7 +183,7 @@ def compute(run):
     decisions = _decisions(run)
     stamp = (run.created_at.isoformat(), tuple((k, f.id if f else 0, f.file.name if f else "") for k, f in paths.items()),
              json.dumps(decisions, sort_keys=True), run.report_date,
-             (run.client.name, run.client.ipi) if run.client else None, APP_VERSION)
+             (run.client.name, run.client.ipi) if run.client else None, ENGINE_VERSION)
     # A stable key (Python's hash() differs per process), so every worker finds what another one computed.
     key = f"run-{run.id}-{hashlib.sha1(repr(stamp).encode()).hexdigest()}"
     result = cache.get(key)
@@ -463,7 +466,7 @@ def client_detail(request, client_id):
             runs = list(client.runs.all())
             for run in runs:
                 _delete_run(run)
-            _delete_files_after_commit([m.file for m in client.masters.all()])
+            _delete_files_after_commit([m.file for m in client.masters.all()] + [f.file for f in client.dsp_files.all()])
             client.delete()
         return JsonResponse({"deleted": client_id, "runs_deleted": len(runs)})
     if request.method == "PATCH":
@@ -486,6 +489,7 @@ def client_detail(request, client_id):
     return JsonResponse({
         "client": _client_json(client), **client_metrics(client),
         "reports": [_run_json(r) for r in _runs(client)],
+        "clean": _dsp_json(client.dsp_files.order_by("-uploaded_at").first()),
         "available_societies": [{**s, "added": s["code"] in {cs.society for cs in _societies(client)}} for s in SOCIETIES],
         "changes": {"new_works": len(changes.get("new_works", [])), "status_changes": changes.get("status_changes", []),
                     "verified": task_list(changes.get("verified", [])), "reopened": task_list(changes.get("reopened", [])),
@@ -530,7 +534,165 @@ def client_master(request, client_id):
     # Only once the new master is safely stored: choices that point at rows of the old master go.
     client.master_edits.all().delete()
     client.song_flags.filter(key__startswith="M").delete()
+    _drop_row_decisions(client)
     return client_detail(_as_get(request), client_id)
+
+
+# ---------------------------------------------------------------- data clean (step 1: today's LNV against one DSP sheet)
+
+# Decisions that point at rows of the LNV: they go when a new LNV arrives. Name, junk and missing-song decisions stay.
+ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:")
+CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}, "name": {"same", "different"},
+                 "junk": {"fix", "ok"}, "missing": {"add", "not_ours"}, "fill": {"accept", "reject"}, "link": {"same", "none"}}
+
+
+def _drop_row_decisions(client):
+    q = Q()
+    for prefix in ROW_DECISIONS:
+        q |= Q(key__startswith=prefix)
+    client.clean_decisions.filter(q).delete()
+
+
+def _dsp_json(dsp):
+    if not dsp:
+        return None
+    return {"id": dsp.id, "name": dsp.original_name, "uploaded_at": dsp.uploaded_at.isoformat(), "source": dsp.source,
+            "sheet": dsp.sheet, "stats": dsp.stats, "summary": dsp.summary}
+
+
+def _dsp_key(dsp):
+    return f"dsp-parsed-{dsp.id}-{hashlib.sha1(dsp.sheet.encode()).hexdigest()[:8]}-{ENGINE_VERSION}"
+
+
+def _cached(key, build):
+    value = cache.get(key)
+    if value is None:
+        value = build()
+        cache.set(key, value, RESULT_TTL)
+    return value
+
+
+def _clean_result(client, decisions):
+    """The match of the client's LNV with its newest DSP sheet (cached until a file or a learning decision changes),
+    with every reviewer decision laid over it."""
+    master, dsp = client.active_master(), client.dsp_files.order_by("-uploaded_at").first()
+    if not master or not dsp:
+        return master, dsp, None
+    aliases, links = dataclean.learned(decisions)
+    stamp = (master.id, master.file.name, dsp.id, dsp.sheet, client.name, json.dumps([aliases, links], sort_keys=True), ENGINE_VERSION)
+    key = f"clean-{client.id}-{hashlib.sha1(repr(stamp).encode()).hexdigest()}"
+
+    def build():
+        parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
+        sheet = _cached(_dsp_key(dsp), lambda: dataclean.parse_dsp(dsp.file.path, dsp.sheet))
+        with measure("processing"):
+            return dataclean.match(parsed, sheet, client.name, aliases, links)
+    result = dataclean.apply_decisions(_cached(key, build), decisions)
+    summary = dataclean.summary_counts(result)
+    if summary != dsp.summary:
+        DspFile.objects.filter(pk=dsp.pk).update(summary=summary)
+        dsp.summary = summary
+    return master, dsp, result
+
+
+def _clean_payload(client):
+    decisions = {d.key: {"choice": d.choice, "data": d.data} for d in client.clean_decisions.all()}
+    try:
+        master, dsp, result = _clean_result(client, decisions)
+    except (FileNotFoundError, DriveError) as e:
+        return JsonResponse({"error": f"A spreadsheet could not be opened: {e}"}, status=502)
+    return JsonResponse({"master": _master_json(master), "dsp": _dsp_json(dsp), "result": result})
+
+
+@gzip_page
+@require_http_methods(["GET", "POST", "DELETE"])
+def client_clean(request, client_id):
+    """GET: the Data clean result. POST: upload a DSP sheet (file), or pick another sheet of the current one (sheet).
+    DELETE: remove the DSP sheets."""
+    client = get_object_or_404(Client, pk=client_id)
+    if request.method == "DELETE":
+        with transaction.atomic():
+            _delete_files_after_commit([f.file for f in client.dsp_files.all()])
+            client.dsp_files.all().delete()
+        return _clean_payload(client)
+    if request.method == "POST":
+        uploaded = request.FILES.get("file")
+        sheet = (_body(request) if request.content_type == "application/json" else request.POST).get("sheet") or None
+        if not uploaded:
+            dsp = client.dsp_files.order_by("-uploaded_at").first()
+            if not dsp or not sheet:
+                return JsonResponse({"error": "No file was sent"}, status=400)
+            try:
+                parsed = dataclean.parse_dsp(dsp.file.path, sheet)
+            except dataclean.DspFormatError as e:
+                return JsonResponse({"error": str(e)}, status=422)
+            dsp.sheet, dsp.source, dsp.stats = parsed["sheet"], parsed["source"], {**parsed["stats"], "sheets": parsed["sheets"]}
+            dsp.save()
+            cache.set(_dsp_key(dsp), parsed, RESULT_TTL)
+            return _clean_payload(client)
+        with tempfile.NamedTemporaryFile(suffix=Path(uploaded.name).suffix) as tmp:
+            for chunk in uploaded.chunks():
+                tmp.write(chunk)
+            tmp.flush()
+            try:
+                parsed = dataclean.parse_dsp(tmp.name, sheet)
+            except dataclean.DspFormatError as e:
+                if _try_parse(tmp.name, SourceFile.MASTER)[0] is not None:
+                    return JsonResponse({"error": "This is an LNV master. Upload it as the client's master; here goes the Muso, Apple Music or Spotify sheet."}, status=422)
+                return JsonResponse({"error": str(e)}, status=422)
+        uploaded.seek(0)
+        dsp = DspFile(client=client, original_name=uploaded.name, source=parsed["source"], sheet=parsed["sheet"],
+                      stats={**parsed["stats"], "sheets": parsed["sheets"]})
+        try:
+            dsp.file.save(uploaded.name, uploaded, save=False)   # store the file (Google Drive) before the database row
+        except DriveError as e:
+            return JsonResponse({"error": f"The file could not be saved: {e}"}, status=502)
+        dsp.save()
+        cache.set(_dsp_key(dsp), parsed, RESULT_TTL)   # already read for the check: not read again
+    return _clean_payload(client)
+
+
+@gzip_page
+@require_http_methods(["POST"])
+def clean_decisions(request, client_id):
+    """Many review decisions in one go: {items: [{key, choice, data?}]}; choice null clears a decision."""
+    client = get_object_or_404(Client, pk=client_id)
+    items = {}
+    for item in _body(request).get("items") or []:
+        key, choice = str(item.get("key") or "")[:300], item.get("choice")
+        prefix = key.split(":", 1)[0]
+        if prefix not in CLEAN_CHOICES or (choice is not None and choice not in CLEAN_CHOICES[prefix]):
+            return JsonResponse({"error": f"Unknown decision {choice!r} for {key!r}"}, status=400)
+        items[key] = (choice, item.get("data") if isinstance(item.get("data"), dict) else {})
+    clear = [k for k, (c, _) in items.items() if c is None]
+    with transaction.atomic():
+        if clear:
+            client.clean_decisions.filter(key__in=clear).delete()
+        existing = {d.key: d for d in client.clean_decisions.filter(key__in=[k for k in items if k not in clear])}
+        now = timezone.now()
+        new, changed = [], []
+        for key, (choice, data) in items.items():
+            if choice is None:
+                continue
+            d = existing.get(key)
+            if d is None:
+                new.append(CleanDecision(client=client, key=key, choice=choice, data=data, updated_at=now))
+            else:
+                d.choice, d.data, d.updated_at = choice, data, now
+                changed.append(d)
+        CleanDecision.objects.bulk_create(new)
+        CleanDecision.objects.bulk_update(changed, ["choice", "data", "updated_at"])
+    return _clean_payload(client)
+
+
+def clean_export(request, client_id):
+    client = get_object_or_404(Client, pk=client_id)
+    decisions = {d.key: {"choice": d.choice, "data": d.data} for d in client.clean_decisions.all()}
+    _, dsp, result = _clean_result(client, decisions)
+    if not result:
+        return JsonResponse({"error": "Upload the LNV master and a DSP sheet first"}, status=409)
+    return _xlsx(export.clean_workbook(client, dsp.original_name, result),
+                 f"{client.name.replace(' ', '_')}_data_clean_{dsp.source.replace(' ', '_')}_{date.today()}")
 
 
 def _as_get(request):

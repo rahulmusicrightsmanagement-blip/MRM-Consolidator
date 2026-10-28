@@ -12,6 +12,7 @@ import Tracker from './pages/Tracker'
 import { ErrorPage } from './components/ErrorPage'
 import ClientLayout from './pages/client/ClientLayout'
 import ClientHome from './pages/client/ClientHome'
+import DataClean from './pages/client/DataClean'
 import SocietyWorkspace from './pages/client/SocietyWorkspace'
 import NewClient from './pages/NewClient'
 import Tasks from './pages/client/Tasks'
@@ -29,7 +30,7 @@ function RunRedirect() {
   return null
 }
 
-// Login → client tracker → add client (details · master · societies) → client home → one workspace per society.
+// Login → client tracker → add client (details · master · societies) → client home → data clean (LNV vs DSP) → one workspace per society.
 const router = createBrowserRouter([{ errorElement: <ErrorPage />, children: [
   { path: '/login', element: <Login /> },
   { element: <RequireAuth />, children: [
@@ -40,6 +41,7 @@ const router = createBrowserRouter([{ errorElement: <ErrorPage />, children: [
       element: <ClientLayout />,
       children: [
         { index: true, element: <ClientHome /> },
+        { path: 'clean', element: <DataClean /> },
         { path: 'societies/:society', element: <SocietyWorkspace /> },
         { path: 'tasks', element: <Tasks /> },
         { path: 'catalogue', element: <Catalogue /> },

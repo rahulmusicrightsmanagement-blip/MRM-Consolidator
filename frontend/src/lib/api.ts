@@ -1,5 +1,5 @@
 import type {
-  ClientDetail, ClientRef, Role, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow,
+  CleanChoice, CleanPayload, ClientDetail, ClientRef, Role, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow,
 } from '../types'
 
 export class ApiError extends Error {
@@ -42,6 +42,8 @@ const send = (body: unknown, method = 'POST'): RequestInit => ({
 
 export type DecisionItem = { internal_no: string; master_row: number; also_rows?: number[] } | { internal_no: string; action: 'new'; rejected_rows: number[] }
 export type MasterEditIn = { master_row: number; field: string; internal_no: string; choice: EditChoice | null }
+
+export type CleanDecisionIn = { key: string; choice: CleanChoice | null; data?: { keep?: number | string; row?: number; rows?: number[] } }
 
 export interface TaskPatch { state?: TaskState; owner?: string; due_date?: string | null; note?: string }
 
@@ -101,4 +103,15 @@ export const api = {
   pair: (id: number, work?: string | null, row?: number | null) =>
     request<PairResult>(`/api/runs/${id}/pair/?${new URLSearchParams({ work: work ?? '', row: row ? String(row) : '' })}`),
   exportUrl: (id: number, name: string) => `/api/runs/${id}/export/${name}/`,
+  clean: (clientId: number) => request<CleanPayload>(`/api/clients/${clientId}/clean/`),
+  uploadDsp: (clientId: number, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<CleanPayload>(`/api/clients/${clientId}/clean/`, { method: 'POST', body: form })
+  },
+  chooseDspSheet: (clientId: number, sheet: string) => request<CleanPayload>(`/api/clients/${clientId}/clean/`, send({ sheet })),
+  deleteDsp: (clientId: number) => request<CleanPayload>(`/api/clients/${clientId}/clean/`, { method: 'DELETE' }),
+  /** Many Data clean decisions in one request; choice null clears one. */
+  cleanDecide: (clientId: number, items: CleanDecisionIn[]) => request<CleanPayload>(`/api/clients/${clientId}/clean/decisions/`, send({ items })),
+  cleanExportUrl: (clientId: number) => `/api/clients/${clientId}/clean/export/`,
 }

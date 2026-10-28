@@ -107,12 +107,14 @@ def norm_isrc(value):
     return text if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}\d{7}", text) else ""
 
 
+@lru_cache(maxsize=131072)
 def norm_ipi(value):
     """IPI / CAE numbers are 11 digits; the master drops leading zeros."""
     digits = re.sub(r"\D", "", clean_id(value))
     return digits.zfill(11) if digits else ""
 
 
+@lru_cache(maxsize=131072)
 def name_tokens(name):
     tokens = re.findall(r"[a-z0-9]+", clean_text(name).lower())
     meaningful = frozenset(t for t in tokens if t not in _CORP_WORDS)

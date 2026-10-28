@@ -358,6 +358,7 @@ export interface ClientRow extends ClientRef, ClientMetrics { report_count: numb
 export interface ClientDetail extends ClientMetrics {
   client: ClientRef
   reports: RunSummary[]
+  clean: DspInfo | null
   available_societies: (SocietyMeta & { added: boolean })[]
   changes: {
     new_works: number
@@ -444,3 +445,49 @@ export interface User {
   last_login: string | null
   date_joined: string
 }
+
+/* ---------- data clean (step 1: today's LNV against one DSP sheet) ---------- */
+
+export type CleanChoice = 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none'
+export interface CleanDecisionT { choice: CleanChoice; data?: { keep?: number | string; row?: number; rows?: number[] }; auto?: boolean; why?: string }
+export type CreditKind = 'writer' | 'shared' | 'medley' | 'performer'
+
+export interface DspSong {
+  key: string; title: string; album: string; isrcs: string[]; isrc_count: number
+  lyricists: string[]; composers: string[]; singers: string[]; year: string; popularity: number
+  versions: Record<string, number>; recordings: number; link: string; client_writer: boolean; other_composers: string[]; credit: CreditKind
+}
+export interface LnvBrief { row: number; title: string; movie: string; isrcs: string[]; writers: string[]; year: string; codes: Record<string, number>; has_writers: boolean }
+export interface CleanLink { row: number; score: number; points: number; evidence: string[]; flags: string[]; confirmed?: boolean; lnv: LnvBrief }
+interface Decided { key: string; decision?: CleanDecisionT; auto?: Omit<CleanDecisionT, 'auto'> }
+export interface MatchedItem extends Omit<Decided, 'auto'> { song: DspSong; confirmed: boolean; links: CleanLink[]; auto: string | null; notes: string[] }
+export interface CheckItem extends Decided { song: DspSong; candidates: CleanLink[]; flagged: boolean }
+export interface MissingItem extends Omit<DspSong, 'key'>, Decided { song_key: string; rejected: boolean }
+export interface DupCase extends Decided { kind: 'duplicate' | 'wrong_isrc'; title: string; keeper: number | null; reasons: string[]; rows: LnvBrief[] }
+export interface NameSide { spelling: string; spellings: string[]; lnv: number; dsp: number; songs: string[] }
+export interface SpellingItem extends Decided { kind: 'spelling'; a_key: string; b_key: string; similarity: number; a: NameSide; b: NameSide; client: boolean; info: boolean }
+export interface JunkItem extends Decided { kind: 'junk'; name: string; count: number; songs: string[]; info?: undefined }
+export type NameItem = SpellingItem | JunkItem
+export interface FillItem extends Decided { row: number; title: string; field: string; value: string; song: string; song_key: string; score: number; more: number }
+export type CleanQueue = 'duplicates' | 'names' | 'missing' | 'fills' | 'check' | 'matched'
+
+export interface CleanSummary {
+  songs: number; matched: number; check: number; unmatched: number; missing_writer: number; missing_credit: Partial<Record<CreditKind, number>>
+  lnv_rows_matched: number; lnv_not_on_dsp: number; duplicates: number; duplicate_rows: number; names: number; fills: number; writers_differ: number
+}
+export interface CleanResult {
+  source: { name: string; sheet: string; sheets: { name: string; songs: number }[]; rows: number; recordings: number; songs: number; versions: Record<string, number> }
+  lnv: { songs: number; with_writers: number; with_isrc: number }
+  client_names: string[]
+  summary: CleanSummary
+  matched: MatchedItem[]; check: CheckItem[]; missing: MissingItem[]; duplicates: DupCase[]; names: NameItem[]; fills: FillItem[]
+  open: Record<CleanQueue, number>
+  auto: Record<CleanQueue, number>
+  decided: number
+}
+export interface DspInfo {
+  id: number; name: string; uploaded_at: string; source: string; sheet: string
+  stats: { rows?: number; with_isrc?: number; sheets?: { name: string; songs: number }[] }
+  summary: Partial<CleanSummary> & { open?: Record<CleanQueue, number>; source?: string }
+}
+export interface CleanPayload { master: MasterInfo | null; dsp: DspInfo | null; result: CleanResult | null }

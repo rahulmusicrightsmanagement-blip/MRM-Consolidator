@@ -5,7 +5,9 @@ a fuzzy-only link always waits for a reviewer.
 """
 from .iprs import PUBLISHER_ROLES
 from .master import codes_for
-from .normalize import alternate_titles, norm_title, same_party, title_similarity
+from rapidfuzz import fuzz, process
+
+from .normalize import alternate_titles, norm_title, same_party, title_core, title_similarity
 
 AUTO_TITLE_SCORE = 100      # exact title (after normalisation) + shared contributor links automatically
 SUGGEST_TITLE_SCORE = 85    # anything from here up is offered to the reviewer
@@ -187,9 +189,56 @@ def score_pair(work, song):
     return {"score": round(score, 1), "evidence": evidence}
 
 
-def _candidates(work, songs):
+class SongIndex:
+    """Lookups over the master so a work is compared only with songs that can be a candidate – an identifier in
+    common or a title at least SUGGEST_TITLE_SCORE similar – instead of with every song (a 13,000-song master and
+    a 5,000-work report would otherwise be 65 million comparisons)."""
+
+    def __init__(self, songs):
+        self.order = {s["row"]: n for n, s in enumerate(songs)}
+        self.by_row = {s["row"]: s for s in songs}
+        self.by_code, self.by_iswc, self.by_isrc = {}, {}, {}
+        self.by_norm, self.by_core = {}, {}
+        self.names, self.name_rows = [], []
+        for s in songs:
+            for code in codes_for(s, "IPRS"):
+                self.by_code.setdefault(code, set()).add(s["row"])
+            for v in s["iswcs"]:
+                self.by_iswc.setdefault(v, set()).add(s["row"])
+            for v in s["isrcs"]:
+                self.by_isrc.setdefault(v, set()).add(s["row"])
+            for name in (s["title"], *alternate_titles(s.get("alt_title") or "")):
+                n, c = norm_title(name), title_core(name)
+                if n:
+                    self.by_norm.setdefault(n, set()).add(s["row"])
+                    self.names.append(n)
+                    self.name_rows.append(s["row"])
+                if c:
+                    self.by_core.setdefault(c, set()).add(s["row"])
+
+    def candidates(self, work):
+        """Rows of every song _candidates would keep (a superset; the exact checks run afterwards)."""
+        rows = set(self.by_code.get(work["internal_no"], ()))
+        rows |= self.by_iswc.get(work["iswc_valid"], set()) if work["iswc_valid"] else set()
+        rows |= self.by_isrc.get(work["isrc_valid"], set()) if work["isrc_valid"] else set()
+        for name in (work["title"], *alternate_titles(work.get("alt_title") or "")):
+            n, c = norm_title(name), title_core(name)
+            if not n:
+                continue
+            rows |= self.by_norm.get(n, set())
+            rows |= self.by_core.get(c, set()) if c else set()
+            # title_similarity rounds fuzz.ratio, so anything from 84.5 can reach SUGGEST_TITLE_SCORE.
+            for _, _, i in process.extract(n, self.names, scorer=fuzz.ratio, processor=None,
+                                           score_cutoff=SUGGEST_TITLE_SCORE - 0.5, limit=None):
+                rows.add(self.name_rows[i])
+        return sorted(rows, key=self.order.__getitem__)
+
+
+def _candidates(work, songs, index=None):
     """Every master song with evidence for this IPRS work, strongest first."""
     found = {}
+    if index is not None:
+        songs = [index.by_row[r] for r in index.candidates(work)]
     for song in songs:
         methods = []
         if work["internal_no"] in codes_for(song, "IPRS"):
@@ -225,8 +274,9 @@ def map_to_master(iprs, master, decisions):
     songs = master["songs"]
     by_row = {s["row"]: s for s in songs}
     links = []
+    index = SongIndex(songs)
     for work in iprs["works"]:
-        cands = _candidates(work, songs)
+        cands = _candidates(work, songs, index)
         decision = _resolve_decision(decisions.get(work["internal_no"]), by_row, songs)
         rejected = set(decision.get("rejected_rows", [])) if decision else set()
         cands = [c for c in cands if c["row"] not in rejected]

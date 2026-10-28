@@ -473,3 +473,85 @@ def catalogue_workbook(client, works):
                     + [w["open_tasks"], "Yes" if w["credited"] else "No"])
     _sheet(wb, "Catalogue", header, rows)
     return _bytes(wb)
+
+
+# ---- Data clean -------------------------------------------------------------
+CLEAN_CHOICES = {"duplicate": "Duplicate", "different": "Not the same", "owner": "ISRC belongs to one row",
+                 "neither": "Neither row", "same": "Same", "fix": "Fix in LNV", "ok": "OK as is", "add": "Add to LNV",
+                 "not_ours": "Not our work", "accept": "Accept", "reject": "Reject", "none": "Not in LNV"}
+CREDIT_LABELS = {"writer": "Client is a writer", "shared": "Other composers credited too", "medley": "Medley / mashup",
+                 "performer": "Client not credited as writer"}
+
+
+def _decision(item):
+    d = item.get("decision")
+    if not d:
+        return "Open"
+    label = ("App: " if d.get("auto") else "") + CLEAN_CHOICES.get(d["choice"], d["choice"])
+    data = d.get("data") or {}
+    if data.get("keep"):
+        label += f" – keep {data['keep']}"
+    if data.get("row"):
+        label += f" – row {data['row']}"
+    if data.get("rows"):
+        label += " – rows " + ", ".join(str(r) for r in data["rows"])
+    return label
+
+
+def clean_workbook(client, dsp_name, result):
+    """Step 1 discrepancy and duplicate report: today's LNV against one DSP sheet, with every reviewer decision."""
+    wb = _new_book()
+    s, src = result["summary"], result["source"]
+    _sheet(wb, "Summary", ["", ""], [
+        ["Client", client.name], ["DSP sheet", f"{dsp_name} ({src['name']} · sheet {src['sheet']})"],
+        ["DSP rows", src["rows"]], ["Recordings (by ISRC)", src["recordings"]], ["Songs (versions together)", src["songs"]],
+        ["LNV songs", result["lnv"]["songs"]], ["DSP songs found in the LNV", s["matched"]],
+        ["LNV rows confirmed by the DSP", s["lnv_rows_matched"]], ["LNV rows not on this DSP sheet", s["lnv_not_on_dsp"]],
+        ["Possible LNV duplicates (cases)", s["duplicates"]], ["Artist name spellings to check", s["names"]],
+        ["DSP songs not in the LNV", s["unmatched"]], ["… where the client is a writer", s["missing_writer"]],
+        ["LNV blanks the DSP can fill", s["fills"]], ["Links to check", s["check"]],
+        ["Treated as the client", ", ".join(result["client_names"])],
+    ], widths={"": 40})
+    links = lambda ls: "; ".join(f"row {l['row']}: {l['lnv']['title']}" for l in ls)
+    _sheet(wb, "Matched", ["DSP song", "Album", "ISRCs", "LNV rows", "Score /10", "Evidence", "How", "Decision", "Note"],
+           [[m["song"]["title"], m["song"]["album"], ", ".join(m["song"]["isrcs"]), links(m["links"]),
+             max(l["score"] for l in m["links"]), " · ".join(m["links"][0]["evidence"]),
+             "Confirmed by reviewer" if m["confirmed"] else m.get("auto") or "Automatic", _decision(m),
+             " · ".join(m.get("notes") or [])] for m in result["matched"]],
+           widths={"Evidence": 60, "LNV rows": 50, "Note": 60})
+    dup_rows = []
+    for c in result["duplicates"]:
+        for n, r in enumerate(c["rows"]):
+            dup_rows.append([c["key"], "Wrong ISRC" if c["kind"] == "wrong_isrc" else "Duplicate", r["row"], r["title"], r["movie"],
+                             ", ".join(r["isrcs"]), ", ".join(r["writers"]),
+                             ", ".join(f"{k} {v}" for k, v in r["codes"].items()),
+                             "Suggested keeper" if r["row"] == c["keeper"] else "",
+                             " · ".join(c["reasons"]) if n == 0 else "", _decision(c) if n == 0 else ""])
+    _sheet(wb, "LNV duplicates", ["Case", "Kind", "LNV row", "Title", "Movie", "ISRC", "Writers", "Society codes", "Keeper",
+                                  "Why", "Decision"], dup_rows, widths={"Why": 60, "Case": 18})
+    names = [n for n in result["names"] if n["kind"] == "spelling"]
+    _sheet(wb, "Artist names", ["Spelling", "Other spellings", "Times (LNV / DSP)", "Looks like", "Times (LNV / DSP) ",
+                                "Similarity %", "Songs", "Changes a match?", "Decision"],
+           [[n["a"]["spelling"], ", ".join(n["a"]["spellings"][1:]), f"{n['a']['lnv']} / {n['a']['dsp']}", n["b"]["spelling"],
+             f"{n['b']['lnv']} / {n['b']['dsp']}", n["similarity"], "; ".join(n["a"]["songs"] + n["b"]["songs"]),
+             "No – for information" if n.get("info") else "Yes", _decision(n)]
+            for n in names])
+    _sheet(wb, "Junk names", ["Name", "Times", "Songs", "Decision"],
+           [[n["name"], n["count"], "; ".join(n["songs"]), _decision(n)] for n in result["names"] if n["kind"] == "junk"])
+    _sheet(wb, "Missing in LNV", ["DSP song", "Album", "Year", "Popularity", "Credit", "Lyricists", "Composers",
+                                  "Other composers", "Versions", "ISRCs", "Link", "Decision"],
+           [[m["title"], m["album"], m["year"], m["popularity"], CREDIT_LABELS[m["credit"]], ", ".join(m["lyricists"]),
+             ", ".join(m["composers"]), ", ".join(m["other_composers"]),
+             ", ".join(f"{k} ×{v}" for k, v in m["versions"].items()), ", ".join(m["isrcs"]), m["link"], _decision(m)]
+            for m in result["missing"]], widths={"Link": 40})
+    _sheet(wb, "Fill blanks", ["LNV row", "LNV title", "Field", "Value from DSP", "From DSP song", "Match score", "Decision"],
+           [[f["row"], f["title"], f["field"], f["value"], f["song"], f["score"], _decision(f)] for f in result["fills"]])
+    check_rows = []
+    for c in result["check"]:
+        for n, x in enumerate(c["candidates"]):
+            check_rows.append([c["song"]["title"] if n == 0 else "", c["song"]["album"] if n == 0 else "",
+                               ", ".join(c["song"]["isrcs"]) if n == 0 else "", x["row"], x["lnv"]["title"], x["score"],
+                               " · ".join(x["evidence"]), " · ".join(x["flags"]), _decision(c) if n == 0 else ""])
+    _sheet(wb, "To check", ["DSP song", "Album", "ISRCs", "LNV row", "LNV title", "Score /10", "Evidence", "Problem",
+                            "Decision"], check_rows, widths={"Evidence": 50, "Problem": 60})
+    return _bytes(wb)
