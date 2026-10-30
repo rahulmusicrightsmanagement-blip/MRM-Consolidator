@@ -3,9 +3,8 @@ contributor slots and repeating society blocks, located by header text."""
 import re
 from collections import defaultdict
 
-import openpyxl
-
 from .normalize import clean_id, clean_text, norm_ipi, norm_isrc, norm_iswc, to_number
+from .xlsx import read_rows
 
 WORK_FIELDS = {
     "SN": "sn", "WORK": "title", "ISRC": "isrc", "ISWC": "iswc", "ALTERNATEWORK": "alt_title",
@@ -64,11 +63,7 @@ def read_layout(header):
 
 
 def parse_master(path):
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    ws = wb.worksheets[0]
-    ws.reset_dimensions()
-    rows = [tuple(r) for r in ws.iter_rows(values_only=True)]
-    wb.close()
+    rows = read_rows(path)
     if not rows:
         raise MasterFormatError("The master sheet is empty")
     header = rows[0]

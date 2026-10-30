@@ -2,9 +2,8 @@
 column format, clean it, and consolidate it into one row per work."""
 from collections import Counter, defaultdict
 
-import openpyxl
-
 from .normalize import clean_id, clean_text, norm_ipi, norm_isrc, norm_iswc, to_number
+from .xlsx import read_rows
 
 # Fixed IPRS column format: key -> accepted header spellings (compared without
 # spaces/punctuation). IPRS itself ships the typo "PERORMER".
@@ -78,11 +77,7 @@ def _read_client(rows, header_idx):
 
 def parse_iprs(path):
     """Return {client, checks, works, cleanup, issues, stats} or raise IPRSFormatError."""
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    ws = wb.worksheets[0]
-    ws.reset_dimensions()  # IPRS exports carry a wrong sheet size; read every cell
-    rows =[tuple(r) for r in ws.iter_rows(values_only=True)]
-    wb.close()
+    rows = read_rows(path)  # every cell: IPRS exports carry a wrong sheet size
 
     checks = []
     header_idx = next(

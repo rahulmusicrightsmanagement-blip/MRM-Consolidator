@@ -1,5 +1,65 @@
 # MRM changelog
 
+## 0.33.0 – 2026-10-30 (minor)
+- New tabs in step 2: Exact match, Possible match and Not in the LNV, including the songs the app linked by itself
+
+## 0.32.3 – 2026-10-30 (patch)
+- LNV rows with different writers or publisher no longer sit next to the Muso song: they are folded away as not the same song, and the only answers shown are add or skip
+
+## 0.32.2 – 2026-10-30 (patch)
+- Fixed the song list on the left not scrolling
+
+## 0.32.1 – 2026-10-30 (patch)
+- Clearer same-song screen: only names really missing on the other side are marked, the top line no longer reads as if Muso and the LNV match, Same company under another name is said plainly, versions show every writer and publisher difference
+
+## 0.32.0 – 2026-10-30 (minor)
+- Review uses the full width with no empty margin on the left, shorter top of the page, and Undo for the last answer after moving on
+
+## 0.31.0 – 2026-10-30 (minor)
+- Simpler review screen: Muso and LNV side by side with only the differing names marked, answer buttons always on screen, one click answers and moves on, fewer filters and repeated text
+
+## 0.30.0 – 2026-10-30 (minor)
+- Review without boxes: Muso and the LNV side by side in one table; folding sidebar, Expand for the song, Less/More on Biggest wins, each part and the step text
+
+## 0.29.0 – 2026-10-30 (minor)
+- New professional look: sidebar with the client's four steps, clean white pages with fine lines instead of boxes, a progress track for the steps
+
+## 0.28.0 – 2026-10-30 (minor)
+- One flow per client: 1 Files, 2 Muso & LNV, 3 LNV vs IPRS, 4 Final LNV; clients open at their step; client list shows where each client is; old tools moved to More tools
+
+## 0.27.0 – 2026-10-30 (minor)
+- Fewer songs to check (Needs you / App answered), IPRS step rebuilt like step 1, one final LNV with Muso and IPRS together, final LNV in seconds and faster first open
+
+## 0.26.1 – 2026-10-30 (patch)
+- Removed the progress card from step 1
+
+## 0.26.0 – 2026-10-30 (minor)
+- Biggest wins (one answer settles many songs: a name, a non-writer, a publisher) and a progress bar showing where every Muso song stands
+
+## 0.25.0 – 2026-10-30 (minor)
+- Same-song rule: Muso maps to an LNV row only with the same writers and a shared publisher; Same person? cases answered once for every client
+
+## 0.24.0 – 2026-10-29 (minor)
+- Step 1 shows the LNV as the master and Muso as what adds or updates it: LNV row cards, what changes in the LNV, Muso versions, one choice; new Download updated LNV
+
+## 0.23.0 – 2026-10-29 (minor)
+- Muso and LNV checked together: one case per song (its Muso versions + its LNV rows in one block), one Confirm, two steps instead of three
+
+## 0.22.0 – 2026-10-29 (minor)
+- Step 1 Clean Muso now works like MRM-Extractor's Song Merge: same ISRC + same writers merged, suggestions and ISRC conflicts to review (A/R keys), merged list, manual type, Excel download
+
+## 0.21.0 – 2026-10-29 (minor)
+- Consolidate in three steps, one after the other: 1 clean Muso (duplicate rows merged into songs), 2 Muso vs LNV, 3 LNV vs IPRS – every case shown as full records one below another with differences marked; no yes/no questions
+
+## 0.20.1 – 2026-10-29 (patch)
+- Uploads failed after a rebuild (backend/media was deleted by the tests and recreated by Docker as root): tests now use a temporary folder; the Add-client wizard waits for the LNV before the Muso and IPRS files
+
+## 0.20.0 – 2026-10-29 (minor)
+- Song check: LNV, Muso export and IPRS report checked together in one screen – one verdict per song, only the open questions asked one at a time; Add client is now two steps (details, the three files); spreadsheets read up to 20× faster
+
+## 0.19.0 – 2026-10-29 (minor)
+- Data clean rebuilt like the Extractor's Song Merge: one queue per kind of decision, list on the left and one case on the right compared field by field with Same / Different marks and evidence points, one-key decisions saved in the background; duplicates no longer lump versions, remakes or other recordings together (Laxmikant: 158 → 25 to decide); IPRS mapping compare look restored
+
 ## 0.18.1 – 2026-10-28 (patch)
 - Data clean is now a side-by-side compare: LNV on the left, the export on the right, one line per song with a coloured status and an Outcome menu the app pre-fills; filters for To decide, Duplicates, Missing, ISRC problems; no more questions
 

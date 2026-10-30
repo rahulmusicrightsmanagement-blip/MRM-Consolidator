@@ -7,8 +7,10 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from .dataclean import person_key, same_people, title_key
 from .iprs import SHARE_KEYS
 from .master import read_layout
+from .xlsx_patch import PatchSheet
 from .normalize import clean_text, norm_ipi, norm_title, same_party
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E46")
@@ -201,6 +203,75 @@ def _write_iprs_work(ws, layout, row, w, sn, fill, status):
         _put(ws, row, b["fields"].get("client_status"), status, fill)
 
 
+REPEAT_FILL = PatternFill("solid", fgColor="FBD9C9")
+# Data clean fill fields -> the LNV's work field, or its contributor slots
+DSP_FIELDS = {"ISRC": "isrc", "Release year": "release_year", "Duration": "duration", "Label": "label", "Movie / album": "movie"}
+DSP_SLOTS = {"Singers": "singers", "Lyricists": "authors", "Composers": "composers"}
+
+
+def _put_names(ws, layout, row, group, names, fill):
+    slots = layout["slots"].get(group, [])
+    for n, name in enumerate(names[:len(slots)]):
+        _put(ws, row, slots[n]["name"], name, fill)
+        if group == "singers":
+            _put(ws, row, slots[n]["role"], "S", fill)
+    return len(names) > len(slots)
+
+
+def lnv_update(master_path, fills, adds, repeats, source):
+    """The LNV updated from the DSP export only (no IPRS report yet) – see final_report."""
+    return final_report(master_path, dsp={"fills": fills, "adds": adds, "repeats": repeats, "source": source})
+
+
+def _dsp_changes(ws, layout, dsp):
+    """Step 1's answers on the LNV's own rows: blank fields the DSP fills (yellow – never over a value the LNV, or
+    IPRS just now, has), and rows entered twice marked (orange – never deleted)."""
+    fields, changes = layout["fields"], []
+    title_of = lambda row: clean_text(ws.cell(row, fields["title"] + 1).value) if "title" in fields else ""
+    for f in dsp.get("fills", []):
+        row, field, value = f["row"], f["field"], f["value"]
+        if field in DSP_SLOTS:
+            slots = layout["slots"].get(DSP_SLOTS[field], [])
+            if any(clean_text(ws.cell(row, sl["name"] + 1).value) for sl in slots):
+                continue
+            if _put_names(ws, layout, row, DSP_SLOTS[field], [v.strip() for v in value.split(",") if v.strip()], FILLED_FILL):
+                value += " (not all fit the LNV's slots)"
+        else:
+            col = fields.get(DSP_FIELDS.get(field))
+            if col is None or clean_text(ws.cell(row, col + 1).value):
+                continue
+            _put(ws, row, col, value, FILLED_FILL)
+        changes.append([row, title_of(row), f"{field} filled", f"{value} – from {dsp['source']}"])
+    for r in dsp.get("repeats", []):
+        if "title" in fields:
+            ws.cell(r["row"], fields["title"] + 1).fill = REPEAT_FILL
+        changes.append([r["row"], title_of(r["row"]), "Entered twice", f"The same song as row {r['keep']}, which is kept – check and remove"])
+    return changes
+
+
+def _write_dsp_song(ws, layout, row, song, sn):
+    """One DSP song as a new LNV row."""
+    fields = layout["fields"]
+    values = {"sn": sn, "title": song["title"], "isrc": (song.get("isrcs") or [""])[0], "movie": song.get("album", ""),
+              "release_year": (song.get("year") or "")[:4], "duration": song.get("duration", ""), "label": song.get("label", "")}
+    for field, value in values.items():
+        _put(ws, row, fields.get(field), value, ADDED_FILL)
+    _put_names(ws, layout, row, "authors", song.get("lyricists", []), ADDED_FILL)
+    _put_names(ws, layout, row, "composers", song.get("composers", []), ADDED_FILL)
+    _put_names(ws, layout, row, "singers", song.get("singers", []), ADDED_FILL)
+
+
+def _same_new_song(song, work):
+    """A DSP song to add and an IPRS-only work to add that are one song: same title, and the same writers or ISRC."""
+    if title_key(song["title"]) != title_key(work["title"]):
+        return False
+    if work.get("isrc_valid") and work["isrc_valid"] in (song.get("isrcs") or []):
+        return True
+    a = {person_key(n) for n in song.get("lyricists", []) + song.get("composers", [])} - {""}
+    b = {person_key(p["name"]) for p in work.get("authors", []) + work.get("composers", [])} - {""}
+    return bool(a and b) and same_people(a, b)
+
+
 def lnv_action_report(master_path, iprs, final, tunecodes, society, status):
     """Our master (LNV format) cut down to the songs that need this action at this society.
 
@@ -374,26 +445,29 @@ def _write_fill_row(ws, iprs_blocks, row, f):
     return changes
 
 
-def final_report(master_path, iprs, final, edits=(), fill=None):
-    """Our master, completed: the IPRS columns filled from the IPRS report (yellow), the songs IPRS has that the
-    master was missing appended (green), and the values the reviewer chose to take from IPRS (yellow)."""
-    wb = openpyxl.load_workbook(master_path)
-    ws = wb.worksheets[0]
+def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=None):
+    """The final LNV: the client's own LNV file with everything applied – the IPRS columns filled from the IPRS
+    report and the values the reviewer chose to take from IPRS (yellow), step 1's answers from the DSP export (blank
+    fields filled, yellow; repeats marked, orange), and the songs the LNV was missing appended (green): the DSP's new
+    songs and the IPRS-only works, a song that is both added once. Every change is listed in "MRM changes"."""
+    ws = PatchSheet(master_path)   # only the changed cells are written: a whole LNV takes openpyxl about a minute
     layout = read_layout([c.value for c in ws[1]])
     iprs_blocks = [b for b in layout["blocks"] if b["society"] == "IPRS"]
-    works = {w["internal_no"]: w for w in iprs["works"]}
+    works = {w["internal_no"]: w for w in (iprs or {}).get("works", [])}
     plan = {f["key"]: f for f in (fill or {}).get("rows", [])}
     changes = []
 
-    for r in final["rows"]:
+    for r in (final or {}).get("rows", []):
         if r["origin"] == "master" and r["key"] in plan:
             changes += _write_fill_row(ws, iprs_blocks, r["master_row"], plan[r["key"]])
-
     changes += apply_master_edits(ws, layout, edits, works)
+    if dsp:
+        changes += _dsp_changes(ws, layout, dsp)
 
     last = max([s for s in range(1, ws.max_row + 1) if any(ws.cell(s, c).value not in (None, "") for c in (1, 2))] + [1])
     sn = last - 1
-    for r in final["added"]:
+    added_works = [works[r["iprs_works"][0]] for r in (final or {}).get("added", [])]
+    for r in (final or {}).get("added", []):
         w = works[r["iprs_works"][0]]
         last += 1
         sn += 1
@@ -401,18 +475,18 @@ def final_report(master_path, iprs, final, edits=(), fill=None):
         changes.append([last, w["title"], "Added song", f"Missing from master; IPRS work {w['internal_no']}"])
         if r["key"] in plan:
             changes += _write_fill_row(ws, iprs_blocks, last, plan[r["key"]])
+    for song in (dsp or {}).get("adds", []):
+        twin = next((w for w in added_works if _same_new_song(song, w)), None)
+        if twin:
+            changes.append([None, song["title"], "Not added twice", f"Also new from {dsp['source']}; added once, from IPRS work {twin['internal_no']}"])
+            continue
+        last += 1
+        sn += 1
+        _write_dsp_song(ws, layout, last, song, sn)
+        changes.append([last, song["title"], "Added song", f"Not in the LNV; from {dsp['source']}"
+                        + (f" (ISRC {song['isrcs'][0]})" if song.get("isrcs") else "")])
 
-    if "MRM changes" in wb.sheetnames:
-        del wb["MRM changes"]
-    log = wb.create_sheet("MRM changes")
-    log.append(["Master row", "Title", "Change", "Detail"])
-    for cell in log[1]:
-        cell.fill, cell.font = HEADER_FILL, HEADER_FONT
-    for c in changes:
-        log.append(c)
-    for col, width in zip("ABCD", (12, 45, 22, 90)):
-        log.column_dimensions[col].width = width
-    return _bytes(wb)
+    return ws.save(changes, ["LNV row", "Title", "Change", "Detail"], (10, 45, 22, 90))
 
 
 def step_workbook(step, result, actions=None):

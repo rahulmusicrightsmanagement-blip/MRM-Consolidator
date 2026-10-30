@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -207,7 +208,7 @@ STORAGES = {
     'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedStaticFilesStorage'},
 }
 # Uploaded spreadsheets go to Google Drive once `manage.py drive_setup` has written the MRM_GDRIVE_* keys;
-# MEDIA_ROOT is then only a local cache. Tests always use the local folder.
+# MEDIA_ROOT is then only a local cache. Tests always use local disk (a temporary folder, see below).
 GDRIVE_KEYS = ('MRM_GDRIVE_CLIENT_ID', 'MRM_GDRIVE_CLIENT_SECRET', 'MRM_GDRIVE_REFRESH_TOKEN', 'MRM_GDRIVE_FOLDER_ID')
 if all(os.environ.get(k) for k in GDRIVE_KEYS) and 'test' not in sys.argv[1:2]:
     STORAGES['default'] = {'BACKEND': 'catalogue.drive.DriveStorage'}
@@ -222,6 +223,9 @@ LOGGING = {
 
 # Uploaded IPRS / master / society files, kept per reporting run.
 MEDIA_ROOT = DATA_DIR / 'media'
+if 'test' in sys.argv[1:2]:
+    # Tests write and delete uploads: never in the real folder, which Docker also shares (./backend/media).
+    MEDIA_ROOT = Path(tempfile.mkdtemp(prefix='mrm-test-media-'))
 DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 

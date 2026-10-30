@@ -19,7 +19,7 @@ from django.views.decorators.gzip import gzip_page
 from django.views.decorators.http import require_http_methods
 
 from .drive import DriveError
-from .engine import dataclean, export
+from .engine import dataclean, export, review, songmerge, steps
 from .engine.fill import fill_iprs_columns
 from .engine.verify import verify as verify_run
 from .engine.iprs import IPRSFormatError, parse_iprs
@@ -28,7 +28,7 @@ from .engine.pair import build_pair
 from .engine.master import MasterFormatError, parse_master
 from .engine.pipeline import run_pipeline
 from .engine.prs import SocietyFormatError, parse_prs
-from .models import NEWEST_FIRST, OLDEST_FIRST, SOCIETIES, SOCIETY_CODES, CleanDecision, Client, ClientSociety, DspFile, LinkDecision, MasterEdit, MasterFile, Registration, Run, SongFlag, SourceFile, Task, TaskEvent, Work
+from .models import NEWEST_FIRST, OLDEST_FIRST, SOCIETIES, SOCIETY_CODES, CleanDecision, Client, ClientSociety, DspFile, LinkDecision, MasterEdit, MasterFile, NameAlias, Registration, Run, SongFlag, SourceFile, Task, TaskEvent, Work
 from .sync import TASK_LABEL, is_latest, sync_run
 from .timing import measure
 
@@ -150,7 +150,9 @@ def snapshot(result):
         review = sum(1 for l in result["mapping"]["links"] if l["state"] == "review" or (
             l["state"] == "linked" and l["method"] != "Confirmed by reviewer" and (l["method"] == "Title + contributors" or l["reason"])))
         s.update(stage=4, linked=m["linked"], matched=m["matched"], with_differences=m["with_differences"],
-                 review=review, iprs_only=m["iprs_only"], master_only=m["master_only"])
+                 review=review, iprs_only=m["iprs_only"], master_only=m["master_only"],
+                 # the IPRS works the consolidate flow asks about ("Which LNV row?")
+                 needs=sum(1 for l in result["mapping"]["links"] if l["state"] == "review" and l["candidates"]))
     if result.get("final"):
         s["final_total"] = result["final"]["summary"]["final_total"]
         s["added"] = result["final"]["summary"]["added"]
@@ -192,10 +194,16 @@ def compute(run):
         # Local paths first: a file missing on this computer is downloaded from Drive (timed as "drive").
         local = {k: paths[k].file.path if paths.get(k) else None for k in ("iprs", "master", "prs")}
         with measure("processing"):
+            master = None
+            if paths.get("master"):   # the parse Data clean uses too: an LNV is read once
+                try:
+                    master = _cached(f"master-parsed-{paths['master'].id}-{ENGINE_VERSION}", lambda: parse_master(local["master"]))
+                except MasterFormatError:
+                    master = None   # the pipeline reads it again and reports the error
             result = run_pipeline(
                 iprs_path=local["iprs"], master_path=local["master"], prs_path=local["prs"],
                 decisions=decisions, societies=(run.society,),
-                client={"name": client.name.upper(), "ipi_name_no": client.ipi} if client else None,
+                client={"name": client.name.upper(), "ipi_name_no": client.ipi} if client else None, master=master,
             )
         summary = snapshot(result)
         changes = sync_run(run, result)
@@ -272,11 +280,18 @@ def _master(client):
     return client._master
 
 
+def _dsp(client):
+    if not hasattr(client, "_dsp"):
+        _load([client])
+    return client._dsp
+
+
 def _load(clients):
-    """Reports (with files), societies and newest master of many clients in three queries, not three per client."""
+    """Reports (with files), societies, newest master and DSP sheet of many clients in four queries, not four per
+    client."""
     by_id = {c.id: c for c in clients}
     for c in clients:
-        c._runs, c._societies, c._master = [], [], None
+        c._runs, c._societies, c._master, c._dsp = [], [], None, None
     for run in Run.objects.filter(client_id__in=by_id).order_by(*NEWEST_FIRST).prefetch_related("files"):
         run.client = by_id[run.client_id]
         run.client._runs.append(run)
@@ -285,6 +300,9 @@ def _load(clients):
     for master in MasterFile.objects.filter(client_id__in=by_id).order_by("-uploaded_at"):
         if by_id[master.client_id]._master is None:
             by_id[master.client_id]._master = master
+    for dsp in DspFile.objects.filter(client_id__in=by_id).order_by("-uploaded_at"):
+        if by_id[dsp.client_id]._dsp is None:
+            by_id[dsp.client_id]._dsp = dsp
 
 
 def society_summaries(client, coverage, task_counts):
@@ -309,6 +327,29 @@ def society_summaries(client, coverage, task_counts):
             "review": (latest.summary or {}).get("review", 0) if latest and cs.society == "IPRS" else 0,
         })
     return out
+
+
+JOURNEY = ["Add the files", "Muso & LNV", "LNV vs IPRS", "Final LNV"]
+
+
+def _journey(client):
+    """Where the client is in the consolidate flow: 1 the files · 2 the DSP export and the LNV · 3 the LNV against
+    IPRS · 4 the final LNV. A step is done when nothing in it needs a person (the counts each step stores)."""
+    master, dsp = _master(client), _dsp(client)
+    run = next((r for r in _runs(client) if r.society == "IPRS" and r.active_files().get("iprs")), None)
+    files = {"lnv": bool(master), "dsp": bool(dsp), "iprs": bool(run)}
+    needs = {"2": ((dsp.summary or {}).get("flow") or {}).get("needs") if dsp else None,
+             "3": (run.summary or {}).get("needs") if run else None}
+    if not all(files.values()):
+        step = 1
+    elif needs["2"] is None or needs["2"] > 0:
+        step = 2
+    elif needs["3"] is None or needs["3"] > 0:
+        step = 3
+    else:
+        step = 4
+    return {"step": step, "label": JOURNEY[step - 1], "steps": JOURNEY, "files": files, "needs": needs,
+            "source": dsp.source if dsp else "Muso"}
 
 
 def latest_run(client):
@@ -375,6 +416,7 @@ def _metrics(client, works, counts, task_counts, no_credit):
                   "verified": sum(t["n"] for t in task_counts if t["state"] == Task.VERIFIED),
                   "by_type": dict(by_type)},
         "stage": {"index": stage, "label": STAGES[stage]},
+        "journey": _journey(client),
         "review": s.get("review", 0),
         "latest_report": _run_json(run) if run else None,
     }
@@ -543,7 +585,18 @@ def client_master(request, client_id):
 # Decisions that point at rows of the LNV: they go when a new LNV arrives. Name, junk and missing-song decisions stay.
 ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:")
 CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}, "name": {"same", "different"},
-                 "junk": {"fix", "ok"}, "missing": {"add", "not_ours"}, "fill": {"accept", "reject"}, "link": {"same", "none"}}
+                 "junk": {"fix", "ok"}, "missing": {"add", "not_ours"}, "fill": {"accept", "reject"}, "link": {"same", "none"},
+                 "merge": {"accepted", "rejected", "pending"}, "type": {"set"},
+                 "writer": {"ignore", "keep"}, "pub": {"same", "different"}}
+# Answers about people and companies, not about one client's songs: kept once, for every client
+GLOBAL_DECISIONS = ("name:", "writer:", "pub:")
+
+
+def _clean_decisions(client):
+    """The client's step 1 answers, with the "same person" answers every client shares."""
+    out = {d.key: {"choice": d.choice, "data": d.data} for d in client.clean_decisions.all() if not d.key.startswith(GLOBAL_DECISIONS)}
+    out.update({a.key: {"choice": a.choice, "data": a.data} for a in NameAlias.objects.all()})
+    return out
 
 
 def _drop_row_decisions(client):
@@ -564,6 +617,12 @@ def _dsp_key(dsp):
     return f"dsp-parsed-{dsp.id}-{hashlib.sha1(dsp.sheet.encode()).hexdigest()[:8]}-{ENGINE_VERSION}"
 
 
+def _dsp_sheet(dsp):
+    """The DSP sheet read, and its step 1 merge analysis (both cached per file and sheet)."""
+    sheet = _cached(_dsp_key(dsp), lambda: dataclean.parse_dsp(dsp.file.path, dsp.sheet))
+    return sheet, _cached(_dsp_key(dsp) + "-merge", lambda: songmerge.analyse(sheet["rows"]))
+
+
 def _cached(key, build):
     value = cache.get(key)
     if value is None:
@@ -579,16 +638,18 @@ def _clean_result(client, decisions):
     if not master or not dsp:
         return master, dsp, None
     aliases, links = dataclean.learned(decisions)
-    stamp = (master.id, master.file.name, dsp.id, dsp.sheet, client.name, json.dumps([aliases, links], sort_keys=True), ENGINE_VERSION)
+    merges = {k: d for k, d in decisions.items() if k.startswith("merge:")}
+    rules = dataclean.rules_of(decisions)
+    stamp = (master.id, master.file.name, dsp.id, dsp.sheet, client.name, json.dumps([aliases, links, merges, rules], sort_keys=True), ENGINE_VERSION)
     key = f"clean-{client.id}-{hashlib.sha1(repr(stamp).encode()).hexdigest()}"
 
     def build():
         parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
-        sheet = _cached(_dsp_key(dsp), lambda: dataclean.parse_dsp(dsp.file.path, dsp.sheet))
+        sheet, merge = _dsp_sheet(dsp)
         with measure("processing"):
-            return dataclean.match(parsed, sheet, client.name, aliases, links)
+            return dataclean.match(parsed, sheet, client.name, aliases, links, songmerge.songs(merge, decisions), rules)
     result = dataclean.apply_decisions(_cached(key, build), decisions)
-    summary = dataclean.summary_counts(result)
+    summary = {**dataclean.summary_counts(result), **({"flow": dsp.summary["flow"]} if (dsp.summary or {}).get("flow") else {})}
     if summary != dsp.summary:
         DspFile.objects.filter(pk=dsp.pk).update(summary=summary)
         dsp.summary = summary
@@ -596,7 +657,7 @@ def _clean_result(client, decisions):
 
 
 def _clean_payload(client):
-    decisions = {d.key: {"choice": d.choice, "data": d.data} for d in client.clean_decisions.all()}
+    decisions = _clean_decisions(client)
     try:
         master, dsp, result = _clean_result(client, decisions)
     except (FileNotFoundError, DriveError) as e:
@@ -648,6 +709,8 @@ def client_clean(request, client_id):
         except DriveError as e:
             return JsonResponse({"error": f"The file could not be saved: {e}"}, status=502)
         dsp.save()
+        # Step 1 choices name rows of the old sheet; a new export has other rows.
+        client.clean_decisions.filter(Q(key__startswith="merge:") | Q(key__startswith="type:")).delete()
         cache.set(_dsp_key(dsp), parsed, RESULT_TTL)   # already read for the check: not read again
     return _clean_payload(client)
 
@@ -655,17 +718,33 @@ def client_clean(request, client_id):
 @gzip_page
 @require_http_methods(["POST"])
 def clean_decisions(request, client_id):
-    """Many review decisions in one go: {items: [{key, choice, data?}]}; choice null clears a decision."""
+    """Many review decisions in one go: {items: [{key, choice, data?}], quiet?}; choice null clears a decision.
+    quiet: answer only {saved} (step 1 saves as the reviewer goes; the result is rebuilt when it is next asked for)."""
     client = get_object_or_404(Client, pk=client_id)
+    body = _body(request)
     items = {}
-    for item in _body(request).get("items") or []:
+    for item in body.get("items") or []:
         key, choice = str(item.get("key") or "")[:300], item.get("choice")
         prefix = key.split(":", 1)[0]
         if prefix not in CLEAN_CHOICES or (choice is not None and choice not in CLEAN_CHOICES[prefix]):
             return JsonResponse({"error": f"Unknown decision {choice!r} for {key!r}"}, status=400)
         items[key] = (choice, item.get("data") if isinstance(item.get("data"), dict) else {})
+    saved = len(items)
+    names = {k: v for k, v in items.items() if k.startswith(GLOBAL_DECISIONS)}   # one answer for every client
+    items = {k: v for k, v in items.items() if k not in names}
     clear = [k for k, (c, _) in items.items() if c is None]
     with transaction.atomic():
+        NameAlias.objects.filter(key__in=[k for k, (c, _) in names.items() if c is None]).delete()
+        known = {a.key: a for a in NameAlias.objects.filter(key__in=list(names))}
+        fresh, kept = [], []
+        for k, (c, data) in names.items():
+            if c is None:
+                continue
+            a = known.get(k) or NameAlias(key=k)
+            a.choice, a.data, a.decided_by, a.updated_at = c, data, request.user.email, timezone.now()
+            (kept if a.pk else fresh).append(a)
+        NameAlias.objects.bulk_create(fresh)
+        NameAlias.objects.bulk_update(kept, ["choice", "data", "decided_by", "updated_at"])
         if clear:
             client.clean_decisions.filter(key__in=clear).delete()
         existing = {d.key: d for d in client.clean_decisions.filter(key__in=[k for k in items if k not in clear])}
@@ -682,12 +761,110 @@ def clean_decisions(request, client_id):
                 changed.append(d)
         CleanDecision.objects.bulk_create(new)
         CleanDecision.objects.bulk_update(changed, ["choice", "data", "updated_at"])
+    if body.get("quiet"):
+        return JsonResponse({"saved": saved})
     return _clean_payload(client)
+
+
+def _iprs_run(client):
+    """The client's newest IPRS report that has its file."""
+    return next((r for r in client.runs.filter(society="IPRS").order_by(*NEWEST_FIRST).prefetch_related("files")
+                 if r.active_file("iprs")), None)
+
+
+@gzip_page
+@require_http_methods(["GET"])
+def client_steps(request, client_id):
+    """The consolidate flow: ?step=1 the DSP sheet and the LNV, one case per song (review.py) · 3 the LNV against the
+    IPRS report. Every answer carries the files and each step's counts; ?row=N instead returns
+    what the three files hold for that one LNV row."""
+    client = get_object_or_404(Client, pk=client_id)
+    master = client.active_master()
+    run = _iprs_run(client)
+    dsp = client.dsp_files.order_by("-uploaded_at").first()
+    files = {"lnv": _master_json(master), "dsp": _dsp_json(dsp), "iprs": None}
+    if run:
+        f = run.active_file("iprs")
+        files["iprs"] = {"name": f.original_name, "uploaded_at": f.uploaded_at.isoformat(), "run": run.id,
+                         "report_date": run.report_date.isoformat() if run.report_date else None, "works": None}
+    out = {"files": files, "run": run.id if run else None, "source": dsp.source if dsp else "Muso",
+           "counts": {"1": None, "3": None}, "step": None}
+    if not master:
+        return JsonResponse(out)
+    decisions = _clean_decisions(client)
+    try:
+        _, dsp, clean = _clean_result(client, decisions)
+        result = compute(run) if run else None
+        parsed = result["master"] if result and result.get("master") else _cached(
+            f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
+        sheet, merge = _dsp_sheet(dsp) if dsp else (None, None)
+    except (FileNotFoundError, DriveError) as e:
+        return JsonResponse({"error": f"A spreadsheet could not be opened: {e}"}, status=502)
+    if request.GET.get("row"):
+        return JsonResponse({"records": steps.records_for_row(parsed, clean, result, int(request.GET["row"]), out["source"])})
+    built = {}
+    if clean:
+        built["1"] = review.build(sheet, merge, decisions, clean, parsed)
+        flow = {"needs": built["1"]["counts"]["needs"], "songs": built["1"]["counts"]["songs"]}
+        if (dsp.summary or {}).get("flow") != flow:   # the client list shows where the client is without computing
+            dsp.summary = {**(dsp.summary or {}), "flow": flow}
+            DspFile.objects.filter(pk=dsp.pk).update(summary=dsp.summary)
+    if result and result.get("tunecodes"):
+        aliases, _ = dataclean.learned(decisions)
+        people = dataclean.People(aliases, dataclean._client_keys(parsed["songs"], client.name), dataclean.rules_of(decisions))
+        built["3"] = steps.step3(parsed, result, _decisions(run), _not_our_work(client), people)
+        files["iprs"]["works"] = result["iprs"]["stats"]["works"]
+    out["counts"] = {k: (built[k]["counts"] if k in built else None) for k in ("1", "3")}
+    out["step"] = built.get(request.GET.get("step", ""))
+    return JsonResponse(out)
+
+
+def lnv_update_export(request, client_id):
+    """The final LNV: the client's LNV with step 1's answers (the reviewer's, else the app's) and – once the IPRS
+    report is in – step 2's: IPRS codes and statuses, the IPRS-only works, the values taken from IPRS. One file."""
+    client = get_object_or_404(Client, pk=client_id)
+    decisions = _clean_decisions(client)
+    master, dsp, clean = _clean_result(client, decisions)
+    if not master:
+        return JsonResponse({"error": "Upload the LNV master first"}, status=409)
+    dsp_part = None
+    if clean:
+        choice = lambda item: (item.get("decision") or {}).get("choice")
+        dsp_part = {
+            "fills": [f for f in clean["fills"] if choice(f) == "accept"],
+            "adds": [m for m in clean["missing"] if choice(m) == "add"],
+            "repeats": [{"row": r["row"], "keep": d["data"]["keep"]} for c in clean["duplicates"] for d in [c.get("decision") or {}]
+                        if d.get("choice") == "duplicate" and not d.get("auto") and (d.get("data") or {}).get("keep")
+                        for r in c["rows"] if r["row"] != d["data"]["keep"]],
+            "source": dsp.source}
+    run = _iprs_run(client)
+    result = compute(run) if run else None
+    try:
+        if result and result.get("final"):
+            content = export.final_report(master.file.path, result["iprs"], result["final"], _master_edits(client),
+                                          fill_plan(run, result), dsp_part)
+        else:
+            content = export.final_report(master.file.path, dsp=dsp_part)
+    except (FileNotFoundError, DriveError) as e:
+        return JsonResponse({"error": f"The LNV could not be opened: {e}"}, status=502)
+    return _xlsx(content, f"{client.name.replace(' ', '_')}_LNV_final_{date.today()}")
+
+
+def merge_export(request, client_id):
+    """Step 1's Excel: Merged Songs + All Songs, as MRM-Extractor writes it."""
+    client = get_object_or_404(Client, pk=client_id)
+    decisions = _clean_decisions(client)
+    _, dsp, clean = _clean_result(client, decisions)
+    if not clean:
+        return JsonResponse({"error": "Upload the LNV master and a DSP sheet first"}, status=409)
+    sheet, merge = _dsp_sheet(dsp)
+    return _xlsx(songmerge.workbook(sheet, merge, decisions, steps.credits(clean)),
+                 f"{client.name.replace(' ', '_')}_{dsp.source.replace(' ', '_')}_merged_{date.today()}")
 
 
 def clean_export(request, client_id):
     client = get_object_or_404(Client, pk=client_id)
-    decisions = {d.key: {"choice": d.choice, "data": d.data} for d in client.clean_decisions.all()}
+    decisions = _clean_decisions(client)
     _, dsp, result = _clean_result(client, decisions)
     if not result:
         return JsonResponse({"error": "Upload the LNV master and a DSP sheet first"}, status=409)

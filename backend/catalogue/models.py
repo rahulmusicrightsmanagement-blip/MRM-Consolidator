@@ -274,6 +274,16 @@ class DspFile(models.Model):
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
 
+class NameAlias(models.Model):
+    """A reviewer's answer to "is this one person?" for two writer spellings (key = name:<key a>|<key b>). Shared by
+    every client: once "Loy Mendonsa" is "Aloysuis Peter Mendonsa", it is for all catalogues."""
+    key = models.CharField(max_length=300, unique=True)
+    choice = models.CharField(max_length=20)   # same · different
+    data = models.JSONField(default=dict, blank=True)
+    decided_by = models.CharField(max_length=254, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class CleanDecision(models.Model):
     """A reviewer's decision on one Data clean review item (key = dup:… / isrc:… / name:… / junk:… / missing:… /
     fill:… / link:…). Kept per client; "same person" and link decisions also teach the next match."""

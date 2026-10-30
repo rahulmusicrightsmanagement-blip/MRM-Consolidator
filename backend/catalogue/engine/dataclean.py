@@ -16,10 +16,10 @@ import unicodedata
 from collections import Counter, OrderedDict, defaultdict
 from functools import lru_cache
 
-import openpyxl
 from rapidfuzz import fuzz
 
 from .normalize import alternate_titles, clean_text
+from .xlsx import Book
 
 # ---------------------------------------------------------------- song keys (from MRM-Extractor's Merge songs)
 
@@ -36,7 +36,7 @@ VERSION_WORDS = [
     "trap", "house", "phonk", "bolly", "afro", "drill", "edm", "dj", "rmx", "vibe",
     "vibes", "trending", "unwind", "soundtrack", "original motion picture", "ost",
     "film", "theme", "guitar", "piano", "flute", "violin", "sax", "saxophone", "chill",
-    "dance", "rework", "rewind", "2.0", "3.0", "dialogue", "part", "pt",
+    "dance", "rework", "rewind", "2.0", "3.0", "dialogue", "part", "pt", "bpm",
 ]
 VERSION_RE = re.compile(r"(?<![a-z])(" + "|".join(re.escape(w) for w in VERSION_WORDS) + r")(?![a-z])", re.I)
 TRAILING_RE = re.compile(r"(\s+(" + VERSION_RE.pattern + r")(\s+\S+)?)\s*$", re.I)
@@ -171,6 +171,8 @@ def same_person(a, b):
         return False
     if a == b or a.replace(" ", "") == b.replace(" ", ""):   # 'Anandbakshi' / 'Anand Bakshi'
         return True
+    if " " in a + b and len(a) >= 10 and sorted(a.replace(" ", "")) == sorted(b.replace(" ", "")):   # 'Shivkumar' / 'Shiv Kumar'
+        return True
     x, y = set(a.split()), set(b.split())
     small, big = (x, y) if len(x) <= len(y) else (y, x)
     return small <= big and (len(small) >= 2 or len(next(iter(small))) >= 5)
@@ -222,6 +224,7 @@ COLUMNS = {
     "author": ["author", "authors", "author(s)"],
     "composer": ["composer", "composers", "composer(s)", "music", "music by", "music director"],
     "label": ["music label", "label", "record label"],
+    "publisher": ["publisher", "publishers", "publisher(s)"],
     "duration": ["duration (mm:ss)", "duration"],
     "link": ["song link", "link", "url", "track link"],
     "popularity": ["popularity (0-100)", "popularity"],
@@ -253,9 +256,9 @@ def _number(v):
         return None
 
 
-def _read_rows(ws, cols):
+def _read_rows(sheet_rows, cols):
     rows = []
-    for n, r in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+    for n, r in enumerate(sheet_rows[1:], start=2):
         get = lambda f: r[cols[f]] if f in cols and cols[f] < len(r) else None
         title = _txt(get("title"))
         if not title:
@@ -269,6 +272,8 @@ def _read_rows(ws, cols):
             "composers": split_names(get("composer")),
             "label": _txt(get("label")), "duration": _txt(get("duration")), "link": _txt(get("link")),
             "popularity": _number(get("popularity")), "spotify_id": _txt(get("spotify_id")), "muso_id": _txt(get("muso_id")),
+            "publishers": split_names(get("publisher")),
+            "cells": tuple(r),
         })
     return rows
 
@@ -277,19 +282,21 @@ def parse_dsp(path, sheet=None):
     """One DSP sheet from MRM-Extractor (Muso Credits, Apple Music Songs, Spotify Songs …). Without `sheet`, the
     sheet with the most songs carrying an ISRC is used; the others are listed so another can be chosen."""
     try:
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        book = Book(path)
     except Exception:
         raise DspFormatError("Could not read the file. Upload the Excel (.xlsx) sheet from MRM-Extractor.")
     found = []
-    for ws in wb.worksheets:
-        if ws.title in OUTPUT_SHEETS:
-            continue
-        header = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None) or ()
-        cols = _columns(header)
-        if "title" in cols and "isrc" in cols and not any("(duplicates)" in str(h or "").lower() for h in header):
-            rows = _read_rows(ws, cols)
-            found.append({"sheet": ws.title, "cols": cols, "rows": rows, "usable": sum(1 for r in rows if r["isrcs"])})
-    wb.close()
+    with book:
+        for title in book.sheetnames:
+            if title in OUTPUT_SHEETS:
+                continue
+            sheet_rows = book.rows(title)
+            header = sheet_rows[0] if sheet_rows else ()
+            cols = _columns(header)
+            if "title" in cols and "isrc" in cols and not any("(duplicates)" in str(h or "").lower() for h in header):
+                rows = _read_rows(sheet_rows, cols)
+                found.append({"sheet": title, "cols": cols, "rows": rows, "header": [str(h or "").strip() for h in header],
+                              "usable": sum(1 for r in rows if r["isrcs"])})
     if not found:
         raise DspFormatError("No sheet has a song title and an ISRC column. Upload a Muso, Apple Music or Spotify sheet from MRM-Extractor.")
     sheets = [{"name": f["sheet"], "songs": f["usable"]} for f in found]
@@ -310,17 +317,95 @@ def parse_dsp(path, sheet=None):
         source = "Spotify"
     else:
         source = "DSP"
-    return {"source": source, "sheet": pick["sheet"], "sheets": sheets, "rows": pick["rows"],
+    return {"source": source, "sheet": pick["sheet"], "sheets": sheets, "rows": pick["rows"], "header": pick["header"],
             "stats": {"rows": len(pick["rows"]), "with_isrc": pick["usable"]}}
 
 
 # ---------------------------------------------------------------- the match
 
+# Composer groups credited under one name: the group is its members ("Shankar-Ehsaan-Loy" = the three of them)
+GROUPS = {
+    "Shankar-Ehsaan-Loy": ["Shankar Mahadevan", "Ehsaan Noorani", "Loy Mendonsa"],
+    "Laxmikant-Pyarelal": ["Laxmikant Kudalkar", "Pyarelal Sharma"],
+    "Jatin-Lalit": ["Jatin Pandit", "Lalit Pandit"],
+    "Vishal-Shekhar": ["Vishal Dadlani", "Shekhar Ravjiani"],
+    "Shiv-Hari": ["Shivkumar Sharma", "Hariprasad Chaurasia"],
+    "Salim-Sulaiman": ["Salim Merchant", "Sulaiman Merchant"],
+    "Sajid-Wajid": ["Sajid Khan", "Wajid Khan"],
+    "Nadeem-Shravan": ["Nadeem Saifi", "Shravan Rathod"],
+    "Anand-Milind": ["Anand Chitragupt", "Milind Chitragupt"],
+    "Kalyanji-Anandji": ["Kalyanji Virji Shah", "Anandji Virji Shah"],
+    "Shankar-Jaikishan": ["Shankar Singh Raghuvanshi", "Jaikishan Dayabhai Panchal"],
+    "Sachin-Jigar": ["Sachin Sanghvi", "Jigar Saraiya"],
+    "Ajay-Atul": ["Ajay Gogavale", "Atul Gogavale"],
+    "Meet Bros": ["Manmeet Singh", "Harmeet Singh"],
+    "Sonik-Omi": ["Master Sonik", "Om Prakash Sonik"],
+}
+
+# Publishers: the same company is written many ways ("Saregama India Ltd" / "SAREGAMA PLC"); its first distinctive
+# word is the key. Renamed or bought companies map onto today's name; collecting societies are not publishers.
+PUB_GENERIC = {"the", "m", "s", "messrs", "music", "musics", "india", "indian", "records", "recording", "recordings", "tapes",
+               "entertainment", "entertainments", "enterprises", "publishing", "publishers", "publisher", "pub", "pvt",
+               "private", "ltd", "limited", "plc", "inc", "llp", "llc", "co", "company", "corp", "corporation", "songs",
+               "industries", "media", "digital", "and", "of", "worldwide", "group", "international"}
+PUB_ALIASES = {"tseries": "super", "hmv": "saregama", "gramophone": "saregama", "yrf": "yash", "sme": "sony",
+               "venus": "ishtar", "musicindia": "universal", "polygram": "universal", "mgb": "universal"}
+LEGAL = {"the", "m", "s", "pvt", "private", "ltd", "limited", "plc", "inc", "llp", "llc", "co", "company", "corp"}
+NOT_PUBLISHERS = {"iprs", "prs", "ipi", "ascap", "bmi", "socan", "na", "unknown", "none", "self", "independent"}
+
+
+@lru_cache(maxsize=8192)
+def publisher_key(name):
+    words = re.findall(r"[a-z0-9]+", _ascii(clean_text(name)).replace("-", "").replace("'", ""))
+    if not words or "".join(words) in NOT_PUBLISHERS:
+        return ""
+    own = [w for w in words if w not in PUB_GENERIC]
+    key = own[0] if own else "".join(w for w in words if w not in LEGAL)   # 'Music India Ltd' -> 'musicindia'
+
+    return PUB_ALIASES.get(key, key)
+
+
+def _alike(a, b):
+    """Two name keys worth asking about: they share a word (a surname) or are spelled almost alike."""
+    return bool({w for w in a.split() if len(w) >= 3} & {w for w in b.split() if len(w) >= 3}) \
+        or fuzz.ratio(a.replace(" ", ""), b.replace(" ", "")) >= 80
+
+
+def same_people(a, b):
+    """Two writer lists are the same people: every name on each side is someone on the other side."""
+    return all(any(same_person(x, y) for y in b) for x in a) and all(any(same_person(x, y) for x in a) for y in b)
+
+
+def work_check(s, l):
+    """The rule for one DSP song and one LNV row being the same work: the same writers (lyricists and composers,
+    as people – a DSP-only name that is also the song's singer aside) and at least one shared publisher. writers: same · differ · blank (missing is not matching);
+    publisher: same · differ · unchecked (a side has none)."""
+    if not s["people"] or not l["people"]:
+        writers = "blank"
+    elif same_people(s["people"], l["people"]):
+        writers = "same"
+    else:
+        # The DSP often lists a song's singers among its composers: a DSP-only name that also sings this very song
+        # does not make it another work, as long as every LNV writer is on the DSP side
+        extra = [k for k in s["people"] if not any(same_person(k, y) for y in l["people"])]
+        writers = "same" if extra and all(any(same_person(y, x) for x in s["people"]) for y in l["people"]) \
+            and all(any(same_person(k, x) for x in s.get("aside", ())) for k in extra) else "differ"
+    if not s["pubkeys"] or not l["pubkeys"]:
+        publisher = "unchecked"
+    else:
+        publisher = "same" if s["pubkeys"] & l["pubkeys"] else "differ"
+    return writers, publisher
+
+
 class People:
     """Name keys with reviewer-approved aliases, and who the client is."""
 
-    def __init__(self, aliases, client_keys):
+    def __init__(self, aliases, client_keys, rules=None):
         self.aliases = aliases
+        rules = rules or {}
+        self.ignore = set(rules.get("ignore", ()))      # DSP writer names that are not writers ("Raju Singh")
+        self.pubs = dict(rules.get("pubs", {}))          # publisher keys that are one company ("big" -> "super")
+        self.groups = {person_key(g): members for g, members in GROUPS.items()}
         self.client_keys = client_keys
         self.client_words = {w for k in client_keys for w in k.split()}
         self._client = {}
@@ -329,11 +414,26 @@ class People:
         k = person_key(name)
         return self.aliases.get(k, k)
 
+    def pub(self, name):
+        k = publisher_key(name)
+        return self.pubs.get(k, k)
+
     def is_client(self, k):
         if k not in self._client:
             words = set(k.split())
             self._client[k] = any(same_person(k, c) for c in self.client_keys) or (len(words) >= 2 and words <= self.client_words)
         return self._client[k]
+
+    def work(self, names):
+        """{key: display} of every writer, the client too, with groups as their members – who wrote the work."""
+        out = {}
+        for n in names:
+            if is_junk_name(n):
+                continue
+            k = self.key(n)
+            for name in self.groups.get(person_key(n), [n]) if k else []:
+                out.setdefault(self.key(name), name)
+        return out
 
     def writers(self, names):
         """{key: display} of the writers who are not the client (the client is on every song: no evidence)."""
@@ -345,15 +445,6 @@ class People:
             if k and not self.is_client(k):
                 out.setdefault(k, n)
         return out
-
-
-def _agree(a, b):
-    """First pair of names that is one person in both writer lists, or None."""
-    for x in a:
-        for y in b:
-            if same_person(x, y):
-                return a[x]
-    return None
 
 
 def _client_keys(lnv, client_name):
@@ -381,6 +472,7 @@ def _lnv_songs(master, people):
             "tkeys": {k for k in (title_key(t) for t in titles) if k},
             "isrcs": set(s["isrcs"]), "writers": people.writers(names),
             "has_writers": bool(names), "film": album_key(s.get("movie") or ""),
+            "people": people.work(names), "pubkeys": {k for p in s.get("publishers", []) if (k := people.pub(p["name"]))},
             "version": version_type(s["title"]),
             "codes": dict(Counter(r["society"] for r in s["registrations"] if r["code"])),
         })
@@ -393,44 +485,10 @@ def _primary_order(rows, idxs):
                                        -(rows[i]["popularity"] or 0), i))
 
 
-def _dsp_songs(rows, people, lyricist_keys=frozenset()):
-    """DSP rows → recordings (shared ISRC / track ID) → songs (same title, writers not conflicting)."""
-    n = len(rows)
-    dsu, seen = DSU(n), {}
-    for i, r in enumerate(rows):
-        ids = [("isrc", t) for t in r["isrcs"]]
-        ids += [(f, r[f]) for f in ("spotify_id", "muso_id") if r[f]]
-        for k in ids:
-            if k in seen:
-                dsu.union(seen[k], i)
-            else:
-                seen[k] = i
-    comps = OrderedDict()
-    for i in range(n):
-        comps.setdefault(dsu.find(i), []).append(i)
-    writers = {root: people.writers([x for i in idxs for x in rows[i]["lyricists"] + rows[i]["composers"]])
-               for root, idxs in comps.items()}
-    by_title = defaultdict(list)
-    for root, idxs in comps.items():
-        for k in OrderedDict.fromkeys(title_key(rows[i]["title"]) for i in idxs):
-            if k:
-                by_title[k].append(root)
-    for roots in by_title.values():
-        clusters = []  # [writers, root]
-        for r in sorted(roots, key=lambda r: -len(comps[r])):
-            for cl in clusters:
-                if not writers[r] or not cl[0] or _agree(writers[r], cl[0]):
-                    dsu.union(cl[1], r)
-                    cl[0].update(writers[r])
-                    break
-            else:
-                clusters.append([dict(writers[r]), r])
-    groups = OrderedDict()
-    for i in range(n):
-        groups.setdefault(dsu.find(i), []).append(i)
-
+def _dsp_songs(rows, people, groups, lyricist_keys=frozenset()):
+    """DSP songs from step 1's merge (songmerge.songs: lists of row indexes)."""
     songs = []
-    for idxs in groups.values():
+    for idxs in groups:
         idxs = _primary_order(rows, idxs)
         p = rows[idxs[0]]
         isrcs = list(OrderedDict.fromkeys(t for i in idxs for t in rows[i]["isrcs"]))
@@ -444,7 +502,8 @@ def _dsp_songs(rows, people, lyricist_keys=frozenset()):
             recs.setdefault(rows[i]["isrcs"][0] if rows[i]["isrcs"] else f"row{i}", i)
         years = sorted(rows[i]["year"] for i in idxs if rows[i]["year"])
         songs.append({
-            "key": sorted(isrcs)[0] if isrcs else "T:" + (title_key(p["title"]) or str(p["row"])),
+            # the primary (original) recording's ISRC: unticking a version in step 1 keeps the song's answers
+            "key": p["isrcs"][0] if p["isrcs"] else isrcs[0] if isrcs else "T:" + (title_key(p["title"]) or str(p["row"])),
             "rows": idxs, "title": p["title"], "base": clean_title(p["title"]) or p["title"], "album": p["album"],
             "isrcs": isrcs, "primary_isrc": p["isrcs"][0] if p["isrcs"] else (isrcs[0] if isrcs else ""),
             "tkeys": {k for k in (title_key(rows[i]["title"]) for i in idxs) if k},
@@ -460,6 +519,11 @@ def _dsp_songs(rows, people, lyricist_keys=frozenset()):
             "other_composers": [x for x in composers if not is_junk_name(x) and not people.is_client(people.key(x))
                                 and people.key(x) not in lyric_keys and people.key(x) not in lyricist_keys],
             "medley": is_medley(p["title"]),
+            "people": people.work(lyricists + composers),
+            # DSP-only names that do not make another work: this song's singers, and names the reviewer said are no writers
+            "aside": {people.key(x) for i in idxs for x in rows[i]["singers"] if not is_junk_name(x)} | people.ignore,
+            "publishers": list(OrderedDict.fromkeys(x for i in idxs for x in rows[i].get("publishers", []))),
+            "pubkeys": {k for i in idxs for x in rows[i].get("publishers", []) if (k := people.pub(x))},
         })
     for s in songs:
         s["credit"] = ("medley" if s["medley"] else "performer" if not s["client_writer"]
@@ -469,7 +533,6 @@ def _dsp_songs(rows, people, lyricist_keys=frozenset()):
 
 # Link score out of 10
 POINTS = {"isrc": 5, "title": 3, "similar_title": 2, "writer": 3, "film": 1, "writer_conflict": -4, "film_conflict": -1}
-MATCH_AT = 6     # this score or more, with nothing conflicting: matched without review
 CANDIDATE_AT = 3  # below this a candidate is dropped
 MAX_CANDIDATES = 5
 
@@ -487,13 +550,22 @@ def _evaluate(s, l, ev):
     elif t:
         pts += POINTS["similar_title"]
         why.append(f"Similar title ({t}%)")
-    agreed = _agree(s["writers"], l["writers"])
-    if agreed:
+    writers, publisher = work_check(s, l)
+    if writers == "same":
         pts += POINTS["writer"]
-        why.append(f"Writer {agreed}")
-    elif s["writers"] and l["writers"]:
+        why.append("Same writers")
+    elif writers == "differ":
         pts += POINTS["writer_conflict"]
-        flags.append(f"Writers differ – DSP: {', '.join(list(s['writers'].values())[:3])} · LNV: {', '.join(list(l['writers'].values())[:3])}")
+        only_s = [v for k, v in s["people"].items() if not any(same_person(k, y) for y in l["people"])]
+        only_l = [v for k, v in l["people"].items() if not any(same_person(k, x) for x in s["people"])]
+        flags.append("Different writers – " + " · ".join(x for x in (f"DSP also: {', '.join(only_s[:3])}" if only_s else "",
+                                                                     f"LNV also: {', '.join(only_l[:3])}" if only_l else "") if x))
+    else:
+        flags.append("Writers missing on one side – cannot be checked")
+    if publisher == "same":
+        why.append("Same publisher")
+    elif publisher == "differ":
+        flags.append(f"Different publisher – DSP: {', '.join(sorted(s['pubkeys']))[:60]} · LNV: {', '.join(p['name'] for p in l['song'].get('publishers', [])[:2])}")
     if s["film"] and l["film"]:
         if s["film"] == l["film"] or (min(len(s["film"]), len(l["film"])) >= 5 and (s["film"] in l["film"] or l["film"] in s["film"])):
             pts += POINTS["film"]
@@ -503,7 +575,8 @@ def _evaluate(s, l, ev):
     if ev.get("isrc") and not t:
         if title_similarity(s["title"], l["title"]) < 60:
             flags.append(f"Same ISRC but a different title – the ISRC may be on the wrong song in the LNV ('{l['title']}')")
-    return {"row": l["row"], "score": max(0, min(10, pts)), "points": pts, "evidence": why, "flags": flags}
+    return {"row": l["row"], "score": max(0, min(10, pts)), "points": pts, "evidence": why, "flags": flags,
+            "writers": writers, "publisher": publisher, "isrc": bool(ev.get("isrc")), "title": t or 0}
 
 
 def _candidates(s, lnv, index):
@@ -539,21 +612,41 @@ def _candidates(s, lnv, index):
     return cand
 
 
-def match(master, dsp, client_name="", aliases=None, links=None):
+def match(master, dsp, client_name="", aliases=None, links=None, groups=None, rules=None):
     """Compare the LNV (parse_master result) with one DSP sheet (parse_dsp result).
     aliases: {name key: canonical key} from "same person" decisions.
-    links: {DSP song key: {"choice": "same" | "none", "rows": [LNV rows]}} from link decisions."""
+    links: {DSP song key: {"choice": "same" | "none", "rows": [LNV rows]}} from link decisions.
+    groups: the DSP songs from step 1 (songmerge.songs); without them, only rows sharing an ISRC and writers are one."""
     aliases, links = aliases or {}, links or {}
-    people = People(aliases, _client_keys(master["songs"], client_name))
+    people = People(aliases, _client_keys(master["songs"], client_name), rules)
     lnv = _lnv_songs(master, people)
     by_row = {l["row"]: j for j, l in enumerate(lnv)}
     # Anyone credited as a lyricist anywhere (Muso often repeats the lyricist under composers) is not a rival composer
     lyricist_keys = {people.key(x) for r in dsp["rows"] for x in r["lyricists"]} \
         | {people.key(p["name"]) for l in lnv for p in l["song"].get("authors", [])}
-    songs = _dsp_songs(dsp["rows"], people, lyricist_keys)
-    lnv_titles = Counter(k for l in lnv for k in l["tkeys"])
-    dsp_titles = Counter(k for s in songs for k in s["tkeys"])
-    conflict_keys = set()   # writers whose spelling keeps a link open: only these name pairs are worth asking
+    if groups is None:
+        from .songmerge import analyse, songs as merged
+        groups = merged(analyse(dsp["rows"]), {})
+    songs = _dsp_songs(dsp["rows"], people, groups, lyricist_keys)
+    name_pairs = defaultdict(lambda: {"n": 0, "songs": []})   # one name each side keeps a link apart: worth asking
+    # The other single causes worth one decision: one extra DSP writer, or one publisher under two names
+    extra_writers = defaultdict(lambda: {"n": 0, "songs": []})
+    pub_pairs = defaultdict(lambda: {"n": 0, "songs": []})
+    pub_names = {}
+    for l in lnv:
+        for p in l["song"].get("publishers", []):
+            pub_names.setdefault(people.pub(p["name"]), p["name"])
+    for r in dsp["rows"]:
+        for x in r.get("publishers", []):
+            pub_names.setdefault(people.pub(x), x)
+
+    def count(table, key, title, **shown):
+        e = table[key]
+        e.update(shown)
+        if title not in e["songs"]:
+            e["n"] += 1
+            if len(e["songs"]) < 4:
+                e["songs"].append(title)
 
     by_isrc, by_title, by_block, by_film = defaultdict(list), defaultdict(list), defaultdict(set), defaultdict(list)
     for j, l in enumerate(lnv):
@@ -572,7 +665,8 @@ def match(master, dsp, client_name="", aliases=None, links=None):
         decided = links.get(s["key"])
         cands = sorted((_evaluate(s, lnv[j], ev) for j, ev in _candidates(s, lnv, index).items()),
                        key=lambda c: (-c["points"], c["row"]))
-        cands = [c for c in cands if c["points"] >= CANDIDATE_AT or c["evidence"][0:1] and c["evidence"][0].startswith("ISRC")]
+        # every LNV row with the same recording or title stays a candidate – the writers decide below, not the points
+        cands = [c for c in cands if c["isrc"] or c["title"] or c["points"] >= CANDIDATE_AT]
         if decided:
             if decided["choice"] == "none":
                 s["decided"] = True
@@ -587,52 +681,59 @@ def match(master, dsp, client_name="", aliases=None, links=None):
                     lnv_links[by_row[c["row"]]].append((si, c))
                 matched.append({"song": si, "links": chosen, "confirmed": True})
                 continue
-        strong = [c for c in cands if c["points"] >= MATCH_AT and not c["flags"]]
-        if not strong:
-            unique = len(cands) == 1 and all(lnv_titles[k] == 1 and dsp_titles[k] == 1 for k in s["tkeys"] & lnv[by_row[cands[0]["row"]]]["tkeys"])
-            sure = next(((c, why) for c in cands for why in [_certain(s, c, lnv[by_row[c["row"]]], unique)] if why), None)
-            if sure:
-                c, why = sure
-                c["auto"], c["notes"], c["flags"] = why, c["flags"], []
-                strong = [c]
+        # The rule: the same writers and no other publisher make the same work; anything else is a different song
+        same = [c for c in cands if c["writers"] == "same" and c["publisher"] != "differ"]
+        strong = [c for c in same if (c["isrc"] or c["title"] >= 90)
+                  and not any("different title" in f for f in c["flags"])]
+        for c in strong:
+            c["auto"] = "Same writers and publisher" if c["publisher"] == "same" else f"Same writers – {dsp['source']} has no publisher to check"
+            c["unchecked"] = c["publisher"] == "unchecked"
         if strong:
             for c in strong:
                 lnv_links[by_row[c["row"]]].append((si, c))
             matched.append({"song": si, "links": strong, "confirmed": False})
-        elif cands:
-            check.append({"song": si, "candidates": cands[:MAX_CANDIDATES]})
-            for c in cands[:MAX_CANDIDATES]:
-                if any(f.startswith("Writers differ") for f in c["flags"]):
-                    conflict_keys.update(s["writers"], lnv[by_row[c["row"]]]["writers"])
+            continue
+        unsure = same + [c for c in cands if c["writers"] == "blank" and c["publisher"] != "differ"]
+        near = [c for c in cands if c not in unsure]
+        s["near"] = near[:3]
+        for c in near:
+            l = lnv[by_row[c["row"]]]
+            only_s = [k for k in s["people"] if not any(same_person(k, y) for y in l["people"])]
+            only_l = [k for k in l["people"] if not any(same_person(k, x) for x in s["people"])]
+            if c["writers"] == "differ" and len(only_s) == 1 and len(only_l) == 1 and _alike(only_s[0], only_l[0]):
+                count(name_pairs, (only_s[0], only_l[0]), s["title"], a=s["people"][only_s[0]], b=l["people"][only_l[0]])
+            elif c["writers"] == "differ" and len(only_s) == 1 and not only_l and c["publisher"] != "differ":
+                count(extra_writers, only_s[0], s["title"], name=s["people"][only_s[0]])
+            elif c["writers"] == "same" and c["publisher"] == "differ":
+                for x in s["pubkeys"]:
+                    for y in l["pubkeys"]:
+                        count(pub_pairs, tuple(sorted((x, y))), s["title"], a=pub_names.get(x, x), b=pub_names.get(y, y))
+        if unsure:
+            check.append({"song": si, "candidates": unsure[:MAX_CANDIDATES]})
         else:
             unmatched.append(si)
 
-    return _report(lnv, songs, matched, check, unmatched, lnv_links, people, dsp, conflict_keys)
-
-
-def _certain(s, c, l, unique):
-    """Why a link the score left open is still certain, or None: the app answers it and says why."""
-    if any("different title" in f for f in c["flags"]):
-        return None
-    ev = " ".join(c["evidence"])
-    sim = title_similarity(s["title"], l["title"])
-    if ev.startswith("ISRC") and sim >= 85:
-        return "Same ISRC and title – the same recording"
-    if "Same title" in ev and "Writer" in ev:
-        return "Same title and same writer"
-    if "Similar title" in ev and "Writer" in ev and sim >= 90:
-        return "Almost the same title and same writer"
-    if unique and "Same title" in ev and not c["flags"]:
-        return "Same title, and no other song in either sheet has it"
-    return None
+    result = _report(lnv, songs, matched, check, unmatched, lnv_links, people, dsp, name_pairs)
+    # One decision each settles every song it counts – the "biggest wins", most songs first
+    result["wins"] = sorted(
+        [{"key": "writer:" + k, "kind": "writer", "name": e["name"], "songs": e["n"], "examples": e["songs"]}
+         for k, e in extra_writers.items() if e["n"] >= 2 and not people.is_client(k)]
+        + [{"key": "pub:" + "|".join(k), "kind": "publisher", "a": e["a"], "b": e["b"], "songs": e["n"], "examples": e["songs"]}
+           for k, e in pub_pairs.items() if e["n"] >= 2],
+        key=lambda w: -w["songs"])
+    return result
 
 
 # ---------------------------------------------------------------- the queues
 
 def _lnv_brief(l):
     s = l["song"]
+    names = lambda kind, n=6: [p["name"] for p in s.get(kind, [])][:n]
     return {"row": l["row"], "title": l["title"], "movie": l["movie"], "isrcs": sorted(l["isrcs"]),
             "writers": [p["name"] for kind in ("authors", "composers") for p in s.get(kind, [])][:6],
+            "lyricists": names("authors"), "composers": names("composers"), "singers": names("singers", 5),
+            "alt_title": s.get("alt_title") or "", "label": s.get("label") or "", "duration": s.get("duration") or "",
+            "language": s.get("language") or "",
             "year": s.get("release_year") or "", "codes": l["codes"], "has_writers": l["has_writers"]}
 
 
@@ -641,7 +742,8 @@ def _song_brief(s):
             "lyricists": s["lyricists"][:5], "composers": s["composers"][:6], "singers": s["singers"][:5],
             "year": s["year"], "popularity": s["popularity"], "versions": s["versions"], "recordings": s["recordings"],
             "link": s["link"], "client_writer": s["client_writer"], "other_composers": s["other_composers"][:5],
-            "credit": s["credit"]}
+            "credit": s["credit"], "members": s["rows"], "duration": s["duration"], "label": s["label"],
+            "publishers": s["publishers"][:4], "near": s.get("near", [])}
 
 
 def _filled(l):
@@ -650,14 +752,54 @@ def _filled(l):
             + sum(1 for f in ("movie", "release_year", "duration", "label", "language") if s.get(f)))
 
 
+TAG_FILLER = {phonetic(w) for w in ("film", "from", "movie", "original", "motion", "picture", "soundtrack", "ost", "the", "feat", "ft")}
+
+
+@lru_cache(maxsize=131072)
+def _words(text):
+    return frozenset(phonetic(w) for w in re.findall(r"[a-z0-9]+", _ascii(text)) if len(w) > 1)
+
+
+def _versions_differ(a, b):
+    """The two titles carry different version tags ('Revival', 'Bengali Version', 'Chill Hop'): two versions of
+    a song, not one song entered twice. Words of either song name or either film do not count as a tag."""
+    skip = TAG_FILLER.union(*(_words(clean_title(x)) for x in (a["title"], b["title"], a["movie"], b["movie"])))
+    return (_words(a["title"]) - skip) != (_words(b["title"]) - skip)
+
+
+def _same_writers(a, b):
+    """Every writer of one row is a writer of the other (the client aside): the same credits, any order or spelling.
+    One shared name is not enough – a remake keeps the composer and changes the lyricist."""
+    return all(any(same_person(x, y) for y in b) for x in a) and all(any(same_person(y, x) for x in a) for y in b)
+
+
+def _twins(a, b):
+    """Nothing says these two rows are different entries: no different version tag, no different writers, and not
+    two different recordings (each row with its own ISRCs). Blank values are unknown, never agreement."""
+    if _versions_differ(a, b):
+        return False
+    if a["isrcs"] and b["isrcs"] and not a["isrcs"] & b["isrcs"]:
+        return False
+    return not a["writers"] or not b["writers"] or _same_writers(a["writers"], b["writers"])
+
+
 def _duplicates(lnv, lnv_links, songs):
-    """LNV rows that look like one song: same ISRC, same DSP song, or same title with an agreeing writer."""
+    """LNV rows that are one song entered twice: same ISRC, or the same DSP song / same title with the same writers.
+    Versions (remix, revival, a language version …) and different recordings are not duplicates, and a row joins a
+    group only when it fits every row already in it (A ≈ B and B ≈ C never pulls in a C that differs from A)."""
     dsu = DSU(len(lnv))
+    members = {j: [j] for j in range(len(lnv))}
     reasons = defaultdict(list)   # frozenset(pair) -> reasons
     wrong_isrc = []
 
-    def join(a, b, why):
-        dsu.union(a, b)
+    def join(a, b, why, check=True):
+        ra, rb = dsu.find(a), dsu.find(b)
+        if ra != rb:
+            if check and not all(_twins(lnv[x], lnv[y]) for x in members[ra] for y in members[rb]):
+                return
+            dsu.union(ra, rb)
+            root = dsu.find(ra)
+            members[root] = members.pop(ra) + members.pop(rb) if root == ra else members.pop(rb) + members.pop(ra)
         reasons[frozenset((a, b))].append(why)
 
     by_isrc = defaultdict(list)
@@ -665,12 +807,14 @@ def _duplicates(lnv, lnv_links, songs):
         for t in l["isrcs"]:
             by_isrc[t].append(j)
     alike = lambda a, b: bool(lnv[a]["tkeys"] & lnv[b]["tkeys"]) or title_similarity(lnv[a]["title"], lnv[b]["title"]) >= 85
+    # Without a shared ISRC the main titles must agree: the LNV's alternate title sometimes names another song
+    same_title = lambda a, b: title_key(lnv[a]["title"]) == title_key(lnv[b]["title"]) or title_similarity(lnv[a]["title"], lnv[b]["title"]) >= 85
     for t, js in by_isrc.items():
         for x in range(len(js)):
             for y in range(x + 1, len(js)):
                 a, b = js[x], js[y]
                 if alike(a, b):
-                    join(a, b, f"Same ISRC {t}")
+                    join(a, b, f"Same ISRC {t}", check=False)   # one recording: the same entry whatever else differs
                 elif title_similarity(lnv[a]["title"], lnv[b]["title"]) < 60:
                     # Not a duplicate: a case of its own, so it never pulls other songs together
                     wrong_isrc.append((a, b, t))
@@ -682,7 +826,7 @@ def _duplicates(lnv, lnv_links, songs):
         for x in range(len(js)):
             for y in range(x + 1, len(js)):
                 a, b = js[x], js[y]
-                if lnv[a]["version"] == lnv[b]["version"] and alike(a, b):
+                if lnv[a]["version"] == lnv[b]["version"] and same_title(a, b):
                     join(a, b, f"Both match the {songs[si]['title']!r} DSP song")
     by_title = defaultdict(list)
     for j, l in enumerate(lnv):
@@ -694,11 +838,9 @@ def _duplicates(lnv, lnv_links, songs):
         for x in range(len(js)):
             for y in range(x + 1, len(js)):
                 a, b = lnv[js[x]], lnv[js[y]]
-                if a["version"] != b["version"]:
-                    continue
-                who = _agree(a["writers"], b["writers"])
-                if who:
-                    join(js[x], js[y], f"Same title and writer {who}")
+                if a["version"] == b["version"] and a["writers"] and b["writers"] and same_title(js[x], js[y]) \
+                        and _same_writers(a["writers"], b["writers"]):
+                    join(js[x], js[y], f"Same title and same writers ({', '.join(list(a['writers'].values())[:3])})")
 
     groups = defaultdict(list)
     for j in range(len(lnv)):
@@ -731,7 +873,7 @@ def _duplicates(lnv, lnv_links, songs):
     return cases
 
 
-def _names(lnv, songs, people, conflict_keys=frozenset()):
+def _names(lnv, songs, people, name_pairs=None):
     """Spellings of one person that do not match on their own ('Malik Verma' / 'Malik Varma'), and junk names."""
     seen = defaultdict(lambda: {"spellings": Counter(), "lnv": 0, "dsp": 0, "songs": []})
     junk = defaultdict(lambda: {"rows": [], "count": 0})
@@ -787,8 +929,21 @@ def _names(lnv, songs, people, conflict_keys=frozenset()):
                     "similarity": sim, "a": side(ea), "b": side(eb),
                     "client": people.is_client(a) or people.is_client(b),
                     # Spellings that change no match are only listed for information
-                    "info": not any(same_person(k, c) for k in (a, b) for c in conflict_keys)})
-    out.sort(key=lambda p: (p["info"], -(p["a"]["lnv"] + p["a"]["dsp"] + p["b"]["lnv"] + p["b"]["dsp"])))
+                    "info": True})
+    # One name each side is all that keeps a DSP song and an LNV row apart: is it one person? Worth asking.
+    asked = {tuple(sorted((x["a_key"], x["b_key"]))): x for x in out}
+    for (a, b), p in (name_pairs or {}).items():
+        if a in people.aliases or b in people.aliases:
+            continue
+        side = lambda name, n: {"spelling": name, "spellings": [name], "lnv": 0, "dsp": n, "songs": p["songs"]}
+        item = asked.get(tuple(sorted((a, b))))
+        if item:
+            item.update(info=False, links=p["n"])
+            continue
+        out.append({"key": "name:" + "|".join(sorted((a, b))), "kind": "spelling", "a_key": a, "b_key": b,
+                    "similarity": round(fuzz.ratio(a, b)), "a": side(p["a"], p["n"]), "b": side(p["b"], 0),
+                    "client": people.is_client(a) or people.is_client(b), "info": False, "links": p["n"]})
+    out.sort(key=lambda p: (p["info"], -p.get("links", 0), -(p["a"]["lnv"] + p["a"]["dsp"] + p["b"]["lnv"] + p["b"]["dsp"])))
     for name, j in sorted(junk.items(), key=lambda x: -x[1]["count"]):
         out.append({"key": "junk:" + name.lower(), "kind": "junk", "name": name, "count": j["count"], "songs": j["rows"]})
     return out
@@ -827,7 +982,7 @@ def _fills(lnv, songs, lnv_links):
     return out
 
 
-def _report(lnv, songs, matched, check, unmatched, lnv_links, people, dsp, conflict_keys=frozenset()):
+def _report(lnv, songs, matched, check, unmatched, lnv_links, people, dsp, name_pairs=None):
     briefs = {}
 
     def song(si):
@@ -838,12 +993,12 @@ def _report(lnv, songs, matched, check, unmatched, lnv_links, people, dsp, confl
     by_row = {l["row"]: l for l in lnv}
     with_lnv = lambda c: {**c, "lnv": _lnv_brief(by_row[c["row"]])}
     duplicates = _duplicates(lnv, lnv_links, songs)
-    names = _names(lnv, songs, people, conflict_keys)
+    names = _names(lnv, songs, people, name_pairs)
     missing = [{**song(si), "key": "missing:" + songs[si]["key"], "song_key": songs[si]["key"],
                 "rejected": bool(songs[si].get("decided")),
-                **({"auto": {"choice": "add", "why": "The client is the only composer credited and it is an original song"}}
-                   if songs[si]["credit"] == "writer" and not songs[si]["other_composers"] and ORIGINAL in songs[si]["versions"]
-                   and not songs[si].get("decided") else {})}
+                **({"auto": {"choice": "add", "why": "The client is a credited writer, it is an original song, and no LNV row is close"}}
+                   if songs[si]["credit"] in ("writer", "shared") and ORIGINAL in songs[si]["versions"]
+                   and not songs[si].get("decided") and not songs[si].get("near") else {})}   # a near LNV row: a person decides
                for si in unmatched]
     credit_order = {"writer": 0, "shared": 1, "medley": 2, "performer": 3}
     missing.sort(key=lambda m: (credit_order[m["credit"]], -m["popularity"], m["title"].lower()))
@@ -854,7 +1009,8 @@ def _report(lnv, songs, matched, check, unmatched, lnv_links, people, dsp, confl
     check_items.sort(key=lambda c: (not c["flagged"], -c["candidates"][0]["points"], -c["song"]["popularity"]))
     matched_items = [{"key": "link:" + songs[m["song"]]["key"], "song": song(m["song"]), "confirmed": m["confirmed"],
                       "links": [with_lnv(x) for x in m["links"]], "auto": next((x["auto"] for x in m["links"] if x.get("auto")), None),
-                      "notes": [f for x in m["links"] for f in x.get("notes", [])]} for m in matched]
+                      "notes": [f for x in m["links"] for f in x.get("notes", [])],
+                      "unchecked": not m["confirmed"] and any(x.get("unchecked") for x in m["links"])} for m in matched]
     matched_items.sort(key=lambda m: -m["song"]["popularity"])
 
     rows_matched = len(lnv_links)
@@ -931,6 +1087,26 @@ def learned(decisions):
     for k in list(parent):
         aliases[k] = find(k)
     return aliases, links
+
+
+def rules_of(decisions):
+    """The reviewer's catalogue-wide rules: writer names to set aside ("writer:<key>" = ignore) and publisher names
+    that are one company ("pub:<a>|<b>" = same)."""
+    ignore, parent = set(), {}
+
+    def find(k):
+        while parent.get(k, k) != k:
+            k = parent[k]
+        return k
+    for key, d in sorted(decisions.items()):
+        if key.startswith("writer:") and d["choice"] == "ignore":
+            ignore.add(key[7:])
+        elif key.startswith("pub:") and d["choice"] == "same":
+            a, b = key[4:].split("|", 1)
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+    return {"ignore": sorted(ignore), "pubs": {k: find(k) for k in parent}}
 
 
 def summary_counts(result):

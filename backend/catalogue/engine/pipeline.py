@@ -13,14 +13,16 @@ def _no_iprs(client):
                       "categories": {}, "client_roles": {}}}
 
 
-def run_pipeline(iprs_path=None, master_path=None, prs_path=None, decisions=None, societies=("IPRS", "PRS"), client=None):
-    out = {"iprs": None, "master": None, "prs": None, "mapping": None, "final": None, "tunecodes": None, "errors": {}}
+def run_pipeline(iprs_path=None, master_path=None, prs_path=None, decisions=None, societies=("IPRS", "PRS"), client=None,
+                 master=None):
+    """master: the master already parsed (parse_master of master_path), so it is not read twice."""
+    out = {"iprs": None, "master": master, "prs": None, "mapping": None, "final": None, "tunecodes": None, "errors": {}}
     if iprs_path:
         try:
             out["iprs"] = parse_iprs(iprs_path)
         except IPRSFormatError as e:
             out["errors"]["iprs"] = {"message": str(e), "checks": e.checks}
-    if master_path:
+    if master_path and master is None:
         try:
             out["master"] = parse_master(master_path)
         except MasterFormatError as e:

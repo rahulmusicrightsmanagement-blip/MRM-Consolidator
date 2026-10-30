@@ -10,16 +10,27 @@ import { fmtDate, pct, today } from '../lib/client'
 import { useToast } from '../lib/toast'
 import type { ClientMetrics, ClientRow, SocietySummary } from '../types'
 
-export const STAGES = ['Needs master', 'Master loaded', 'Societies in progress', 'All societies complete']
+/** The consolidate flow every client goes through, one step after the other. */
+export const STAGES = ['Add the files', 'Muso & LNV', 'LNV vs IPRS', 'Final LNV']
+const at = (c: ClientMetrics) => (c.journey?.step ?? 1) - 1
 
-export function StageDots({ stage }: { stage?: ClientMetrics['stage'] }) {
-  const n = stage?.index ?? 0
+/** What still needs a person in the client's current step, in a few words. */
+export function journeyNote(j?: ClientMetrics['journey']) {
+  if (!j) return ''
+  if (j.step === 1) return [!j.files.lnv && 'the LNV', !j.files.dsp && `the ${j.source} export`, !j.files.iprs && 'the IPRS report'].filter(Boolean).join(', ').replace(/^/, 'Needs ')
+  const n = j.needs[String(j.step) as '2' | '3']
+  if (j.step === 4) return 'Ready to download'
+  return n == null ? 'Not opened yet' : `${n.toLocaleString('en-IN')} need you`
+}
+
+export function StageDots({ journey }: { journey?: ClientMetrics['journey'] }) {
+  const n = (journey?.step ?? 1) - 1
   return (
     <div className="stage-cell" title={STAGES[n]}>
       <span className="stage-dots" aria-hidden>
-        {[1, 2, 3].map((i) => <span key={i} className={i <= n ? (n === 3 ? 'on done' : 'on') : ''} />)}
+        {[0, 1, 2, 3].map((i) => <span key={i} className={i <= n ? (n === 3 ? 'on done' : 'on') : ''} />)}
       </span>
-      <span className={`stage-label s${n}`}>{STAGES[n]}</span>
+      <span className={`stage-label s${n}`}>Step {n + 1} of 4 · {STAGES[n]}</span>
     </div>
   )
 }
@@ -27,17 +38,15 @@ export function StageDots({ stage }: { stage?: ClientMetrics['stage'] }) {
 /** One society for one client: status, step, and a bar of registered / to amend / to register. */
 export function SocietyCell({ s, code }: { s?: SocietySummary; code?: string }) {
   if (!s) return <div className="soc-mini empty"><span className="soc-code">{code}</span><span className="small muted">Not added</span></div>
-  const total = s.steps.length
-  const step = s.report?.confirmed_step ?? 0
   const c = s.coverage
-  const amend = (c?.statuses.needs_amend ?? 0) + (c?.statuses.duplicate ?? 0)
+  const amend = c?.statuses.needs_amend ?? 0   // as step 3 counts them
   const register = c?.statuses.not_registered ?? 0
   return (
     <div className={`soc-mini ${s.status}`}>
       <div className="soc-mini-head">
         <span className="soc-code">{s.code}</span>
         <span className={`soc-state ${s.status}`}>
-          {s.status === 'completed' ? <><CheckCircle2 size={12} />Done</> : s.status === 'in_progress' ? `Step ${Math.min(step + 1, total)}/${total}` : 'Not started'}
+          {s.status === 'completed' ? <><CheckCircle2 size={12} />Done</> : c ? 'Checked' : 'Not started'}
         </span>
       </div>
       {c ? <>
@@ -65,17 +74,6 @@ function ago(d?: string | null) {
   return n <= 0 ? 'Today' : n === 1 ? 'Yesterday' : n < 30 ? `${n} days ago` : fmtDate(d)
 }
 
-/** Registered share of the whole catalogue across societies. */
-function Ring({ value }: { value: number }) {
-  const r = 16, len = 2 * Math.PI * r
-  return (
-    <svg className={`ring ${value >= 95 ? 'good' : value >= 60 ? 'mid' : 'low'}`} width="44" height="44" viewBox="0 0 44 44" aria-hidden>
-      <circle cx="22" cy="22" r={r} className="ring-track" />
-      <circle cx="22" cy="22" r={r} className="ring-fill" strokeDasharray={`${(value / 100) * len} ${len}`} transform="rotate(-90 22 22)" />
-      <text x="22" y="22" dy=".35em" textAnchor="middle">{value}%</text>
-    </svg>
-  )
-}
 
 function InlineOwner({ value, onSave }: { value: string; onSave: (v: string) => void }) {
   const [v, setV] = useState(value)
@@ -136,28 +134,24 @@ export default function Tracker() {
     return {
       total: list.length,
       works: list.reduce((n, c) => n + c.works, 0),
-      overdue: list.filter((c) => c.due_date && c.due_date < today() && c.stage.index < 3).length,
-      byStage: STAGES.map((_, i) => list.filter((c) => c.stage.index === i).length),
+      overdue: list.filter((c) => c.due_date && c.due_date < today() && at(c) < 3).length,
+      byStage: STAGES.map((_, i) => list.filter((c) => at(c) === i).length),
     }
   }, [clients])
-  const registered = (c: ClientRow) => {
-    const cov = Object.values(c.coverage)
-    return pct(cov.reduce((n, v) => n + v.registered, 0), cov.reduce((n, v) => n + v.total, 0))
-  }
 
-  const rows = (clients ?? []).filter((c) => stage === null || c.stage.index === stage)
+  const rows = (clients ?? []).filter((c) => stage === null || at(c) === stage)
   const societyCodes = [...new Set((clients ?? []).flatMap((c) => c.societies.map((s) => s.code)))]
   const owners = [...new Set((clients ?? []).map((c) => c.owner).filter(Boolean))]
   const filters: Filter<ClientRow>[] = [
     { label: 'Owner', options: [...owners.map((o) => ({ id: o, label: o })), { id: '__none', label: 'Unassigned' }], test: (c, v) => v === '__none' ? !c.owner : c.owner === v },
     { label: 'Due', options: [{ id: 'overdue', label: 'Overdue' }, { id: 'none', label: 'No due date' }], test: (c, v) =>
-      v === 'none' ? !c.due_date : (!!c.due_date && c.due_date < today() && c.stage.index < 3) },
+      v === 'none' ? !c.due_date : (!!c.due_date && c.due_date < today() && at(c) < 3) },
   ]
 
   return (
     <AppShell>
       <header className="page-header">
-        <div><div className="eyebrow">MRM</div><h1>Clients</h1>
+        <div><h1>Clients</h1>
           <p className="lede">{loading ? 'Loading…' : <>{stats.total} client{stats.total === 1 ? '' : 's'} · {stats.works.toLocaleString()} works
             {stats.overdue > 0 && <> · <span className="t-bad">{stats.overdue} overdue</span></>}</>}</p></div>
         <div className="page-actions"><Button variant="primary" icon={<UserPlus size={15} />} onClick={() => navigate('/clients/new')}>Add client</Button></div>
@@ -180,7 +174,7 @@ export default function Tracker() {
           <div className="loading"><span className="spinner" />Loading clients…</div>
         )) : clients.length === 0 ? (
           <Empty icon={<Users size={22} />} title="No clients yet" action={<Button variant="primary" onClick={() => navigate('/clients/new')}>Add the first client</Button>}>
-            Add a client, load our master, then work through IPRS and PRS one at a time.
+            Add a client with its three files – the LNV, the Muso export and the IPRS report – then go through the four steps.
           </Empty>
         ) : (
           <DataTable<ClientRow> rows={rows} rowKey={(c) => String(c.id)} filters={filters}
@@ -194,10 +188,11 @@ export default function Tracker() {
                     <span className="client-sub"><span>{c.works.toLocaleString()} works</span><span className="mono">IPI {c.ipi || '—'}</span></span></div>
                 </div>
               ) },
-              { key: 'progress', header: 'Progress', sort: (c) => c.stage.index * 1000 + registered(c), render: (c) => (
-                <div className="progress-cell"><Ring value={registered(c)} />
-                  <div><span className={`stage-name p${c.stage.index}`}>{STAGES[c.stage.index]}</span>
-                    <span className="stage-steps" aria-hidden>{[0, 1, 2, 3].map((i) => <i key={i} className={i <= c.stage.index ? 'on' : ''} />)}</span></div>
+              { key: 'progress', header: 'Where it is', sort: (c) => at(c) * 100000 - (c.journey.needs[String(at(c) + 1) as '2'] ?? 0), render: (c) => (
+                <div className="progress-cell"><span className={`journey-n p${at(c)}`}>{at(c) + 1}</span>
+                  <div><span className={`stage-name p${at(c)}`}>{STAGES[at(c)]}</span>
+                    <span className="stage-steps" aria-hidden>{[0, 1, 2, 3].map((i) => <i key={i} className={i <= at(c) ? 'on' : ''} />)}</span>
+                    <span className="journey-note">{journeyNote(c.journey)}</span></div>
                 </div>
               ) },
               { key: 'societies', header: 'Societies', render: (c) => (
@@ -205,7 +200,7 @@ export default function Tracker() {
               ) },
               { key: 'owner', header: 'Owner', sort: (c) => c.owner || '~', render: (c) => <InlineOwner value={c.owner} onSave={(v) => patch(c, { owner: v })} /> },
               { key: 'due', header: 'Due', sort: (c) => c.due_date ?? '9999', render: (c) => (
-                <DuePill value={c.due_date ?? null} done={c.stage.index >= 3} onSave={(v) => patch(c, { due_date: v })} />
+                <DuePill value={c.due_date ?? null} done={at(c) >= 3} onSave={(v) => patch(c, { due_date: v })} />
               ) },
               { key: 'report', header: 'Last report', sort: (c) => c.latest_report?.report_date ?? '', render: (c) => (
                 <div className="report-cell"><span title={fmtDate(c.latest_report?.report_date)}>{ago(c.latest_report?.report_date)}</span>

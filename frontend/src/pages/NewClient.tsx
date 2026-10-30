@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, CheckCircle2, CircleCheckBig, GitCompareArrows, Hash, Lock, UserRound, Users, XCircle } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, Hash, ListChecks, Lock, UserRound, Users } from 'lucide-react'
 import { AppShell } from '../components/AppShell'
-import { Button, FileDrop } from '../components/ui'
+import { Button } from '../components/ui'
 import { api } from '../lib/api'
 import { fmtDate, today } from '../lib/client'
-import { useToast } from '../lib/toast'
-import type { ClientDetail, ClientRef, ClientRow, RunPayload } from '../types'
+import type { ClientDetail, ClientRef, ClientRow, DspInfo } from '../types'
+import { FileCard } from './client/Consolidate'
 import { hue, initials } from './Tracker'
 
-const STEPS = ['Client details', 'Our master', 'Societies']
+const STEPS = ['Client details', 'The files']
 
 export function Stepper({ steps, current, confirmed, onPick }: { steps: string[]; current: number; confirmed: number; onPick?: (n: number) => void }) {
   return (
@@ -34,77 +34,19 @@ export function Stepper({ steps, current, confirmed, onPick }: { steps: string[]
 
 const STEP_INFO = [
   'Name, IPI number, owner and due date',
-  'The LNV report – the central catalogue',
-  'Pick societies and upload each report',
+  'LNV, Muso export and IPRS report',
 ]
 
 const addDays = (n: number) => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10) }
 const QUICK_DUE = [{ label: '1 week', days: 7 }, { label: '2 weeks', days: 14 }, { label: '1 month', days: 30 }]
-const DEFAULT_EXTRA = ['PRS']
 
-type Lane = { runId?: number; payload?: RunPayload; date: string; busy?: boolean; error?: string }
+type Slot = 'lnv' | 'dsp' | 'iprs'
+const dspText = (d: DspInfo) => `${d.source} · ${(d.stats.rows ?? 0).toLocaleString()} rows`
 
-/** One society in step 3: report date, upload, the file check and what waits in its mapping. */
-function SocietyLane({ code, name, lane, clientIpi, onDate, onFile, onOpen, disabled }: {
-  code: string; name: string; lane: Lane; clientIpi: string; onDate: (d: string) => void; onFile: (f: File) => void; onOpen: () => void; disabled: boolean
-}) {
-  const p = lane.payload
-  const file = p?.run.files[code.toLowerCase() as 'iprs' | 'prs'] ?? null
-  const checks = (code === 'IPRS' ? p?.result.iprs?.checks : p?.result.prs?.checks) ?? []
-  const failed = checks.filter((c) => !c.passed)
-  const ir = code === 'IPRS' ? p?.result.iprs : null
-  const works = ir ? ir.stats.works : p?.result.prs?.stats.works ?? 0
-  const links = ir ? p?.result.mapping?.links ?? [] : []
-  const count = (st: 'linked' | 'review' | 'unmatched') => links.filter((l) => l.state === st).length
-  const otherWriter = !!ir?.client.ipi_name_no && !!clientIpi && ir.client.ipi_name_no.replace(/^0+/, '') !== clientIpi.replace(/^0+/, '')
-  const state = lane.busy ? 'busy' : !file ? 'waiting' : failed.length || otherWriter ? 'warn' : 'good'
-  return (
-    <section className={`lane ${state}`}>
-      <header className="lane-head">
-        <span className="lane-code">{code}</span>
-        <div className="grow"><b>{name}</b><small>{code === 'IPRS' ? 'Works report from IPRS' : `${code} works export`}</small></div>
-        <span className={`lane-state ${state}`}>{state === 'busy' ? <><span className="spinner small-dark" />Checking…</> : state === 'waiting' ? 'Waiting for file'
-          : state === 'warn' ? <><AlertTriangle size={13} />Needs a look</> : <><CircleCheckBig size={13} />Checked</>}</span>
-      </header>
-      {!file && (
-        <label className="field date-field">Report date
-          <span className="field-box"><CalendarDays size={16} /><input type="date" value={lane.date} disabled={lane.busy} onChange={(e) => onDate(e.target.value)} /></span>
-        </label>
-      )}
-      <FileDrop title={`Upload the ${code} report (.xlsx / .csv)`} hint={lane.busy ? 'Matching against our master – this can take a few seconds' : `Drag the ${code} file here or click to choose`}
-        accept=".xlsx,.xlsm,.csv" fileName={file?.name ?? null} busy={lane.busy} onFile={onFile} compact />
-      {lane.error && <div className="alert bad small">{lane.error}</div>}
-      {file && p && (
-        <>
-          <div className={`check-banner ${failed.length ? 'warn' : 'good'}`}>{failed.length ? <AlertTriangle size={18} /> : <CircleCheckBig size={18} />}
-            <div><b>{failed.length ? `${failed.length} of ${checks.length} header checks need a look` : `All ${checks.length} header checks passed`}</b>
-              <span>{works.toLocaleString()} works{ir?.client.name && <> · report for <b>{ir.client.name}</b>{ir.client.ipi_name_no && <> (IPI {ir.client.ipi_name_no})</>}</>}</span></div></div>
-          {otherWriter && (
-            <div className="check-banner bad"><AlertTriangle size={18} /><div><b>This report may belong to someone else</b>
-              <span>Its IPI {ir!.client.ipi_name_no} differs from the client's IPI {clientIpi}. Replace the file if it is the wrong one.</span></div></div>
-          )}
-          {failed.length > 0 && <ul className="checks compact">{failed.map((c) => <li key={c.label} className="fail"><XCircle size={16} /><div><strong>{c.label}</strong><span className="small muted">{c.detail}</span></div></li>)}</ul>}
-          <div className="lane-foot">
-            {ir ? (
-              <div className="next-figs">
-                <div className="good"><b>{count('linked').toLocaleString()}</b><span>linked to master</span></div>
-                <div className={count('review') ? 'brand' : ''}><b>{count('review').toLocaleString()}</b><span>need your decision</span></div>
-                <div className={count('unmatched') ? 'warn' : ''}><b>{count('unmatched').toLocaleString()}</b><span>not in master</span></div>
-              </div>
-            ) : <span className="small muted grow">Matched against our master in the {code} workspace.</span>}
-            <Button size="sm" disabled={disabled} onClick={onOpen}>Open {code} mapping<ArrowRight size={14} /></Button>
-          </div>
-        </>
-      )}
-    </section>
-  )
-}
-
-/** Add a client in one go: details → our master → each society's report, then straight on to mapping.
+/** Add a client in one go: details → the three files (LNV, DSP export, IPRS report), then straight on to the consolidate steps.
  *  Each step is saved at once and the client id is kept in the address, so a reload resumes where it stopped. */
 export default function NewClient() {
   const navigate = useNavigate()
-  const toast = useToast()
   const [params, setParams] = useSearchParams()
   const [step, setStep] = useState(1)
   const [client, setClient] = useState<ClientRef | null>(null)
@@ -112,26 +54,31 @@ export default function NewClient() {
   const [form, setForm] = useState({ name: '', ipi: '', owner: '', due_date: '', home_society: 'IPRS' })
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [extra, setExtra] = useState<string[]>(DEFAULT_EXTRA)
-  const [lanes, setLanes] = useState<Record<string, Lane>>({})
-  const lane = (code: string): Lane => lanes[code] ?? { date: today() }
-  const setLane = (code: string, patch: Partial<Lane>) => setLanes((ls) => ({ ...ls, [code]: { ...(ls[code] ?? { date: today() }), ...patch } }))
+  const [slots, setSlots] = useState<Partial<Record<Slot, { busy?: boolean; error?: string; name?: string; text?: string }>>>({})
+  const setSlot = (k: Slot, v: { busy?: boolean; error?: string; name?: string; text?: string }) => setSlots((x) => ({ ...x, [k]: { ...x[k], ...v } }))
   const [existing, setExisting] = useState<ClientRow[]>([])
   const [resuming, setResuming] = useState(!!params.get('client'))
   useEffect(() => { api.clients().then((d) => setExisting(d.clients)).catch(() => {}) }, [])
+
+  /** What each file box shows, from the client as saved. */
+  const fromDetail = (d: ClientDetail) => {
+    const iprs = d.societies.find((x) => x.code === 'IPRS')?.report
+    setSlots((x) => ({
+      ...x,
+      lnv: d.master ? { name: d.master.name, text: `${(d.master.stats.songs ?? 0).toLocaleString()} songs` } : x.lnv,
+      dsp: d.clean ? { name: d.clean.name, text: dspText(d.clean) } : x.dsp,
+      iprs: iprs ? { name: `IPRS report ${fmtDate(iprs.report_date)}`, text: 'Report added' } : x.iprs,
+    }))
+  }
 
   // Reopened (or reloaded) half-way: load the saved client and jump to the first unfinished step.
   useEffect(() => {
     const id = Number(params.get('client'))
     if (!id || client) { setResuming(false); return }
-    api.client(id).then(async (d) => {
-      setClient(d.client); setDetail(d)
+    api.client(id).then((d) => {
+      setClient(d.client); setDetail(d); fromDetail(d)
       setForm({ name: d.client.name, ipi: d.client.ipi ?? '', owner: d.client.owner ?? '', due_date: d.client.due_date ?? '', home_society: d.client.home_society })
-      const added = d.societies.map((x) => x.code).filter((c) => c !== 'IPRS')
-      if (added.length) setExtra(added)
-      const loaded = await Promise.all(d.societies.filter((x) => x.report).map(async (x) => [x.code, { runId: x.report!.id, payload: await api.run(x.report!.id), date: x.report!.report_date ?? today() }] as const))
-      setLanes(Object.fromEntries(loaded))
-      setStep(d.master ? 3 : 2)
+      setStep(2)
     }).catch(() => setParams({}, { replace: true })).finally(() => setResuming(false))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -158,61 +105,37 @@ export default function NewClient() {
     } catch (err) { setError((err as Error).message) } finally { setBusy(false) }
   }
 
-  const uploadMaster = async (file: File) => {
-    setError(null); setBusy(true)
+  /** The LNV goes first: the export and the IPRS report are matched against it, so they wait for it. */
+  const master = useRef<Promise<unknown> | null>(null)
+  const upload = async (slot: Slot, file: File) => {
+    setSlot(slot, { busy: true, error: undefined, name: file.name })
     try {
-      setDetail(await api.uploadMaster(client!.id, file))
-      toast('Master loaded', 'good')
-    } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
+      if (slot === 'lnv') {
+        master.current = api.uploadMaster(client!.id, file)
+        const d = await master.current as ClientDetail
+        setDetail(d); setSlot('lnv', { text: `${(d.master?.stats.songs ?? 0).toLocaleString()} songs` })
+      } else {
+        await master.current
+        if (slot === 'dsp') {
+          const r = await api.uploadDsp(client!.id, file)
+          setSlot('dsp', { text: r.dsp ? dspText(r.dsp) : 'Read' })
+        } else {
+          if (!detail?.societies.some((x) => x.code === 'IPRS')) setDetail(await api.addSocieties(client!.id, ['IPRS']))
+          const run = detail?.societies.find((x) => x.code === 'IPRS')?.report?.id ?? (await api.startReport(client!.id, 'IPRS', today())).id
+          const r = await api.upload(run, 'iprs', file)
+          setSlot('iprs', { text: `${(r.result.iprs?.stats.works ?? 0).toLocaleString()} works` })
+          setDetail(await api.client(client!.id))
+        }
+      }
+      setSlot(slot, { busy: false })
+    } catch (e) { setSlot(slot, { busy: false, error: (e as Error).message, name: undefined }) }
   }
 
-  const chosen = ['IPRS', ...extra]
-  const added = new Set(detail?.societies.map((x) => x.code))
-
-  /** Add the chosen societies once, so the client page shows them even if the user stops here. */
-  const adding = useRef<Promise<void> | null>(null)
-  const ensureSocieties = () => {
-    const add = chosen.filter((c) => !added.has(c))
-    if (!add.length) return Promise.resolve()
-    // Two reports dropped together share one request instead of adding the societies twice.
-    adding.current ??= api.addSocieties(client!.id, add).then(setDetail).finally(() => { adding.current = null })
-    return adding.current
-  }
-
-  /** Each society's report uploads on its own, so IPRS and PRS can be dropped at the same time. */
-  const uploadReport = async (code: string, file: File) => {
-    setLane(code, { busy: true, error: undefined })
-    try {
-      await ensureSocieties()
-      const id = lane(code).runId ?? (await api.startReport(client!.id, code, lane(code).date)).id
-      setLane(code, { runId: id })
-      setLane(code, { payload: await api.upload(id, 'auto', file), busy: false })
-    } catch (e) { setLane(code, { error: (e as Error).message, busy: false }) }
-  }
-
-  const openMapping = async (code: string) => {
-    const l = lane(code)
-    setBusy(true)
-    try {
-      await api.updateRun(l.runId!, { confirmed_step: Math.max(l.payload?.run.confirmed_step ?? 0, 1) })
-      navigate(`/clients/${client!.id}/societies/${code}?report=${l.runId}&step=2`)
-    } catch (e) { setError((e as Error).message); setBusy(false) }
-  }
-
-  const later = async () => {
-    setBusy(true)
-    try { await ensureSocieties(); navigate(`/clients/${client!.id}`) }
-    catch (e) { setError((e as Error).message); setBusy(false) }
-  }
-
-  const m = detail?.master
   const name = form.name.trim()
-  /** Steps 1–3 open once the step before them is saved: the client, then its master. */
-  const reachable = (n: number) => n === 1 || (n === 2 && !!client) || (n === 3 && !!client && !!m)
+  const reachable = (n: number) => n === 1 || (n === 2 && !!client)
   const go = (n: number) => { if (reachable(n)) { setError(null); setStep(n) } }
-  const fileOf = (code: string) => lane(code).payload?.run.files[code.toLowerCase() as 'iprs' | 'prs'] ?? null
-  const optional = (detail?.available_societies ?? []).filter((x) => x.code !== 'IPRS')
-  const uploadedAll = chosen.every((c) => fileOf(c))
+  const has = (k: Slot) => !!slots[k]?.text && !slots[k]?.busy
+  const anyBusy = (['lnv', 'dsp', 'iprs'] as Slot[]).some((k) => slots[k]?.busy)
 
   if (resuming) return <AppShell trail={<span className="trail-name">Add client</span>}><div className="loading"><span className="spinner" />Loading…</div></AppShell>
 
@@ -220,7 +143,7 @@ export default function NewClient() {
     <AppShell trail={<span className="trail-name">Add client</span>}>
       <header className="page-header">
         <div><div className="eyebrow">New client</div><h1>Add a client</h1>
-          <p className="lede">Three steps from a new client to mapping. Every step is saved as you go – you can leave and pick it up later.</p></div>
+          <p className="lede">Two steps: who the client is, then their files. Every step is saved as you go – you can leave and pick it up later.</p></div>
       </header>
 
       <div className="wizard">
@@ -228,7 +151,7 @@ export default function NewClient() {
           <ol>
             {STEPS.map((label, i) => {
               const n = i + 1
-              const done = n === 1 ? !!client : n === 2 ? !!m : uploadedAll
+              const done = n === 1 ? !!client : has('lnv') && (has('dsp') || has('iprs'))
               const open = reachable(n)
               return (
                 <li key={label} className={`${done ? 'done' : ''} ${n === step ? 'current' : ''}`}>
@@ -239,15 +162,15 @@ export default function NewClient() {
                 </li>
               )
             })}
-            <li className="rail-next"><span className="rail-dot"><GitCompareArrows size={14} /></span>
-              <span><b>Match & review</b><small>One workspace per society</small></span></li>
+            <li className="rail-next"><span className="rail-dot"><ListChecks size={14} /></span>
+              <span><b>Then</b><small>Muso & LNV · LNV vs IPRS · the final LNV</small></span></li>
           </ol>
         </nav>
 
         <div className="wizard-main">
           {step === 1 && (
             <form className="card wizard-card" onSubmit={saveDetails} noValidate>
-              <div className="wizard-head"><span className="wizard-step">Step 1 of 3</span><h2>Who is the client?</h2>
+              <div className="wizard-head"><span className="wizard-step">Step 1 of 2</span><h2>Who is the client?</h2>
                 <p className="muted">The IPI name number is used to check that every IPRS report you upload belongs to this client.</p></div>
 
               <fieldset className="wizard-section">
@@ -303,72 +226,22 @@ export default function NewClient() {
 
           {step === 2 && client && (
             <section className="card wizard-card">
-              <div className="wizard-head"><span className="wizard-step">Step 2 of 3</span><h2>Upload our master</h2>
-                <p className="muted">The client's master (LNV report) becomes the central catalogue: every society is compared against it. You can replace it later from the client page.</p></div>
-              <FileDrop title="Upload our master (.xlsx)" hint="Drag the LNV report here or click to choose" accept=".xlsx,.xlsm"
-                fileName={m?.name ?? null} busy={busy} onFile={uploadMaster} />
-              {error && <div className="alert bad small">{error}</div>}
-              {m ? (
-                <>
-                  <div className="check-banner good"><CircleCheckBig size={20} />
-                    <div><b>Master read – {m.stats.songs?.toLocaleString()} songs</b>
-                      <span>{m.stats.with_credits?.toLocaleString()} with writers filled in · {m.stats.columns} columns
-                        {m.stats.societies?.length ? ` · ${m.stats.societies.length} society blocks` : ''}</span></div></div>
-                  {!!m.stats.issues && (
-                    <div className="check-banner warn"><AlertTriangle size={20} />
-                      <div><b>{m.stats.issues} problems found inside the master</b>
-                        <span>Nothing to do now – they are listed in each society's workspace.</span></div></div>
-                  )}
-                </>
-              ) : (
-                <ul className="wizard-tips">
-                  <li><CheckCircle2 size={15} />Use the full export – every song with its writers and society columns.</li>
-                  <li><CheckCircle2 size={15} />The file is checked right away; nothing is compared until a society report is added.</li>
-                </ul>
-              )}
+              <div className="wizard-head"><span className="wizard-step">Step 2 of 2</span><h2>The client's files</h2>
+                <p className="muted">Drop the three files on their boxes – all at once is fine. The LNV is read first; the other two are matched against it.</p></div>
+              <div className="sc-files wizard-files">
+                <FileCard tone="lnv" label="LNV" what="The client's LNV report (.xlsx)" file={slots.lnv?.name} text={slots.lnv?.text} busy={slots.lnv?.busy}
+                  onFile={(f) => upload('lnv', f)} accept=".xlsx,.xlsm" />
+                <FileCard tone="dsp" label="Muso" what="Muso, Spotify or Apple Music export from MRM-Extractor" file={slots.dsp?.name} text={slots.dsp?.text}
+                  busy={slots.dsp?.busy} onFile={(f) => upload('dsp', f)} disabled={!slots.lnv?.name} accept=".xlsx" />
+                <FileCard tone="iprs" label="IPRS" what="The client's IPRS works report" file={slots.iprs?.name} text={slots.iprs?.text}
+                  busy={slots.iprs?.busy} onFile={(f) => upload('iprs', f)} disabled={!slots.lnv?.name} accept=".xlsx,.xlsm,.csv" />
+              </div>
+              {(['lnv', 'dsp', 'iprs'] as Slot[]).map((k) => slots[k]?.error && <div key={k} className="alert bad small"><b>{k === 'lnv' ? 'LNV' : k === 'dsp' ? 'Export' : 'IPRS'}:</b> {slots[k]!.error}</div>)}
               <div className="wizard-actions">
                 <Button variant="ghost" icon={<ArrowLeft size={15} />} onClick={() => go(1)}>Back</Button>
-                <Button variant="primary" disabled={!m || busy} onClick={() => go(3)}>Continue to societies<ArrowRight size={15} /></Button>
-              </div>
-            </section>
-          )}
-
-          {step === 3 && client && (
-            <section className="card wizard-card">
-              <div className="wizard-head"><span className="wizard-step">Step 3 of 3</span><h2>Societies and their reports</h2>
-                <p className="muted">Pick the societies to reconcile and upload each one's report. Each file is checked at once and matched against our master; every society then gets its own mapping screen.</p></div>
-
-              <fieldset className="wizard-section">
-                <legend>Societies for this client</legend>
-                <div className="soc-toggles">
-                  <span className="soc-toggle on locked"><span className="soc-check"><Check size={14} /></span><span><b>IPRS</b><small>Home society · always included</small></span></span>
-                  {optional.map((x) => {
-                    const on = extra.includes(x.code)
-                    const fixed = added.has(x.code)
-                    return (
-                      <button key={x.code} type="button" disabled={!x.available || fixed} className={`soc-toggle ${on ? 'on' : ''} ${fixed ? 'locked' : ''}`} aria-pressed={on}
-                        onClick={() => setExtra(on ? extra.filter((c) => c !== x.code) : [...extra, x.code])}>
-                        <span className="soc-check">{on ? <Check size={14} /> : null}</span>
-                        <span><b>{x.code}</b><small>{!x.available ? 'Coming soon' : fixed ? `${x.country} · added` : x.country}</small></span>
-                      </button>
-                    )
-                  })}
-                </div>
-              </fieldset>
-
-              <div className="lanes">
-                {chosen.map((code) => <SocietyLane key={code} code={code} name={detail?.available_societies.find((x) => x.code === code)?.name ?? code}
-                  lane={lane(code)} clientIpi={ipi} onDate={(d) => setLane(code, { date: d })} onFile={(f) => uploadReport(code, f)}
-                  onOpen={() => openMapping(code)} disabled={busy} />)}
-              </div>
-              {error && <div className="alert bad small">{error}</div>}
-
-              <div className="wizard-actions">
-                <Button variant="ghost" icon={<ArrowLeft size={15} />} onClick={() => go(2)}>Back</Button>
-                <Button variant={fileOf('IPRS') ? 'ghost' : 'default'} className="later" disabled={busy} onClick={later}>
-                  {uploadedAll ? 'Open client page' : 'Finish later – open client page'}</Button>
-                <Button variant="primary" disabled={!fileOf('IPRS') || busy} onClick={() => openMapping('IPRS')}>
-                  {busy ? <span className="spinner small" /> : null}Start with IPRS mapping<ArrowRight size={15} /></Button>
+                <Button className="later" disabled={anyBusy} onClick={() => navigate(`/clients/${client.id}`)}>Finish later</Button>
+                <Button variant="primary" disabled={!has('lnv') || anyBusy} onClick={() => navigate(`/clients/${client.id}/consolidate?step=2`)}>
+                  {anyBusy ? <span className="spinner small" /> : null}Start: Muso & LNV<ArrowRight size={15} /></Button>
               </div>
             </section>
           )}
@@ -384,11 +257,9 @@ export default function NewClient() {
           <dl className="preview-list">
             <div><dt>Owner</dt><dd className={form.owner ? '' : 'muted'}>{form.owner || 'Unassigned'}</dd></div>
             <div><dt>Due</dt><dd className={form.due_date ? '' : 'muted'}>{form.due_date ? fmtDate(form.due_date) : 'No date'}</dd></div>
-            <div><dt>Master</dt><dd className={m ? '' : 'muted'}>{m ? `${m.stats.songs?.toLocaleString()} songs` : 'Not uploaded'}</dd></div>
-            {chosen.map((code) => {
-              const works = code === 'IPRS' ? lane(code).payload?.result.iprs?.stats.works : lane(code).payload?.result.prs?.stats.works
-              return <div key={code}><dt>{code} report</dt><dd className={fileOf(code) ? '' : 'muted'}>{fileOf(code) ? `${(works ?? 0).toLocaleString()} works` : 'Not uploaded'}</dd></div>
-            })}
+            <div><dt>LNV</dt><dd className={has('lnv') ? '' : 'muted'}>{has('lnv') ? slots.lnv!.text : 'Not added'}</dd></div>
+            <div><dt>Export</dt><dd className={has('dsp') ? '' : 'muted'}>{has('dsp') ? slots.dsp!.text : 'Not added'}</dd></div>
+            <div><dt>IPRS</dt><dd className={has('iprs') ? '' : 'muted'}>{has('iprs') ? slots.iprs!.text : 'Not added'}</dd></div>
           </dl>
         </aside>
       </div>

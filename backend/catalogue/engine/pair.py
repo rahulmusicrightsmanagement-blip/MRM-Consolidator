@@ -12,21 +12,17 @@ import datetime
 import os
 from functools import lru_cache
 
-import openpyxl
 from openpyxl.utils import get_column_letter
 
 from .iprs import AUTHOR_ROLES, COMPOSER_ROLES, PUBLISHER_ROLES, _key as iprs_key
 from .mapping import CA_ROLES
 from .normalize import clean_text, norm_ipi, norm_isrc, norm_iswc, norm_title, same_party, to_number
+from .xlsx import read_rows
 
 
 @lru_cache(maxsize=8)
 def _rows(path, mtime):
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    ws = wb.worksheets[0]
-    ws.reset_dimensions()
-    rows = [tuple(r) for r in ws.iter_rows(values_only=True)]
-    wb.close()
+    rows = read_rows(path)
     return rows
 
 

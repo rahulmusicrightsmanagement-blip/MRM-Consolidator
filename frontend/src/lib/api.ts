@@ -1,5 +1,5 @@
 import type {
-  CleanChoice, CleanPayload, ClientDetail, ClientRef, Role, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow,
+  CleanChoice, CleanPayload, ClientDetail, SongRecord, StepsPayload, ClientRef, Role, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow,
 } from '../types'
 
 export class ApiError extends Error {
@@ -43,7 +43,10 @@ const send = (body: unknown, method = 'POST'): RequestInit => ({
 export type DecisionItem = { internal_no: string; master_row: number; also_rows?: number[] } | { internal_no: string; action: 'new'; rejected_rows: number[] }
 export type MasterEditIn = { master_row: number; field: string; internal_no: string; choice: EditChoice | null }
 
-export type CleanDecisionIn = { key: string; choice: CleanChoice | null; data?: { keep?: number | string; row?: number; rows?: number[] } }
+export type CleanDecisionIn = {
+  key: string; choice: CleanChoice | null
+  data?: { keep?: number | string; row?: number; rows?: number[]; excluded?: number[]; type?: string; cover?: string; a?: string; b?: string; songs?: string[]; name?: string }
+}
 
 export interface TaskPatch { state?: TaskState; owner?: string; due_date?: string | null; note?: string }
 
@@ -103,6 +106,10 @@ export const api = {
   pair: (id: number, work?: string | null, row?: number | null) =>
     request<PairResult>(`/api/runs/${id}/pair/?${new URLSearchParams({ work: work ?? '', row: row ? String(row) : '' })}`),
   exportUrl: (id: number, name: string) => `/api/runs/${id}/export/${name}/`,
+  /** The consolidate flow: each step's comparison blocks (step 1–3) and every step's counts. */
+  steps: (clientId: number, step: number) => request<StepsPayload>(`/api/clients/${clientId}/steps/?step=${step}`),
+  /** What the three files hold for one LNV row. */
+  stepRow: (clientId: number, row: number) => request<{ records: SongRecord[] }>(`/api/clients/${clientId}/steps/?row=${row}`).then((d) => d.records),
   clean: (clientId: number) => request<CleanPayload>(`/api/clients/${clientId}/clean/`),
   uploadDsp: (clientId: number, file: File) => {
     const form = new FormData()
@@ -114,4 +121,8 @@ export const api = {
   /** Many Data clean decisions in one request; choice null clears one. */
   cleanDecide: (clientId: number, items: CleanDecisionIn[]) => request<CleanPayload>(`/api/clients/${clientId}/clean/decisions/`, send({ items })),
   cleanExportUrl: (clientId: number) => `/api/clients/${clientId}/clean/export/`,
+  /** Save step 1 decisions without rebuilding the result (step 1 keeps its own state while the reviewer works). */
+  mergeSave: (clientId: number, items: CleanDecisionIn[]) => request<{ saved: number }>(`/api/clients/${clientId}/clean/decisions/`, send({ items, quiet: true })),
+  mergeExportUrl: (clientId: number) => `/api/clients/${clientId}/steps/merged/`,
+  lnvUpdateUrl: (clientId: number) => `/api/clients/${clientId}/steps/lnv/`,
 }

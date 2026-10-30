@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
-  AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDashed, CircleHelp,
+  AlertTriangle, ArrowDown, ArrowUp, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDashed, CircleHelp,
   Download as DownloadIcon, FileSpreadsheet, Info, Search, Trash2, UploadCloud, X, XCircle,
 } from 'lucide-react'
 
@@ -350,9 +350,11 @@ export function DataTable<T>({
 
 /* ---------- confirm dialog ---------- */
 
-export function ConfirmDialog({ open, title, children, confirmLabel = 'Delete', onConfirm, onCancel }: {
+export function ConfirmDialog({ open, title, children, confirmLabel = 'Delete', onConfirm, onCancel, tone = 'danger' }: {
   open: boolean; title: ReactNode; children: ReactNode; confirmLabel?: string
   onConfirm: () => Promise<void> | void; onCancel: () => void
+  /** 'primary' for a confirmation that removes nothing. */
+  tone?: 'danger' | 'primary'
 }) {
   const [busy, setBusy] = useState(false)
   useEffect(() => {
@@ -365,12 +367,12 @@ export function ConfirmDialog({ open, title, children, confirmLabel = 'Delete', 
   return (
     <div className="modal-backdrop" onClick={() => !busy && onCancel()}>
       <div className="modal" role="alertdialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-icon"><Trash2 size={20} /></div>
+        <div className={`modal-icon ${tone}`}>{tone === 'danger' ? <Trash2 size={20} /> : <Check size={20} />}</div>
         <h2>{title}</h2>
         <div className="modal-body">{children}</div>
         <div className="modal-actions">
           <Button variant="ghost" disabled={busy} onClick={onCancel} autoFocus>Cancel</Button>
-          <Button variant="danger-solid" disabled={busy} icon={busy ? <span className="spinner small" /> : <Trash2 size={15} />}
+          <Button variant={tone === 'danger' ? 'danger-solid' : 'primary'} disabled={busy} icon={busy ? <span className="spinner small" /> : tone === 'danger' ? <Trash2 size={15} /> : <Check size={15} />}
             onClick={async () => { setBusy(true); try { await onConfirm() } finally { setBusy(false) } }}>{confirmLabel}</Button>
         </div>
       </div>
