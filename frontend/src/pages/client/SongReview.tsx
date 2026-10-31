@@ -1,7 +1,10 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, ExternalLink, Maximize2, Minimize2, Search, Undo2, X } from 'lucide-react'
+import { ConfirmDialog, Drawer } from '../../components/ui'
+import { api } from '../../lib/api'
 import type { CleanDecisionIn } from '../../lib/api'
+import { useClient } from '../../lib/client'
 import type { CaseKind, CaseRecord, ReviewCase, Step1 } from '../../types'
 import { cellOf, inList, list, n, norm } from './Block'
 
@@ -71,7 +74,7 @@ const ready = (c: ReviewCase, d: Draft) => d.choice !== null && (c.kind === 'nam
 /** How a song stands against the LNV. Exact: an LNV row with the same title and writers and a publisher name that
  *  really appears on both sides. Possible: it has LNV rows, but not such a row. New: no LNV row at all. */
 type Match = 'exact' | 'possible' | 'new' | 'other'
-const MATCHES = [['exact', 'Exact match'], ['possible', 'Possible match'], ['new', 'Not in the LNV']] as const
+const MATCHES = [['exact', 'Exact'], ['possible', 'Possible'], ['new', 'Not in the LNV']] as const
 function matchOf(c: ReviewCase): Match {
   if (c.kind === 'names' || c.kind === 'twice') return 'other'
   if (!c.lnv.length) return 'new'
@@ -92,11 +95,17 @@ function verdict(c: ReviewCase, d: Draft) {
 export default function SongReview({ d, save }: {
   d: Step1; save: (items: CleanDecisionIn[]) => Promise<boolean>
 }) {
+  const { clientId } = useClient()
   const [q, setQ] = useState('')
+  const searchRef = useRef<HTMLInputElement>(null)
+  const [help, setHelp] = useState(false)
+  const [asking, setAsking] = useState(false)   // "Accept all" waits for a yes
   // needs: the app has no answer – a real doubt · sure: the app answered, confirm it · done: checked
   const [status, setStatus] = useState<'needs' | 'sure' | 'done' | 'all'>('needs')
   const [kind, setKind] = useState<CaseKind | 'all' | 'lnv_only'>('all')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // the song the reviewer was on is still open when they come back
+  const placeKey = `mrm-place-${clientId}`
+  const [selectedId, setSelectedId] = useState<string | null>(() => { try { return localStorage.getItem(placeKey) } catch { return null } })
   // a new filter starts at its first case
   const filterBy = (st: typeof status, k: typeof kind) => { setStatus(st); setKind(k); setSelectedId(null) }
   const [match, setMatch] = useState<Match | 'all'>('all')
@@ -130,7 +139,8 @@ export default function SongReview({ d, save }: {
   const shown = useMemo(() => {
     const s = norm(q)
     return d.cases.filter((c) => {
-      if (c.id !== selectedId) {
+      // a search looks through every song, whichever tab is open
+      if (c.id !== selectedId && !s) {
         if (!inStatus(c) || !inMatch(c)) return false
         if (kind !== 'all' && c.kind !== kind) return false
       }
@@ -147,6 +157,7 @@ export default function SongReview({ d, save }: {
     if (x) setSelectedId(x.id)
   }
   useEffect(() => { if (sel) refs.current[sel.id]?.scrollIntoView({ block: 'nearest' }) }, [sel])
+  useEffect(() => { if (sel) try { localStorage.setItem(placeKey, sel.id) } catch { /* private mode */ } }, [sel, placeKey])
 
   const [last, setLast] = useState<{ c: ReviewCase; text: string } | null>(null)   // the answer Undo takes back
   const answer = async (c: ReviewCase, draft: Draft | null) => {
@@ -165,7 +176,7 @@ export default function SongReview({ d, save }: {
   const undoLast = () => { if (last) { setSelectedId(last.c.id); answer(last.c, null) } }
   const confirmable = shown.filter((c) => !isDone(c) && ready(c, draftOf(c))).length
   const [wide, setWide] = useStored('mrm-wide', false)
-  useKeys({ w: () => setWide(!wide) })
+  useKeys({ w: () => setWide(!wide), '/': () => searchRef.current?.focus(), '?': () => setHelp((h) => !h) })
 
   return (
     <section className="cs-body rv">
@@ -174,7 +185,8 @@ export default function SongReview({ d, save }: {
       <div className={`sm-review ${wide ? 'wide' : ''}`}>
         <div className="sm-list">
           <div className="sm-list-head">
-            <label className="cs-search sm-search"><Search size={15} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search song, writer, ISRC, LNV row…" /></label>
+            <label className="cs-search sm-search"><Search size={15} /><input ref={searchRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search song, writer, ISRC, LNV row…" /></label>
+            {help && <div className="rv-keys"><span><Kbd>↑</Kbd><Kbd>↓</Kbd> move</span><span><Kbd>Enter</Kbd> accept</span><span><Kbd>S</Kbd> same</span><span><Kbd>N</Kbd> add</span><span><Kbd>X</Kbd> not the client's</span><span><Kbd>U</Kbd> undo</span><span><Kbd>/</Kbd> search</span><span><Kbd>W</Kbd> expand</span></div>}
             <div className="rv-tabs rv-match">
               <button type="button" className={match === 'all' ? 'on' : ''} onClick={() => matchBy('all')}>All songs</button>
               {MATCHES.map(([id, label]) => (
@@ -183,7 +195,7 @@ export default function SongReview({ d, save }: {
             </div>
             <div className="rv-tabs">
               {([['needs', 'Needs you', tally.needs], ['sure', 'App answered', tally.sure], ['done', 'Done', tally.done],
-                ['all', 'All', tally.needs + tally.sure + tally.done]] as const).map(([id, label, x]) => (
+                ['all', 'All', null]] as const).map(([id, label, x]) => (
                 <button key={id} type="button" className={status === id && kind !== 'lnv_only' ? 'on' : ''} onClick={() => filterBy(id, kind === 'lnv_only' ? 'all' : kind)}>{label}{x != null && <span>{n(x)}</span>}</button>
               ))}
             </div>
@@ -194,7 +206,7 @@ export default function SongReview({ d, save }: {
                 <option value="lnv_only">Only in the LNV ({n(d.counts.lnv_only)})</option>
               </select>
               {kind !== 'lnv_only' && confirmable > 0 && (
-                <button type="button" className="btn sm" onClick={confirmShown} title="Accept the app's answer on every song shown that has one">
+                <button type="button" className="btn sm" onClick={() => setAsking(true)} title="Accept the app's answer on every song shown that has one">
                   <CheckCheck size={14} />Accept all {n(confirmable)}</button>
               )}
             </div>
@@ -222,6 +234,10 @@ export default function SongReview({ d, save }: {
             wideBtn={<WideBtn wide={wide} toggle={() => setWide(!wide)} />} />
             : <div className="sm-detail sm-detail-none muted">Nothing to show.</div>}
       </div>
+      <ConfirmDialog open={asking} tone="primary" title={`Accept the app's answer on ${n(confirmable)} songs?`} confirmLabel="Accept all" onCancel={() => setAsking(false)}
+        onConfirm={() => { confirmShown(); setAsking(false) }}>
+        <p>They all move to Done. You can still open any one of them there and change it.</p>
+      </ConfirmDialog>
     </section>
   )
 }
@@ -282,7 +298,7 @@ export function useKeys(keys: Record<string, () => void>) {
   ref.current = keys
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (e.metaKey || e.ctrlKey || e.altKey || document.querySelector('.drawer, .modal')) return
       const t = e.target as HTMLElement
       const tick = t instanceof HTMLInputElement && (t.type === 'checkbox' || t.type === 'radio')   // keys still work after a tick
       if (/^(TEXTAREA|SELECT)$/.test(t.tagName) || (t.tagName === 'INPUT' && !tick)) return
@@ -302,6 +318,7 @@ export function useKeys(keys: Record<string, () => void>) {
 export type Col = {
   r: CaseRecord; badge: string; tone: 'muso' | 'lnv' | 'iprs' | 'add'
   pick?: { on: boolean; label: string; radio?: boolean; change: () => void }
+  open?: () => void
 }
 
 const writersOf = (r: CaseRecord) => [...new Set([...list(r.fields.Lyricist), ...list(r.fields.Composer)])]
@@ -323,7 +340,9 @@ function Marks({ r, ref }: { r: CaseRecord; ref?: CaseRecord | null }) {
   // the rule looks at every version and at one company under two names: the names on screen may differ, so do not say "same"
   const pubs = list(ref?.fields.Publisher)
   const renamed = pubs.length > 0 && !list(r.fields.Publisher).some((x) => inList('Publisher', pubs, x))
-  return <div className="rvc-marks">{marks.map(([tone, text]) => [tone, text === 'Same publisher' && renamed ? 'Publisher counted as same' : text] as const).map(([tone, text]) => <span key={text} className={tone}>{tone === 'good' ? <Check size={12} /> : tone === 'bad' ? <X size={12} /> : '?'}{text}</span>)}</div>
+  const worded = marks.map(([tone, text]) => [tone, text === 'Same publisher' && renamed ? 'Publisher counted as same' : text] as const)
+  const wrong = worded.filter(([tone, text]) => tone !== 'good' || text === 'Publisher counted as same')
+  return <div className="rvc-marks">{(wrong.length ? wrong : [['good', 'Matches'] as const]).map(([tone, text]) => <span key={text} className={tone}>{tone === 'good' ? <Check size={12} /> : tone === 'bad' ? <X size={12} /> : '?'}{text}</span>)}</div>
 }
 
 /** Records side by side, one column each and one line per field, so every difference sits on the same line. The
@@ -347,7 +366,7 @@ export function Compare({ cols, fields = SHOW, base = 0 }: { cols: Col[]; fields
           <th className="rvc-f" />
           {cols.map((c, i) => (
             <th key={i} className={`rvc-h ${c.tone} ${c.pick?.on ? 'on' : ''}`}>
-              <span className="rvc-name">{c.badge}</span>
+              {c.open ? <button type="button" className="rvc-name rvc-open" onClick={c.open} title="See everything about it">{c.badge}<ChevronRight size={14} /></button> : <span className="rvc-name">{c.badge}</span>}
               {c.pick && <label className="rvc-pick"><input type={c.pick.radio ? 'radio' : 'checkbox'} checked={c.pick.on} onChange={c.pick.change} />{c.pick.label}</label>}
               <Marks r={c.r} ref={i === base ? null : ref} />
             </th>
@@ -407,6 +426,8 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   possible: boolean; answer: (d: Draft | null) => void; last: { c: ReviewCase; text: string } | null; undoLast: () => void; wideBtn: ReactNode
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(c))
+  const [opened, setOpened] = useState<number | null>(null)   // the version whose details are open
+  const [openedRow, setOpenedRow] = useState<number | null>(null)   // the LNV row whose details are open
   const [allVersions, setAllVersions] = useState(c.muso.length <= 8 || c.kind === 'isrc')
   const twice = c.kind === 'twice'
   const merging = !!c.merge
@@ -451,16 +472,16 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
     : draft.choice === 'same' ? `LNV row ${draft.rows.join(' + ')} ${kept ? `gets ${kept} blank detail${kept > 1 ? 's' : ''} filled from ${source}` : 'stays as it is'}.`
       : draft.choice === 'add' ? 'A new row is added to the LNV.'
         : draft.choice === 'not_ours' ? "Nothing goes into the LNV – not the client's song."
-          : near ? `No LNV row has the same writers and publisher (they have different ${fails}). Add it as a new song, or skip it.`
+          : near ? `No LNV row has the same writers and publisher. Tick one only if ${source}'s credits are wrong.`
             : c.lnv.length > 1 ? 'Tick the LNV row this song is, or add it as a new song.'
               : c.lnv.length ? `Is this ${source} song LNV row ${c.lnv[0].row}?` : 'Add it to the LNV, or skip it.'
 
   const lnvCols: Col[] = c.lnv.map((r) => ({
-    r, badge: `LNV row ${r.row}`, tone: 'lnv',
+    r, badge: `LNV row ${r.row}`, tone: 'lnv', open: () => setOpenedRow(r.row!),
     pick: single ? undefined : { on: draft.rows.includes(r.row!), radio: twice, change: () => pick(r.row!),
       label: twice ? (c.isrc ? 'Has the ISRC' : 'Keep this row') : near ? 'Link anyway' : 'This is the song' },
   }))
-  const musoCol: Col[] = twice || !main ? [] : [{ r: main, badge: c.muso.length > 1 ? `${source} – main version` : source, tone: 'muso' }]
+  const musoCol: Col[] = twice || !main ? [] : [{ r: main, badge: c.muso.length > 1 ? `${source} – main version` : source, tone: 'muso', open: () => setOpened(0) }]
   // a turned-down row joins the comparison only once the reviewer ticks it
   const cols: Col[] = [...musoCol, ...(near ? lnvCols.filter((x) => x.pick?.on) : lnvCols)]
   const closest = near ? lnvCols.filter((x) => !x.pick?.on) : []
@@ -470,7 +491,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
     <div className="sm-detail rv-case">
       <div className="sm-detail-top">
         <div className="sm-detail-nav">
-          <span className="rv-kind-name">{KIND[c.kind].label}</span>
+          <h3>{c.title}</h3>
           {done && <span className="rv-done-name"><Check size={13} />Done</span>}
           <span className="grow" />
           <span className="muted rv-pos">{n(pos)} of {n(total)}</span>
@@ -478,8 +499,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
           <button type="button" className="sm-nav" disabled={pos >= total} onClick={next} title="Next (↓)"><ArrowRight size={15} /></button>
           {wideBtn}
         </div>
-        <h3>{c.title}</h3>
-        <p className={`rv-why ${c.tone ?? ''}`}>{c.kind === 'versions' ? `${c.muso.length} ${source} versions – similar title, and the same writers as each other.` : c.why}{c.answer.by === 'app' && c.answer.why ? ` · App: ${c.answer.why}` : ''}</p>
+        {c.kind !== 'versions' && <p className={`rv-why ${c.tone ?? ''}`}>{c.why}</p>}
       </div>
 
       <div className="rv-scroll">
@@ -488,14 +508,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
             <b>{names.a}</b><span className="rv-names-eq">=?</span><b>{names.b}</b>
             {names.songs.length > 0 && <p className="rv-none">For example: {names.songs.join(' · ')}</p>}
           </div>
-        ) : <Compare cols={cols} />}
-
-        {closest.length > 0 && possible && (
-          <section className="rv-fills">
-            <h4>Possible LNV row{closest.length > 1 ? 's' : ''} – different {fails}. Tick one only if {source}'s credits are wrong.</h4>
-            <Compare cols={[...musoCol, ...closest]} />
-          </section>
-        )}
+        ) : closest.length > 0 && possible ? <Compare cols={cols.concat(closest)} /> : <Compare cols={cols} />}
 
         {closest.length > 0 && !possible && (
           <Part id="closest" initial={false} title={`Closest LNV row${closest.length > 1 ? 's' : ''} – not the same song`}
@@ -524,23 +537,24 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
 
         {c.muso.length > 1 && (
           <Part id={`versions-${c.kind === 'versions' || c.kind === 'isrc' ? 'open' : 'shut'}`} initial={c.kind === 'versions' || c.kind === 'isrc'}
-            title={`${c.muso.length} ${source} versions`} note={merging ? `${inCount} counted as this song – untick one that is a different song` : undefined}>
+            title={`${c.muso.length} ${source} versions`} note={merging && inCount < c.muso.length ? `${inCount} counted as this song` : 'Click one to see everything about it'}>
             <div className="rv-table-wrap">
-              <table className="rv-versions">
-                <thead><tr>{merging && <th />}<th>Title</th><th>Album</th><th>Singer</th><th>ISRC</th><th>Year</th><th>Credits against the main version</th></tr></thead>
+              <table className="rv-versions rv-clean">
+                <thead><tr>{merging && <th title="Same song" />}<th>Title</th><th>Album</th><th>Singer</th>{c.kind === 'isrc' && <th>ISRC</th>}<th>Year</th></tr></thead>
                 <tbody>{versions.map((r, i) => {
                   const on = !merging || draft.in.includes(r.id!)
                   const diff = creditsDiff(r, main)
+                  const singers = list(r.fields.Singer)
                   return (
-                    <tr key={r.id} className={on ? '' : 'off'}>
-                      {merging && <td>{i > 0 && <input type="checkbox" checked={on} onChange={() => toggleIn(r.id!)} aria-label="Same song" />}</td>}
-                      <td><b>{value(r.fields.Title)}</b>{r.version && <span className="cs-tag">{r.version}</span>}
-                        {r.link && <a className="sm-link" href={r.link} target="_blank" rel="noreferrer" title="Listen"><ExternalLink size={12} /></a>}</td>
+                    <tr key={r.id} className={on ? '' : 'off'} onClick={() => setOpened(i)}>
+                      {merging && <td onClick={(e) => e.stopPropagation()}>{i > 0 && <input type="checkbox" checked={on} onChange={() => toggleIn(r.id!)} aria-label="Same song" />}</td>}
+                      <td><button type="button" className="rv-ver-open" onClick={(e) => { e.stopPropagation(); setOpened(i) }}>{value(r.fields.Title)}</button>
+                        {(i === 0 || r.version) && <small className="muted"> {i === 0 ? 'Main' : r.version}</small>}
+                        {diff.map(([label, names]) => <div key={label} className="rv-ver-diff"><span className="muted">{label}: </span><span className="rvc-odd">{names.join(', ')}</span></div>)}</td>
                       <td className="muted">{value(r.fields['Film / album'])}</td>
-                      <td>{value(r.fields.Singer)}</td>
-                      <td className="mono small">{list(r.fields.ISRC).join(', ')}</td>
+                      <td>{singers.slice(0, 2).join(', ')}{singers.length > 2 && <span className="muted"> +{singers.length - 2}</span>}</td>
+                      {c.kind === 'isrc' && <td className="mono small">{list(r.fields.ISRC).join(', ')}</td>}
                       <td className="muted nowrap">{value(r.fields.Year).slice(0, 4)}</td>
-                      <td>{i === 0 ? <span className="muted">Main version</span> : diff.length ? diff.map(([label, names]) => <div key={label}><span className="muted">{label}: </span><span className="rvc-odd">{names.join(', ')}</span></div>) : <span className="muted">Same</span>}</td>
                     </tr>
                   )
                 })}</tbody>
@@ -550,6 +564,10 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
           </Part>
         )}
       </div>
+
+      {opened !== null && c.muso[opened] && <VersionDetails r={c.muso[opened]} at={opened} total={c.muso.length} source={source} go={setOpened} close={() => setOpened(null)} />}
+
+      {openedRow !== null && <LnvRowDetails row={openedRow} close={() => setOpenedRow(null)} />}
 
       {/* the answer – always on screen */}
       <div className="rv-bar">
@@ -578,6 +596,83 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
         </div>
       </div>
     </div>
+  )
+}
+
+/** The sheet's columns under plain headings; a column no heading claims goes under "More". */
+const GROUPS: [string, RegExp][] = [
+  ['Credits', /artist|singer|lyricist|composer|author|writer|producer|engineer|publisher|credit|role/i],
+  ['Release', /title|song|album|type of|date|label|upc|track count|line/i],
+  ['Recording', /isrc|duration|length|genre|popularity|bpm|key/i],
+  ['Links and IDs', /link|url|\bid\b/i],
+]
+function grouped(fields: { name: string; value: string }[]) {
+  const of = (name: string) => (/link|url|\bid\b/i.test(name) ? 'Links and IDs' : /label/i.test(name) ? 'Release' : GROUPS.find(([, test]) => test.test(name))?.[0] ?? 'More')
+  return [...GROUPS.map(([g]) => g), 'More'].map((g) => [g, fields.filter((f) => of(f.name) === g)] as const).filter(([, x]) => x.length)
+}
+
+/** Everything the sheet holds for one version. A recording listed on several sheet rows shows one row at a time. */
+function VersionDetails({ r, at, total, source, go, close }: { r: CaseRecord; at: number; total: number; source: string; go: (i: number) => void; close: () => void }) {
+  const { clientId } = useClient()
+  const [rows, setRows] = useState<{ row: number; fields: { name: string; value: string }[] }[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [tab, setTab] = useState(0)
+  useEffect(() => {
+    let on = true
+    setRows(null); setError(null); setTab(0)
+    api.cleanRows(clientId, r.sheet_rows ?? []).then((x) => { if (on) setRows(x.rows) }).catch((e) => { if (on) setError((e as Error).message) })
+    return () => { on = false }
+  }, [clientId, r])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft' && at > 0) go(at - 1)
+      if (e.key === 'ArrowRight' && at < total - 1) go(at + 1)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [at, total, go])
+  const row = rows?.[tab]
+  return (
+    <Drawer open onClose={close} width={620} title={value(r.fields.Title)} subtitle={
+      <div className="rv-det-sub">
+        <span className="muted">{source}{r.version ? ` · ${r.version}` : ''}</span>
+        {total > 1 && <><span className="muted">Version {at + 1} of {total}</span>
+          <button type="button" className="sm-nav" disabled={at === 0} onClick={() => go(at - 1)} title="Previous (←)"><ArrowLeft size={15} /></button>
+          <button type="button" className="sm-nav" disabled={at === total - 1} onClick={() => go(at + 1)} title="Next (→)"><ArrowRight size={15} /></button></>}
+      </div>}>
+      {error ? <div className="alert bad">{error}</div> : !rows ? <div className="loading"><span className="spinner" />Loading…</div> : !row ? <p className="muted">This row is no longer in the sheet.</p> : (
+        <>
+          {rows.length > 1 && <div className="rv-tabs rv-det-tabs">{rows.map((x, i) => <button key={x.row} type="button" className={i === tab ? 'on' : ''} onClick={() => setTab(i)}>Sheet row {x.row}</button>)}</div>}
+          {grouped(row.fields).map(([g, fields]) => (
+            <section key={g} className="rv-det">
+              <h4>{g}</h4>
+              <dl>{fields.map((f) => <Fragment key={f.name}><dt>{f.name}</dt><dd>{/^https?:\/\//.test(f.value) ? <a href={f.value} target="_blank" rel="noreferrer">{f.value}<ExternalLink size={12} /></a> : f.value}</dd></Fragment>)}</dl>
+            </section>
+          ))}
+        </>
+      )}
+    </Drawer>
+  )
+}
+
+/** One LNV row with what each file holds for it, side by side. */
+function LnvRowDetails({ row, close }: { row: number; close: () => void }) {
+  const { clientId } = useClient()
+  const [records, setRecords] = useState<CaseRecord[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    let on = true
+    api.stepRow(clientId, row).then((r) => { if (on) setRecords(r as CaseRecord[]) }).catch((e) => { if (on) setError((e as Error).message) })
+    return () => { on = false }
+  }, [clientId, row])
+  const lnv = records?.findIndex((r) => r.src === 'LNV') ?? -1
+  return (
+    <Drawer open onClose={close} width={Math.min(320 + (records?.length ?? 1) * 280, window.innerWidth)} title={`LNV row ${row}`} subtitle={<span className="muted">What each file holds for this song</span>}>
+      {error ? <div className="alert bad">{error}</div> : !records ? <div className="loading"><span className="spinner" />Loading…</div> : (
+        <div className="rv-table-wrap"><Compare base={lnv >= 0 ? lnv : null} fields={[...SHOW, 'Alternate title', 'ISWC', 'IPRS code', 'Language', 'Label', 'Length']}
+          cols={records.map((r): Col => ({ r, tone: r.src === 'LNV' ? 'lnv' : r.src === 'IPRS' ? 'iprs' : 'muso', badge: r.src === 'LNV' ? `LNV row ${r.row ?? ''}` : r.src === 'IPRS' ? r.ref ?? 'IPRS' : r.src }))} /></div>
+      )}
+    </Drawer>
   )
 }
 

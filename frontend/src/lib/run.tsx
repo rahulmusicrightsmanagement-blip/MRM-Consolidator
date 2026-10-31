@@ -131,13 +131,14 @@ export function RunProvider({ runId, children, onChange }: { runId: number; chil
     setBusy('flag')
     try {
       setPayload(await api.flagSongs(runId, keys, on))
+      onChange?.()
       toast(on ? `${keys.length} song${keys.length === 1 ? '' : 's'} marked Not our work` : 'Not our work removed', 'good')
     } catch (e) {
       toast((e as Error).message, 'bad')
     } finally {
       setBusy(null)
     }
-  }, [runId, toast])
+  }, [runId, toast, onChange])
 
   const updateRun = useCallback(async (patch: { name?: string; report_date?: string | null; confirmed_step?: number; completed?: boolean }) => {
     setPayload(await api.updateRun(runId, patch))

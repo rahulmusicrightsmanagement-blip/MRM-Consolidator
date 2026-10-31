@@ -115,6 +115,22 @@ class PipelineTests(TestCase):
 
 @needs_samples
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
+class Step3CountTests(TestCase):
+    def test_header_counts_come_from_the_fill_plan(self):
+        from catalogue.engine.steps import step3
+        result = {"iprs": {"works": []}, "final": {"rows": []}, "mapping": {"links": []}, "tunecodes": {"rows": []}}
+        counts = step3({"songs": []}, result, {}, set(), fill={"amend": 7, "not_registered": 3, "pending": 2})["counts"]
+        self.assertEqual((counts["on_screen_amend"], counts["on_screen_register"], counts["waiting"]), (7, 3, 2))
+
+
+class ToDecideTests(TestCase):
+    def test_counts_what_the_to_decide_tab_shows(self):
+        from catalogue.engine.steps import to_decide
+        link = lambda state, method="", reason="": {"state": state, "method": method, "reason": reason}
+        self.assertEqual(to_decide([link("review"), link("linked", "Title + contributors"), link("linked", "ISWC", "Differs"),
+                                    link("linked", "ISWC"), link("linked", "Confirmed by reviewer", "Differs"), link("new")]), 3)
+
+
 class ApiTests(TestCase):
     """The step-wise flow: add client → master → one society workspace at a time."""
 
@@ -1138,6 +1154,19 @@ class StepsApiTests(TestCase):
     def _post(self, url, path):
         with open(path, "rb") as fh:
             return self.client.post(url, {"file": fh})
+
+    def test_clean_rows_show_every_filled_column_of_a_version(self):
+        cid = self.client.post("/api/clients/", {"name": CLIENT}, content_type="application/json").json()["id"]
+        url = f"/api/clients/{cid}/clean/rows/?rows=3,999,x"
+        self.assertEqual(self.client.get(url).status_code, 409)
+        self._post(f"/api/clients/{cid}/master/", f"{self.tmp}/lnv.xlsx")
+        self._post(f"/api/clients/{cid}/clean/", f"{self.tmp}/muso.xlsx")
+        rows = self.client.get(url).json()["rows"]
+        self.assertEqual([r["row"] for r in rows], [3])
+        values = [f["value"] for f in rows[0]["fields"]]
+        self.assertIn("Pyaar Ka Geet", values)
+        self.assertIn("INXY12300011", values)
+        self.assertNotIn("", values)
 
     def test_clean_then_compare_with_the_lnv(self):
         cid = self.client.post("/api/clients/", {"name": CLIENT}, content_type="application/json").json()["id"]

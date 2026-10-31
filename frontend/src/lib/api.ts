@@ -120,6 +120,8 @@ export const api = {
   deleteDsp: (clientId: number) => request<CleanPayload>(`/api/clients/${clientId}/clean/`, { method: 'DELETE' }),
   /** Many Data clean decisions in one request; choice null clears one. */
   cleanDecide: (clientId: number, items: CleanDecisionIn[]) => request<CleanPayload>(`/api/clients/${clientId}/clean/decisions/`, send({ items })),
+  /** Every filled column of these DSP sheet rows. */
+  cleanRows: (clientId: number, rows: number[]) => request<{ rows: { row: number; fields: { name: string; value: string }[] }[] }>(`/api/clients/${clientId}/clean/rows/?rows=${rows.join(',')}`),
   cleanExportUrl: (clientId: number) => `/api/clients/${clientId}/clean/export/`,
   /** Save step 1 decisions without rebuilding the result (step 1 keeps its own state while the reviewer works). */
   mergeSave: (clientId: number, items: CleanDecisionIn[]) => request<{ saved: number }>(`/api/clients/${clientId}/clean/decisions/`, send({ items, quiet: true })),

@@ -1,5 +1,20 @@
 # MRM changelog
 
+## 0.36.1 – 2026-10-31 (patch)
+- LNV vs IPRS page made cleaner: repeated numbers and long text removed, extra details fold away, Accept strong asks first
+
+## 0.36.0 – 2026-10-31 (minor)
+- Muso & LNV and LNV vs IPRS: click an LNV row to see all three files, search looks through every song, the app remembers your place, keyboard help; fixed stale counts, slow downloads with no feedback, cut-off step text, and added a warning before sending lists to IPRS
+
+## 0.35.1 – 2026-10-31 (patch)
+- Muso & LNV: Exact match and Possible match tabs are back; dropdown fixed
+
+## 0.35.0 – 2026-10-31 (minor)
+- Muso & LNV: click any version to see all its details; cleaner page with one row of tabs, one filter and a simpler versions list
+
+## 0.34.0 – 2026-10-31 (minor)
+- LNV vs IPRS step is back to the original screen from the live version: How the catalogue came out, To decide, Client/General amend, Not registered, New from IPRS, side-by-side review with Same/Different; its count now matches To decide
+
 ## 0.33.0 – 2026-10-30 (minor)
 - New tabs in step 2: Exact match, Possible match and Not in the LNV, including the songs the app linked by itself
 

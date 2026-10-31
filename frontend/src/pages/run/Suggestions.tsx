@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, CheckCheck, ChevronRight, FilePlus2, Keyboard, PartyPopper, Save, Search, SkipForward, Undo2, X } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { Button, Empty, Kbd } from '../../components/ui'
+import { Button, ConfirmDialog, Empty, Kbd } from '../../components/ui'
 import type { DecisionItem, MasterEditIn } from '../../lib/api'
 import type { ReviewItem } from '../../lib/model'
 import { samePerson } from '../../lib/names'
 import { useRun } from '../../lib/run'
+import { useStored } from '../client/SongReview'
 import type { Candidate, Contributor, IprsWork, MasterPerson, MasterSong } from '../../types'
 
 /** A decision made on screen, sent to the server in batches (one reprocessing instead of one per click). */
@@ -42,7 +43,7 @@ function confidence(item: ReviewItem): Confidence {
 /** The reason in plain words. */
 function plainWhy(item: ReviewItem, options: number) {
   const why = item.why || ''
-  if (/more than one master song/i.test(why)) return `The same IPRS code is on ${options} songs in our master – pick the right one.`
+  if (/more than one master song/i.test(why)) return `The same IPRS code is on ${options} songs in our master.`
   if (/title only/i.test(why)) return 'Only the title matches – no code or writer in common to prove it.'
   if (/score only/i.test(why)) return 'Linked, but the evidence is weak – please check it is the same song.'
   if (item.kind === 'confirm_title') return 'Linked by title and a shared writer only – no code in common.'
@@ -95,6 +96,26 @@ function Comparison({ work, song, option }: { work: IprsWork; song: MasterSong; 
     !lists[0].length && !lists[1].length ? 'none' : !lists[0].length || !lists[1].length ? 'missing'
       : lists[0].every((p) => lists[1].some((o) => samePerson(p.name, o.name, p.ipi, o.ipi))) ? 'same' : 'diff'
   const titleMark: Mark = norm(work.title) === norm(song.title) ? 'same' : option?.alt_title ? 'same' : 'diff'
+  const [more, setMore] = useStored('mrm-iprs-compare-more', false)
+  // The fields that decide it, plus anything that differs; the rest folds. Empty fields never show.
+  const rows: { label: string; iprs: ReactNode; master: ReactNode; mark: Mark; key?: boolean; empty?: boolean }[] = [
+    { label: 'Title', iprs: <b>{work.title}</b>, master: <b>{song.title}</b>, mark: titleMark, key: true },
+    { label: 'Alternate title', iprs: work.alt_title, master: song.alt_title && <>{song.alt_title}{option?.alt_title && <span className="cmp-note">matched “{option.alt_title}”</span>}</>,
+      mark: work.alt_title || song.alt_title ? markOf([work.title, work.alt_title], [song.title, ...(song.alt_title ?? '').split(';')]) : 'none', empty: !work.alt_title && !song.alt_title },
+    { label: 'IPRS tunecode', iprs: <span className="mono">{work.internal_no}</span>, master: codes.length ? <span className="mono">{codes.join(', ')}</span> : null,
+      mark: codes.length ? (codes.includes(work.internal_no) ? 'same' : 'diff') : 'missing', key: true },
+    { label: 'ISWC', iprs: <span className="mono">{work.iswc}</span>, master: <span className="mono">{song.iswcs.join(', ')}</span>, mark: markOf([work.iswc], song.iswcs), key: true, empty: !work.iswc && !song.iswcs.length },
+    { label: 'ISRC', iprs: <span className="mono">{work.isrc}</span>, master: <span className="mono">{song.isrcs.join(', ')}</span>, mark: markOf([work.isrc], song.isrcs), empty: !work.isrc && !song.isrcs.length },
+    { label: 'Writers', iprs: <PeopleCell list={writersI} other={writersM} share />, master: <PeopleCell list={writersM} other={writersI} share />, mark: pEq([writersI, writersM]), key: true, empty: !writersI.length && !writersM.length },
+    { label: 'Publishers', iprs: <PeopleCell list={pubI} other={pubM} />, master: <PeopleCell list={pubM} other={pubI} />, mark: pEq([pubI, pubM]), key: true, empty: !pubI.length && !pubM.length },
+    { label: 'Film / album', iprs: work.production, master: song.movie, mark: markOf([work.production], [song.movie ?? '']), empty: !work.production && !song.movie },
+    { label: 'Singers', iprs: work.performer, master: song.singers.map((s) => s.name).join(', '),
+      mark: markOf(work.performer ? work.performer.split(/[,/&]/) : [], song.singers.map((s) => s.name), (a, b) => samePerson(a, b)), empty: !work.performer && !song.singers.length },
+    { label: 'Length', iprs: work.duration, master: song.duration, mark: markOf([work.duration], [song.duration ?? '']), empty: !work.duration && !song.duration },
+    { label: 'Language', iprs: work.language, master: null, mark: 'none', empty: !work.language },
+  ]
+  const filled = rows.filter((r) => !r.empty)
+  const folded = filled.filter((r) => !r.key && r.mark !== 'diff').length
   return (
     <div className="cmp">
       <div className="cmp-row cmp-head">
@@ -103,20 +124,8 @@ function Comparison({ work, song, option }: { work: IprsWork; song: MasterSong; 
         <span className="src master"><b>Our master (LNV)</b><small>row {song.row}{song.sn ? ` · SN ${song.sn}` : ''}</small></span>
         <span />
       </div>
-      <Row label="Title" iprs={<b>{work.title}</b>} master={<b>{song.title}</b>} mark={titleMark} />
-      <Row label="Alternate title" iprs={work.alt_title} master={song.alt_title && <>{song.alt_title}{option?.alt_title && <span className="cmp-note">matched “{option.alt_title}”</span>}</>}
-        mark={work.alt_title || song.alt_title ? markOf([work.title, work.alt_title], [song.title, ...(song.alt_title ?? '').split(';')]) : 'none'} />
-      <Row label="IPRS tunecode" iprs={<span className="mono">{work.internal_no}</span>} master={codes.length ? <span className="mono">{codes.join(', ')}</span> : null}
-        mark={codes.length ? (codes.includes(work.internal_no) ? 'same' : 'diff') : 'missing'} />
-      <Row label="ISWC" iprs={<span className="mono">{work.iswc}</span>} master={<span className="mono">{song.iswcs.join(', ')}</span>} mark={markOf([work.iswc], song.iswcs)} />
-      <Row label="ISRC" iprs={<span className="mono">{work.isrc}</span>} master={<span className="mono">{song.isrcs.join(', ')}</span>} mark={markOf([work.isrc], song.isrcs)} />
-      <Row label="Writers" iprs={<PeopleCell list={writersI} other={writersM} share />} master={<PeopleCell list={writersM} other={writersI} share />} mark={pEq([writersI, writersM])} />
-      <Row label="Publishers" iprs={<PeopleCell list={pubI} other={pubM} />} master={<PeopleCell list={pubM} other={pubI} />} mark={pEq([pubI, pubM])} />
-      <Row label="Film / album" iprs={work.production} master={song.movie} mark={markOf([work.production], [song.movie ?? ''])} />
-      <Row label="Singers" iprs={work.performer} master={song.singers.map((s) => s.name).join(', ')}
-        mark={markOf(work.performer ? work.performer.split(/[,/&]/) : [], song.singers.map((s) => s.name), (a, b) => samePerson(a, b))} />
-      <Row label="Length" iprs={work.duration} master={song.duration} mark={markOf([work.duration], [song.duration ?? ''])} />
-      <Row label="Language" iprs={work.language} master={null} mark="none" />
+      {filled.filter((r) => more || r.key || r.mark === 'diff').map((r) => <Row key={r.label} label={r.label} iprs={r.iprs} master={r.master} mark={r.mark} />)}
+      {folded > 0 && <button type="button" className="sg-more" onClick={() => setMore(!more)} aria-expanded={more}>{more ? 'Fewer details' : `${folded} more detail${folded === 1 ? '' : 's'}`}</button>}
     </div>
   )
 }
@@ -134,6 +143,7 @@ export function SuggestionReview() {
   const [view, setView] = useState<View>('todo')
   const [query, setQuery] = useState('')
   const [help, setHelp] = useState(false)
+  const [asking, setAsking] = useState(false)
 
   const conf = useMemo(() => new Map(items.map((i) => [i.id, confidence(i)])), [items])
   const todo = items.filter((i) => !pending[i.id])
@@ -236,7 +246,7 @@ export function SuggestionReview() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest('input, select, textarea, .drawer') || e.metaKey || e.ctrlKey || e.altKey) return
+      if (asking || (e.target as HTMLElement).closest('input, select, textarea, .drawer') || e.metaKey || e.ctrlKey || e.altKey) return
       const k = e.key.toLowerCase()
       if (k === 'a' || k === 'enter') { e.preventDefault(); if (decided) return; accept() }
       else if (k === 'n') { e.preventDefault(); if (!decided) markNew() }
@@ -259,20 +269,26 @@ export function SuggestionReview() {
   const allVisibleSelected = visible.length > 0 && visible.every((i) => selected.has(i.id))
   return (
     <section className="sg card flush">
+      <ConfirmDialog open={asking} tone="primary" title={`Accept the suggestion on ${strong.length} strong songs?`} confirmLabel="Accept" onCancel={() => setAsking(false)}
+        onConfirm={() => { setAsking(false); bulk('accept', strong.map((i) => i.id)) }}>
+        Each one has the same title and a code or writer in common.{strong.length >= AUTO_SAVE && ' They are saved straight away.'}
+      </ConfirmDialog>
       <header className="sg-top">
         <div className="grow">
-          <h3>{todo.length ? `${todo.length} song${todo.length === 1 ? '' : 's'} need your decision` : 'All decided – save to apply'}</h3>
-          <p className="muted small">Is the IPRS work the same song as the one in our master? Decide with one key – decisions are saved in batches.</p>
-          <div className="sg-progress" aria-label={`${done} of ${items.length} decided`}><span style={{ width: `${(done / items.length) * 100}%` }} /></div>
+          <div className="sg-tabs" role="tablist">
+            <button type="button" role="tab" aria-selected={view === 'todo'} className={view === 'todo' ? 'active' : ''} onClick={() => { setView('todo'); setCursor(null) }}>Not answered<span>{todo.length}</span></button>
+            <button type="button" role="tab" aria-selected={view === 'ready'} className={view === 'ready' ? 'active' : ''} onClick={() => { setView('ready'); setCursor(null) }}>Ready to save<span>{ready.length}</span></button>
+          </div>
         </div>
         <div className="sg-top-actions">
-          {strong.length > 0 && <Button icon={<CheckCheck size={15} />} disabled={!!busy} onClick={() => bulk('accept', strong.map((i) => i.id))}
+          {strong.length > 0 && <Button icon={<CheckCheck size={15} />} disabled={!!busy} onClick={() => setAsking(true)}
             title="Accept every suggestion with the same title and a code or writer in common">Accept {strong.length} strong</Button>}
-          <Button variant="primary" icon={busy === 'decision' ? <span className="spinner small" /> : <Save size={15} />} disabled={!done || !!busy} onClick={() => save()}>
-            {done ? `Save ${done} decision${done === 1 ? '' : 's'}` : 'Nothing to save'}</Button>
+          {done > 0 && <Button variant="primary" icon={busy === 'decision' ? <span className="spinner small" /> : <Save size={15} />} disabled={!!busy} onClick={() => save()}>
+            {`Save ${done} decision${done === 1 ? '' : 's'}`}</Button>}
           <button type="button" className="icon-btn" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={() => setHelp(!help)}><Keyboard size={17} /></button>
         </div>
       </header>
+      {done > 0 && <div className="sg-progress" aria-label={`${done} of ${items.length} decided`}><span style={{ width: `${(done / items.length) * 100}%` }} /></div>}
       {help && (
         <div className="sg-help">
           <span><Kbd>A</Kbd> same song</span><span><Kbd>N</Kbd> new song</span><span><Kbd>S</Kbd> skip</span><span><Kbd>1</Kbd>–<Kbd>9</Kbd> show option</span><span><Kbd>Space</Kbd> tick / untick it</span>
@@ -282,10 +298,6 @@ export function SuggestionReview() {
 
       <div className="sg-body">
         <aside className="sg-queue">
-          <div className="sg-tabs" role="tablist">
-            <button type="button" role="tab" aria-selected={view === 'todo'} className={view === 'todo' ? 'active' : ''} onClick={() => { setView('todo'); setCursor(null) }}>To decide<span>{todo.length}</span></button>
-            <button type="button" role="tab" aria-selected={view === 'ready'} className={view === 'ready' ? 'active' : ''} onClick={() => { setView('ready'); setCursor(null) }}>Ready to save<span>{ready.length}</span></button>
-          </div>
           <div className="sg-search">
             <input type="checkbox" checked={allVisibleSelected} aria-label="Select all"
               onChange={() => setSelected(allVisibleSelected ? new Set() : new Set(visible.map((i) => i.id)))} />
@@ -301,19 +313,20 @@ export function SuggestionReview() {
               <button type="button" className="icon-btn" aria-label="Clear selection" onClick={() => setSelected(new Set())}><X size={14} /></button>
             </div>
           )}
-          <ul className="sg-list" role="listbox" aria-label="Songs to decide">
+          <ul className={`sg-list ${selected.size ? 'selecting' : ''}`} role="listbox" aria-label="Songs to decide">
             {visible.map((i) => {
               const p = pending[i.id]
               const rs = p?.action === 'link' ? p.rows : sameRows(i)
               const r = rs[0]
               const c = conf.get(i.id)!
+              const target = songs.get(r ?? 0)?.title
               return (
                 <li key={i.id} role="option" aria-selected={i.id === item?.id} className={`${i.id === item?.id ? 'active' : ''} ${selected.has(i.id) ? 'checked' : ''}`} onClick={() => setCursor(i.id)}>
                   <input type="checkbox" checked={selected.has(i.id)} aria-label={`Select ${i.title}`} onClick={(e) => e.stopPropagation()}
                     onChange={() => setSelected((s) => { const n = new Set(s); if (n.has(i.id)) n.delete(i.id); else n.add(i.id); return n })} />
                   <div className="grow">
                     <strong>{i.title}</strong>
-                    <span className="sg-sub">{p?.action === 'new' ? 'New song – not in our master' : <><ChevronRight size={11} />{songs.get(r ?? 0)?.title ?? 'no suggestion'}{r ? ` · row ${r}` : ''}{rs.length > 1 ? ` + ${rs.length - 1} more` : ''}</>}</span>
+                    <span className="sg-sub">{p?.action === 'new' ? 'New song – not in our master' : <>{norm(target) !== norm(i.title) && <><ChevronRight size={11} />{target ?? 'no suggestion'}{r ? ' · ' : ''}</>}{r ? `row ${r}` : ''}{rs.length > 1 ? ` + ${rs.length - 1} more` : ''}</>}</span>
                   </div>
                   {p ? <span className={`sg-done ${p.action}`}>{p.action === 'link' ? <><Check size={11} />Same</> : <><FilePlus2 size={11} />New</>}</span>
                     : <span className={`conf ${c}`}>{CONF_LABEL[c]}</span>}
@@ -328,22 +341,20 @@ export function SuggestionReview() {
           {item && work ? (
             <>
               <div className="sg-panel-head">
-                <span className="eyebrow">{options.length > 1 ? 'Which master songs are this IPRS work?' : 'Is this the same song?'}</span>
                 <h3>{item.title}</h3>
-                <p className="sg-why"><span className={`conf ${conf.get(item.id)}`}>{CONF_LABEL[conf.get(item.id)!]}</span>{plainWhy(item, options.length)}</p>
+                <p className="sg-why">{plainWhy(item, options.length)}{options.length > 1 && <> Tick <b>every</b> row that is this song.</>}</p>
               </div>
               {options.length > 1 && (
                 <>
-                  <p className="sg-hint">Tick <b>every</b> row that is this song – a pathos, reprise or other version can share the IPRS code. Click a card to compare it below.</p>
                   <div className="sg-options" role="list" aria-label="Possible master songs">
                     {options.map((c, n) => {
                       const on = (decided?.action === 'link' ? decided.rows : ticked).includes(c.row)
                       return (
-                        <div key={c.row} role="listitem" className={`sg-option ${c.row === row ? 'active' : ''} ${on ? 'same' : ''}`}
+                        <div key={c.row} role="listitem" title="Click to compare it below" className={`sg-option ${c.row === row ? 'active' : ''} ${on ? 'same' : ''}`}
                           onClick={() => setPicked((p) => ({ ...p, [item.id]: c.row }))}>
                           <span className="opt-n">{n + 1}</span>
                           <span className="grow"><b>{songs.get(c.row)?.title ?? c.title}</b>
-                            <small>row {c.row} · title {c.title_score}%{c.methods.length ? ` · same ${c.methods.join(', ')}` : ''}{c.shared_contributors ? ` · ${c.shared_contributors} writer${c.shared_contributors === 1 ? '' : 's'} in common` : ''}</small>
+                            <small>row {c.row}{c.methods.length ? ` · same ${c.methods.join(', ')}` : ''}{c.shared_contributors ? ` · ${c.shared_contributors} writer${c.shared_contributors === 1 ? '' : 's'} in common` : ''}</small>
                             <label className="opt-same" onClick={(e) => e.stopPropagation()}>
                               <input type="checkbox" checked={on} disabled={!!decided} onChange={() => toggleSame(c.row)} />Same song</label></span>
                           {c.row === suggestedRow(item) && <span className="tag">best</span>}
@@ -378,7 +389,7 @@ export function SuggestionReview() {
                 <button type="button" className="link-btn small" disabled={!!busy} onClick={() => decide(item.id, 'clear')}>Reset this song to automatic</button>
               )}
             </>
-          ) : <Empty title="Pick a song on the left" />}
+          ) : <Empty title={view === 'ready' ? 'Nothing waiting to be saved' : todo.length ? 'Pick a song on the left' : 'All answered – save to apply'} />}
         </div>
       </div>
     </section>

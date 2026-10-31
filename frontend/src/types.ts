@@ -547,7 +547,7 @@ export interface Step1 {
 export interface StepDecision { choice: string; data: { keep?: number | string; row?: number; rows?: number[] }; by?: 'app' | 'you' }
 export interface Step3Line { row: number; title: string; film: string; codes: string[]; why: string[] }
 export interface Step3 {
-  counts: { works: number; matched: number; review: number; review_open: number; amend: number; register: number; iprs_only: number }
+  counts: { works: number; matched: number; review: number; review_open: number; amend: number; register: number; on_screen_amend: number; on_screen_register: number; waiting: number; iprs_only: number }
   review: { key: string; title: string; reason: string; records: SongRecord[]; decision: { row?: number; none?: boolean } | null }[]
   amend: (Step3Line & { detail: string[]; records: SongRecord[] })[]
   register: (Step3Line & { record: SongRecord })[]

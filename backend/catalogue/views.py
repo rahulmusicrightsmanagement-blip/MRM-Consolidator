@@ -147,12 +147,9 @@ def snapshot(result):
     if result.get("mapping"):
         m = result["mapping"]["summary"]
         # Same rule as the review screen: undecided links, title-only links and links with conflicting identifiers.
-        review = sum(1 for l in result["mapping"]["links"] if l["state"] == "review" or (
-            l["state"] == "linked" and l["method"] != "Confirmed by reviewer" and (l["method"] == "Title + contributors" or l["reason"])))
+        review = steps.to_decide(result["mapping"]["links"])
         s.update(stage=4, linked=m["linked"], matched=m["matched"], with_differences=m["with_differences"],
-                 review=review, iprs_only=m["iprs_only"], master_only=m["master_only"],
-                 # the IPRS works the consolidate flow asks about ("Which LNV row?")
-                 needs=sum(1 for l in result["mapping"]["links"] if l["state"] == "review" and l["candidates"]))
+                 review=review, iprs_only=m["iprs_only"], master_only=m["master_only"], needs=review)
     if result.get("final"):
         s["final_total"] = result["final"]["summary"]["final_total"]
         s["added"] = result["final"]["summary"]["added"]
@@ -812,7 +809,7 @@ def client_steps(request, client_id):
     if result and result.get("tunecodes"):
         aliases, _ = dataclean.learned(decisions)
         people = dataclean.People(aliases, dataclean._client_keys(parsed["songs"], client.name), dataclean.rules_of(decisions))
-        built["3"] = steps.step3(parsed, result, _decisions(run), _not_our_work(client), people)
+        built["3"] = steps.step3(parsed, result, _decisions(run), _not_our_work(client), people, fill_plan(run, result)["summary"])
         files["iprs"]["works"] = result["iprs"]["stats"]["works"]
     out["counts"] = {k: (built[k]["counts"] if k in built else None) for k in ("1", "3")}
     out["step"] = built.get(request.GET.get("step", ""))
@@ -860,6 +857,21 @@ def merge_export(request, client_id):
     sheet, merge = _dsp_sheet(dsp)
     return _xlsx(songmerge.workbook(sheet, merge, decisions, steps.credits(clean)),
                  f"{client.name.replace(' ', '_')}_{dsp.source.replace(' ', '_')}_merged_{date.today()}")
+
+
+@require_http_methods(["GET"])
+def clean_rows(request, client_id):
+    """Every column the DSP sheet holds for ?rows=<sheet row>,… – blank and "N/A" cells left out."""
+    dsp = get_object_or_404(Client, pk=client_id).dsp_files.order_by("-uploaded_at").first()
+    if not dsp:
+        return JsonResponse({"error": "Upload a DSP sheet first"}, status=409)
+    sheet, _ = _dsp_sheet(dsp)
+    wanted = {int(x) for x in request.GET.get("rows", "").split(",") if x.strip().isdigit()}
+    return JsonResponse({"rows": [
+        {"row": r["row"], "fields": [{"name": h, "value": str(v).strip()} for h, v in zip(sheet["header"], r["cells"])
+                                     if h and str(v or "").strip() and not dataclean.is_placeholder(v)
+                                     and not str(v).startswith("Not provided")]}
+        for r in sheet["rows"] if r["row"] in wanted]})
 
 
 def clean_export(request, client_id):

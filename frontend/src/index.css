@@ -1669,6 +1669,7 @@ button.ms-title:hover { color: var(--text); }
 
 .cs { display: flex; flex-direction: column; gap: 18px; }
 .cs-steps { display: flex; align-items: center; gap: 10px; position: sticky; top: 58px; z-index: 5; padding: 10px 0; background: var(--bg); }
+.cs .mv-tabs { top: 132px; } /* stays below the step bar */
 .cs-steps-arrow { color: var(--muted); flex: none; }
 .cs-step { flex: 1; display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: var(--r-lg); border: 1px solid var(--border); background: var(--surface);
   font: inherit; color: inherit; text-align: left; cursor: pointer; min-width: 0; transition: border-color .15s, box-shadow .15s; }
@@ -2449,3 +2450,63 @@ table.data tr.clickable:hover td { background: var(--surface-2); }
 .rv-tabs.rv-match { padding-bottom: 2px; border-bottom: 1px solid var(--border); }
 .rv-tabs.rv-match button { margin-bottom: -3px; }
 .rv-fills .rvc { margin-top: 4px; }
+
+/* the versions list: one quiet line per version, click for everything */
+.rv-clean tbody tr { cursor: pointer; }
+.rv-clean tbody tr:hover td { background: var(--surface-2); }
+.rv-ver-open { padding: 0; border: 0; background: none; font: inherit; font-weight: 600; color: var(--text); text-align: left; cursor: pointer; }
+tr:hover > td > .rv-ver-open { color: var(--brand); }
+.rv-ver-diff { margin-top: 2px; font-size: 12px; }
+.rvc-open { display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: none; cursor: pointer; }
+.rvc-open:hover { text-decoration: underline; }
+.rv-case .sm-detail-nav h3 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rv-case .sm-detail-nav .rv-done-name, .rv-case .sm-detail-nav .rv-pos { flex: none; }
+.rv-det-sub { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.rv-det-tabs { border-bottom: 1px solid var(--border); padding-top: 8px; }
+.rv-det h4 { margin: 14px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.rv-det dl { display: grid; grid-template-columns: 160px minmax(0, 1fr); margin: 0; font-size: 13.5px; }
+.rv-det dt, .rv-det dd { margin: 0; padding: 7px 0; border-top: 1px solid var(--border); }
+.rv-det dt { color: var(--muted); padding-right: 12px; }
+.rv-det dd { overflow-wrap: anywhere; }
+.rv-det a { display: inline-flex; align-items: center; gap: 4px; color: var(--brand); }
+.rv-tabs.rv-match { gap: 8px; flex-wrap: nowrap; justify-content: space-between; }
+.rv-tabs.rv-match button { white-space: nowrap; font-size: 12px; }
+
+/* a step's result may take two lines rather than be cut off */
+.cs-step-text small { white-space: normal; overflow: visible; text-overflow: clip; }
+/* step 3 starts at the work, like step 2 */
+.main2 > .page:has(.cs .mv-tabs) > .client-top { display: none; }
+.outcome-head .cs-more-link { flex: none; }
+.rv-keys { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
+.rv-keys .sm-kbd { margin-right: 2px; }
+.cs-steps .cs-step .cs-step-text, .cs-steps .cs-step .cs-step-text small { white-space: normal !important; overflow: visible !important; text-overflow: clip !important; }
+
+/* v0.37 LNV vs IPRS: one quiet line above the case, nothing repeated */
+.outcome:not(:has(.statusbar)) { padding-top: 10px; padding-bottom: 10px; }
+.outcome-head { align-items: center; }
+.outcome-head h3 { font-size: 14px; }
+.outcome-head h3 span { margin-left: 10px; font-size: 13px; font-weight: 400; color: var(--muted); }
+.sg-top { align-items: center; padding: 0 16px 0 8px; gap: 12px; }
+.sg-top .sg-tabs { padding: 0; border: 0; }
+.sg-top .sg-tabs button { flex: none; padding: 14px 12px 12px; margin: 0; }
+.sg .sg-progress { margin: 0; max-width: none; height: 2px; border-radius: 0; }
+.sg-top-actions { padding: 8px 0; }
+.sg-search { padding-top: 12px; }
+.sg-list input[type=checkbox] { opacity: 0; transition: opacity .1s; }
+.sg-list.selecting input[type=checkbox], .sg-list li:hover input[type=checkbox], .sg-list input[type=checkbox]:focus-visible { opacity: 1; }
+@media (hover: none) { .sg-list input[type=checkbox] { opacity: 1; } }
+.sg-panel { gap: 14px; }
+.sg-panel-head h3 { margin-top: 0; }
+.sg-why { display: block; margin-top: 4px; }
+.sg-options { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.sg .opt-same { padding: 0; border: 0 !important; border-radius: 0; background: none; color: var(--text-2); margin-top: 6px; }
+.sg-more { display: block; width: 100%; padding: 9px 14px; border: 0; border-top: 1px solid var(--border); background: none; font: inherit; font-size: 12.5px; font-weight: 550; color: var(--brand); text-align: left; cursor: pointer; }
+.sg-more:hover { background: var(--surface-2); }
+.reason-cards.reason-cards { display: flex; flex-wrap: wrap; gap: 6px; }
+.reason-card.reason-card { flex: none; width: auto; min-height: 0; padding: 7px 12px; border-top-width: 2px; }
+.reason-card .rc-top { gap: 10px; align-items: center; }
+.reason-card .rc-top b { font-size: 13px; }
+.reason-card .rc-n { font-size: 13px; }
+.sg-purpose { margin-bottom: 12px; }
+.sg-purpose > span { font-size: 12px; font-weight: 600; color: var(--muted); }
+@media (max-width: 1600px) { .cs .mv-tabs { top: 152px; gap: 0; } .cs .mv-tabs button { padding: 8px 8px; gap: 5px; font-size: 12.5px; } } /* the step text wraps to two lines here */

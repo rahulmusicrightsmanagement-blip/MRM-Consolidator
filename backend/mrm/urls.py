@@ -19,6 +19,7 @@ urlpatterns = [
     path("api/clients/<int:client_id>/steps/lnv/", views.lnv_update_export),
     path("api/clients/<int:client_id>/clean/", views.client_clean),
     path("api/clients/<int:client_id>/clean/decisions/", views.clean_decisions),
+    path("api/clients/<int:client_id>/clean/rows/", views.clean_rows),
     path("api/clients/<int:client_id>/clean/export/", views.clean_export),
     path("api/clients/<int:client_id>/societies/", views.client_societies),
     path("api/clients/<int:client_id>/societies/<str:society>/", views.client_society),

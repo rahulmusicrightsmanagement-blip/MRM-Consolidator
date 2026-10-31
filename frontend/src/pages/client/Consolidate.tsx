@@ -5,17 +5,17 @@ import { ArrowLeft, ArrowRight, Check, Download, ListChecks, UploadCloud } from 
 import { Button } from '../../components/ui'
 import { api } from '../../lib/api'
 import { today, useClient } from '../../lib/client'
+import { RunProvider, useRun } from '../../lib/run'
 import { useToast } from '../../lib/toast'
-import type { Step1, Step3, StepsPayload } from '../../types'
-import IprsReview from './IprsReview'
+import type { Step1, StepsPayload } from '../../types'
+import { IprsMatchStep } from '../run/MatchStep'
 import SongReview, { useStored } from './SongReview'
 import { n } from './Block'
 
 /** The consolidate flow, one step after the other (the MRM flowchart):
  *    1 Muso & LNV  – one case per song: its DSP versions and the LNV rows that may be it, answered together
- *    2 LNV ↔ IPRS  – each LNV song against the IPRS report: to check · amend · register · only at IPRS
- *  Every case is a block of records shown one below another with every field side by side; differing cells are
- *  marked. The app's answer is already applied – the reviewer only clicks where it is wrong. */
+ *    2 LNV ↔ IPRS  – the IPRS report's "Match & review" (run/MatchStep): to decide · amend · not registered · new
+ *  The app's answer is already applied – the reviewer only clicks where it is wrong. */
 
 
 /* ---------- the page ---------- */
@@ -23,7 +23,7 @@ import { n } from './Block'
 const STEPS = [
   { n: 1, api: 0, title: 'Files', what: 'The LNV, the Muso export, the IPRS report' },
   { n: 2, api: 1, title: 'Muso & LNV', what: 'Each song: its versions and its LNV row' },
-  { n: 3, api: 3, title: 'LNV vs IPRS', what: 'Registered, to amend, to register' },
+  { n: 3, api: 0, title: 'LNV vs IPRS', what: 'Registered, to amend, to register' },
   { n: 4, api: 0, title: 'Final LNV', what: 'Everything written into the LNV' },
 ]
 
@@ -54,7 +54,7 @@ export default function Consolidate() {
   /** Save, then show the step again with the change applied everywhere it matters. */
   const save = async (work: () => Promise<unknown>) => {
     setSaving((x) => x + 1)
-    try { await work(); await load(); return true } catch (e) { toast(`Not saved: ${(e as Error).message}`, 'bad'); return false } finally { setSaving((x) => x - 1) }
+    try { await work(); await load(); void refresh(); return true } catch (e) { toast(`Not saved: ${(e as Error).message}`, 'bad'); return false } finally { setSaving((x) => x - 1) }
   }
 
   const upload = async (slot: 'lnv' | 'dsp' | 'iprs', file: File) => {
@@ -83,7 +83,7 @@ export default function Consolidate() {
   const results = [
     allFiles ? 'All three files are in' : `${[f.lnv, f.dsp, f.iprs].filter(Boolean).length} of 3 files`,
     c['1'] ? `${n(c['1'].songs)} songs · ${n(c['1'].needs)} need you` : `Needs the LNV and the ${src} export`,
-    c['3'] ? `${n(c['3'].review_open)} need you · ${n(c['3'].amend)} amend · ${n(c['3'].register)} register` : 'Needs the IPRS report',
+    c['3'] ? `${n(c['3'].review_open)} need you · ${n(c['3'].on_screen_amend)} amend · ${n(c['3'].on_screen_register)} register` : 'Needs the IPRS report',
     f.lnv ? 'Ready to download' : 'Needs the LNV',
   ]
   const done = [allFiles, !!c['1'] && c['1'].needs === 0, !!c['3'] && c['3'].review_open === 0, false]
@@ -127,8 +127,7 @@ export default function Consolidate() {
       {step === 3 && (
         <>
           {!f.lnv || !f.iprs ? <Empty>This step needs the LNV and the IPRS report – <button type="button" className="rv-link-btn" onClick={() => go(1)}>add them in step 1</button>.</Empty>
-            : !shown ? <Wait />
-              : <IprsReview d={shown as Step3} run={data.run!} clientId={clientId} save={save} />}
+            : <RunProvider key={data.run} runId={data.run!} onChange={() => { load(); refresh() }}><IprsStep /></RunProvider>}
         </>
       )}
       {step === 4 && <Final data={data} clientId={clientId} go={go} />}
@@ -142,11 +141,18 @@ export default function Consolidate() {
   )
 }
 
+/** Step 3: the IPRS report's own screen, once the report is open. */
+function IprsStep() {
+  const { payload, loading, error } = useRun()
+  if (loading && !payload) return <Wait />
+  if (error || !payload) return <div className="alert bad">{error ?? 'Could not open the IPRS report.'}</div>
+  return <IprsMatchStep />
+}
+
 /** Step 4: what the final LNV holds, and the downloads. Open doubts do not block it: the app's answer is used. */
 function Final({ data, clientId, go }: { data: StepsPayload; clientId: number; go: (s: number) => void }) {
   const c1 = data.counts['1'], c3 = data.counts['3']
   const src = data.source
-  const [preparing, setPreparing] = useState(false)
   if (!data.files.lnv) return <Empty>The final LNV needs the client's LNV – <button type="button" className="rv-link-btn" onClick={() => go(1)}>add it in step 1</button>.</Empty>
   const open = (c1?.needs ?? 0) + (c3?.review_open ?? 0)
   return (
@@ -156,10 +162,13 @@ function Final({ data, clientId, go }: { data: StepsPayload; clientId: number; g
       {open > 0 && (
         <div className="alert warn cs-pending">
           <span className="grow"><b>{n(open)}</b> songs still need you{c1?.needs ? <> – {n(c1.needs)} in step 2</> : null}{c3?.review_open ? <> – {n(c3.review_open)} in step 3</> : null}.
-            You can download now: where the app has an answer it is used, the rest stay out of the LNV until you decide.</span>
+            You can download now: where the app has an answer it is used; a song with no answer yet stays out of the final LNV.</span>
           {!!c1?.needs && <Button variant="ghost" onClick={() => go(2)}>Go to step 2</Button>}
           {!!c3?.review_open && <Button variant="ghost" onClick={() => go(3)}>Go to step 3</Button>}
         </div>
+      )}
+      {!!c3?.waiting && (
+        <div className="alert warn cs-pending"><span className="grow">Finish step 3 before sending the lists to IPRS: <b>{n(c3.waiting)}</b> LNV songs are still waiting for your decision there, and until then they can show up on the Registration list even if IPRS already has them.</span></div>
       )}
       <div className="fin-grid">
         <section className="fin-card">
@@ -169,30 +178,51 @@ function Final({ data, clientId, go }: { data: StepsPayload; clientId: number; g
             <li><b>{n(c1.filled_rows)}</b> LNV rows get details {src} has and the LNV left blank</li>
             <li><b>{n(c1.adding)}</b> new songs are added to the LNV</li>
             <li><b>{n(c1.not_ours)}</b> songs are left out – not the client's writing</li>
+            {c1.undecided > 0 && <li><b>{n(c1.undecided)}</b> new songs have no answer yet, so they are not added</li>}
           </ul> : <p className="muted">Needs the {src} export.</p>}
         </section>
         <section className="fin-card">
           <h3><span className="rv-badge iprs">IPRS</span> From step 3</h3>
           {c3 ? <ul>
             <li><b>{n(c3.matched)}</b> LNV songs are registered at IPRS as in the LNV</li>
-            <li><b>{n(c3.amend)}</b> to amend at IPRS</li>
-            <li><b>{n(c3.register)}</b> to register at IPRS</li>
+            <li><b>{n(c3.on_screen_amend)}</b> to amend at IPRS</li>
+            <li><b>{n(c3.on_screen_register)}</b> to register at IPRS</li>
             <li><b>{n(c3.iprs_only)}</b> works only IPRS has are added to the LNV</li>
           </ul> : <p className="muted">Needs the IPRS report.</p>}
         </section>
       </div>
       <div className="fin-actions">
-        <a className="btn primary fin-main" href={api.lnvUpdateUrl(clientId)} onClick={() => { setPreparing(true); window.setTimeout(() => setPreparing(false), 15000) }}>
-          {preparing ? <><span className="spinner small" />Preparing…</> : <><Download size={17} />Download the final LNV</>}</a>
+        <FileButton className="primary fin-main" url={api.lnvUpdateUrl(clientId)} size={17}>Download the final LNV</FileButton>
         {data.run && <>
-          <a className="btn" href={api.exportUrl(data.run, 'amend_lnv')}><Download size={15} />Amendment list</a>
-          <a className="btn" href={api.exportUrl(data.run, 'registration_lnv')}><Download size={15} />Registration list</a>
+          <FileButton url={api.exportUrl(data.run, 'amend_lnv')}>Amendment list{c3 ? ` (${n(c3.amend)})` : ''}</FileButton>
+          <FileButton url={api.exportUrl(data.run, 'registration_lnv')}>Registration list{c3 ? ` (${n(c3.register)})` : ''}</FileButton>
         </>}
-        {data.files.dsp && <a className="btn ghost" href={api.mergeExportUrl(clientId)}><Download size={15} />{src} merged by song</a>}
+        {data.files.dsp && <FileButton className="ghost" url={api.mergeExportUrl(clientId)}>{src} merged by song</FileButton>}
         <Link className="btn ghost" to={`/clients/${clientId}/tasks`}><ListChecks size={15} />Follow-up tasks</Link>
       </div>
     </>
   )
+}
+
+/** A download that says it is working: the lists take up to half a minute to build, and an error shows as a message. */
+function FileButton({ url, className = '', size = 15, children }: { url: string; className?: string; size?: number; children: ReactNode }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState(false)
+  const get = async () => {
+    setBusy(true)
+    try {
+      const res = await fetch(url, { credentials: 'same-origin' })
+      if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? 'The file could not be prepared.')
+      const name = /filename="?([^";]+)"?/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? 'download.xlsx'
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(await res.blob())
+      link.download = name
+      link.click()
+      URL.revokeObjectURL(link.href)
+    } catch (e) { toast((e as Error).message, 'bad') } finally { setBusy(false) }
+  }
+  return <button type="button" className={`btn ${className}`} disabled={busy} onClick={get}>
+    {busy ? <><span className={`spinner ${className.includes('primary') ? 'small' : 'small-dark'}`} />Preparing…</> : <><Download size={size} />{children}</>}</button>
 }
 
 const Empty = ({ children }: { children: ReactNode }) => <div className="cs-empty"><UploadCloud size={26} /><span>{children}</span></div>

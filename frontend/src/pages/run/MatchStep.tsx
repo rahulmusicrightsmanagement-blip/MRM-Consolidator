@@ -5,6 +5,7 @@ import type { ReactNode } from 'react'
 import { StatusBar } from '../../components/StatusBar'
 import { Badge, Button, Card, DataTable, Empty, Mono } from '../../components/ui'
 import { useRun } from '../../lib/run'
+import { useStored } from '../client/SongReview'
 import { songForWork } from '../../lib/model'
 import type { FillBlock, FillRow } from '../../types'
 import { MapTab, GapsTab } from './Panels'
@@ -128,13 +129,14 @@ const bulkNotOurs = (flagSongs: (k: string[], on: boolean) => Promise<void>, bus
 )
 
 /** IPRS and our master side by side for one registration, with the "keep IPRS / keep ours" choices. */
-function Detail({ r, b, focus }: { r: FillRow; b?: FillBlock; focus?: string[] }) {
+function Detail({ r, b, focus, purpose }: { r: FillRow; b?: FillBlock; focus?: string[]; purpose?: string }) {
   const { model, openSong } = useRun()
   const link = b ? model?.links.get(b.internal_no) : undefined
   const song = b && model ? songForWork(model, b.internal_no) : null
   return (
     <div className="detail" onClick={(e) => e.stopPropagation()}>
       {song && <div className="decide-head"><h4>{r.title}</h4><Button size="sm" variant="ghost" onClick={() => openSong(song.key)}>Open song<ExternalLink size={13} /></Button></div>}
+      {purpose && <div className="sg-purpose"><span>Purpose of amendment (goes into the Excel)</span><p className="purpose">{purpose}</p></div>}
       <PairPanel work={b?.internal_no ?? null} row={r.master_row} link={link} focus={focus} />
     </div>
   )
@@ -158,20 +160,17 @@ function AmendView({ kind, rows, filter, setFilter }: { kind: 'client' | 'genera
     <div className="stack">
       <div className="mv-intro">
         <p className="grow">{kind === 'client'
-          ? <><b>Client status “Amend”</b> – IPRS has the <b>client's own credit</b> wrong. These come first: the client may not be paid, or paid the wrong amount.</>
-          : <><b>General Status “Amend”</b> – the client's credit is right, but <b>something else</b> on the registration differs from our master: co-writers, publishers, ISWC or share totals.</>}</p>
+          ? <>IPRS has the <b>client's own credit</b> wrong – they may not be paid, or paid the wrong amount.</>
+          : <>The client's credit is right, but <b>something else</b> differs from our master.</>}</p>
         <a className="btn sm" href={exportUrl('amend_lnv')}><Download size={14} />Amend report (LNV)</a>
       </div>
       <div className="reason-cards" role="tablist" aria-label="Reason">
         <button type="button" role="tab" aria-selected={!group} className={`reason-card ${!group ? 'active' : ''}`} onClick={() => setFilter('')}>
           <span className="rc-top"><b>All reasons</b><span className="rc-n">{lines.length}</span></span>
-          <small>Every registration to amend, most urgent first.</small>
         </button>
         {groups.filter((g) => count(g) > 0).map((g) => (
-          <button key={g.id} type="button" role="tab" aria-selected={filter === g.id} className={`reason-card ${g.priority} ${filter === g.id ? 'active' : ''}`} onClick={() => setFilter(filter === g.id ? '' : g.id)}>
+          <button key={g.id} type="button" role="tab" title={`${g.priority === 'high' ? 'High' : 'Medium'} priority – ${g.impact}`} aria-selected={filter === g.id} className={`reason-card ${g.priority} ${filter === g.id ? 'active' : ''}`} onClick={() => setFilter(filter === g.id ? '' : g.id)}>
             <span className="rc-top"><b>{g.label}</b><span className="rc-n">{count(g)}</span></span>
-            <small>{g.impact}</small>
-            <span className={`rc-prio ${g.priority}`}>{g.priority === 'high' ? 'High priority' : 'Medium priority'}</span>
           </button>
         ))}
       </div>
@@ -190,21 +189,20 @@ function AmendView({ kind, rows, filter, setFilter }: { kind: 'client' | 'genera
             { key: 'code', header: 'IPRS code', sort: (l) => l.b.internal_no, render: (l) => <div><Mono>{l.b.internal_no}</Mono>
               {l.b.round === 'first' ? (l.r.blocks.length > 1 && <span className="small muted block">block {l.b.slot}</span>) : <RoundTag b={l.b} />}</div> },
             { key: 'what', header: kind === 'client' ? 'What is wrong with the client\'s credit' : 'What else differs', render: (l) => <div className="reasons">{reasonsOf(l.b).map((t) => <Reason key={t} text={t} groups={groups} />)}</div> },
-            { key: 'purpose', header: 'Purpose of amendment (goes into the Excel)', render: (l) => <p className="purpose">{l.b.purpose || <span className="muted">—</span>}</p> },
             { key: 'other', header: kind === 'client' ? 'General Status' : 'Client status', render: (l) => {
               const v = kind === 'client' ? l.b.general_status : l.b.client_status
               return <Badge tone={statusTone(v)} icon={false}>{v}</Badge>
             } },
             { key: 'nw', header: '', render: (l) => <NotOursButton r={l.r} /> },
           ]}
-          expand={(l) => <Detail r={l.r} b={l.b} focus={reasonsOf(l.b)} />} />
+          expand={(l) => <Detail r={l.r} b={l.b} focus={reasonsOf(l.b)} purpose={l.b.purpose} />} />
       </Card>
     </div>
   )
 }
 
 /** Songs without an IPRS registration, songs added from IPRS, songs marked "Not our work", or every song. */
-function SongsView({ rows, intro, download }: { rows: FillRow[]; intro: ReactNode; download?: { href: string; label: string } }) {
+function SongsView({ rows, intro, download, sameStatus }: { rows: FillRow[]; intro: ReactNode; download?: { href: string; label: string }; sameStatus?: boolean }) {
   const { flagSongs, busy } = useRun()
   return (
     <div className="stack">
@@ -219,8 +217,10 @@ function SongsView({ rows, intro, download }: { rows: FillRow[]; intro: ReactNod
               : r.state === 'not_registered' || r.state === 'not_our_work' ? (r.status_slot
                 ? <span className="round-tag new">status → block {r.status_slot}</span> : <span className="round-tag kept">already marked in our master</span>)
               : <span className="muted small">—</span> },
-            { key: 'client', header: 'Client status', render: (r) => <StatusList r={r} pick={(b) => b.client_status} /> },
-            { key: 'general', header: 'General Status', render: (r) => <StatusList r={r} pick={(b) => b.general_status} /> },
+            ...(sameStatus ? [] : [
+              { key: 'client', header: 'Client status', render: (r: FillRow) => <StatusList r={r} pick={(b) => b.client_status} /> },
+              { key: 'general', header: 'General Status', render: (r: FillRow) => <StatusList r={r} pick={(b) => b.general_status} /> },
+            ]),
             { key: 'nw', header: '', render: (r) => <NotOursButton r={r} /> },
           ]}
           expand={(r) => r.blocks.length ? <Detail r={r} b={r.blocks[0]} /> : r.master_row ? <Detail r={r} /> : null} />
@@ -233,6 +233,7 @@ export function IprsMatchStep() {
   const { payload, model, exportUrl } = useRun()
   const [params, setParams] = useSearchParams()
   const fill = payload!.result.fill
+  const [summaryOpen, setSummaryOpen] = useStored('mrm-iprs-outcome', false)
   const waiting = model?.review.length ?? 0
   const rows = useMemo(() => fill?.rows ?? [], [fill])
   if (!fill) return <Empty title="Nothing to show yet">Upload the IPRS report and our master first.</Empty>
@@ -273,19 +274,19 @@ export function IprsMatchStep() {
     <div className="stack">
       <section className="card outcome">
         <div className="outcome-head">
-          <div className="grow"><h3>How the catalogue came out</h3>
-            <p className="muted small">{rows.length.toLocaleString()} songs in the updated master · matched songs are done automatically – only the tabs with a number need you.</p>
-            {(sm.kept > 0 || sm.new_rounds > 0) && <p className="small rounds-note">Every IPRS block that already has data in our master is <b>left untouched</b> – new information goes into the <b>next empty block</b>
-              {sm.new_rounds > 0 && <> · <b>{sm.new_rounds}</b> IPRS code{sm.new_rounds === 1 ? ' has' : 's have'} something new since the earlier block</>}.</p>}</div>
-          <a className="btn primary sm" href={exportUrl('final')}><Download size={14} />Download updated master</a>
+          <div className="grow"><h3>How the catalogue came out<span>{rows.length.toLocaleString()} songs · {sm.uploaded.toLocaleString()} with nothing to do</span></h3>
+            {summaryOpen && <>{(sm.kept > 0 || sm.new_rounds > 0) && <p className="small rounds-note">Every IPRS block that already has data in our master is <b>left untouched</b> – new information goes into the <b>next empty block</b>
+              {sm.new_rounds > 0 && <> · <b>{sm.new_rounds}</b> IPRS code{sm.new_rounds === 1 ? ' has' : 's have'} something new since the earlier block</>}.</p>}</>}</div>
+          <button type="button" className="cs-more-link" onClick={() => setSummaryOpen(!summaryOpen)} aria-expanded={summaryOpen}>{summaryOpen ? 'Less' : 'More'}</button>
+          {summaryOpen && <a className="btn sm" href={exportUrl('final')}><Download size={14} />Download updated master</a>}
         </div>
-        <StatusBar label="Songs by outcome" segments={[
+        {summaryOpen && <StatusBar label="Songs by outcome" segments={[
           { label: 'Uploaded – nothing to do', value: sm.uploaded, tone: 'good', onClick: () => setView('all') },
           { label: 'Amend', value: sm.amend, tone: 'warning', onClick: () => setView(sets.client.length ? 'client' : 'general') },
           { label: 'Not registered', value: sm.not_registered, tone: 'critical', onClick: () => setView('not_registered') },
           { label: 'Not our work', value: sm.not_our_work, tone: 'neutral', onClick: () => setView('not_our_work') },
           { label: 'Waiting for your decision', value: sm.pending, tone: 'serious', onClick: () => waiting && setView('decide') },
-        ]} />
+        ]} />}
       </section>
 
       <nav className="mv-tabs" role="tablist" aria-label="Results">
@@ -299,13 +300,14 @@ export function IprsMatchStep() {
       {view === 'decide' && <SuggestionReview />}
       {(view === 'client' || view === 'general') && <AmendView key={view} kind={view} rows={sets[view]} filter={reason} setFilter={(f) => setView(view, f)} />}
       {view === 'not_registered' && <SongsView rows={sets.not_registered} download={{ href: exportUrl('registration_lnv'), label: 'Registration report (LNV)' }}
-        intro={<><b>Not registered</b> – songs in our master with no IPRS registration. Block 1 gets “Not registered”; register them at IPRS.</>} />}
+        sameStatus
+        intro={<>In our master with <b>no IPRS registration</b> – register them at IPRS.</>} />}
       {view === 'new' && <SongsView rows={sets.new}
-        intro={<><b>New from IPRS</b> – IPRS works our master did not have. They are added at the bottom of the updated master, with their IPRS code.</>} />}
-      {view === 'not_our_work' && <SongsView rows={sets.not_our_work}
-        intro={<><b>Not our work</b> – songs you (or the master) marked as not the client's. Both statuses say “Not our work”; nothing to amend.</>} />}
+        intro={<>IPRS works our master did not have – <b>added at the bottom</b> of the updated master.</>} />}
+      {view === 'not_our_work' && <SongsView rows={sets.not_our_work} sameStatus
+        intro={<>Marked as <b>not the client's</b> – nothing to amend.</>} />}
       {view === 'all' && <SongsView rows={rows}
-        intro={<>Every song of the updated master and its IPRS columns. A song IPRS registered more than once keeps <b>one row</b> and fills block 1, 2, 3 …</>} />}
+        intro={<>Every song of the updated master. A song IPRS registered more than once keeps <b>one row</b>.</>} />}
       {view === 'links' && (
         <>
           <MapTab />

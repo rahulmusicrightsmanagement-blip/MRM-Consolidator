@@ -46,6 +46,7 @@ def lnv_record(song):
         "ISRC": song.get("isrcs", []), "ISWC": song.get("iswcs", []), "IPRS code": codes,
         "Year": song.get("release_year", ""), "Label": song.get("label", ""), "Length": song.get("duration", ""),
         "Publisher": _names(song.get("publishers", []))[:3],
+        "Alternate title": song.get("alt_title", ""), "Language": song.get("language", ""),
     }}
 
 
@@ -118,8 +119,16 @@ def _rule(people, song, work):
     return {"writers": writers, "publisher": publisher}
 
 
-def step3(master, iprs, run_decisions, flags, people=None):
-    """people: dataclean.People with the reviewer's aliases and rules, for the same-song checks on each pair."""
+def to_decide(links):
+    """The IPRS works on the "To decide" tab: no LNV row chosen yet, or linked on weak evidence and not yet confirmed."""
+    return sum(1 for l in links if l["state"] == "review" or (
+        l["state"] == "linked" and l["method"] != "Confirmed by reviewer" and (l["method"] == "Title + contributors" or l["reason"])))
+
+
+def step3(master, iprs, run_decisions, flags, people=None, fill=None):
+    """people: dataclean.People with the reviewer's aliases and rules, for the same-song checks on each pair.
+    fill: the summary of the IPRS fill plan, which is what the step's own tabs count."""
+    fill = fill or {}
     songs_by_row = {s["row"]: s for s in master["songs"]}
     works = {w["internal_no"]: w for w in iprs["iprs"]["works"]}
     works_by_row = {r["master_row"]: r["iprs_works"] for r in iprs["final"]["rows"] if r["master_row"]}
@@ -159,8 +168,9 @@ def step3(master, iprs, run_decisions, flags, people=None):
         else:
             matched.append(line)
     return {"counts": {"works": len(works), "matched": len(matched), "review": len(review),
-                       "review_open": sum(1 for r in review if not r["decision"]), "amend": len(amend),
-                       "register": len(register), "iprs_only": sum(1 for o in only if not o["not_ours"])},
+                       "review_open": to_decide(iprs["mapping"]["links"]), "amend": len(amend),
+                       "register": len(register), "on_screen_amend": fill.get("amend", 0), "on_screen_register": fill.get("not_registered", 0),
+                       "waiting": fill.get("pending", 0), "iprs_only": sum(1 for o in only if not o["not_ours"])},
             "review": review, "amend": amend, "register": register, "iprs_only": only, "matched": matched}
 
 
