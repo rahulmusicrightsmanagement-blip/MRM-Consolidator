@@ -1866,6 +1866,8 @@ button.ms-title:hover { color: var(--text); }
 .rv-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r); }
 .rv-versions .cs-tag { margin-left: 6px; }
 .rv-versions .nowrap { white-space: nowrap; }
+.rv-versions .rv-goes { font-size: 12px; color: var(--muted); }
+.rv-versions .rv-goes.new { color: var(--good); font-weight: 600; }
 .rv-versions .small { font-size: 12px; }
 .rv-rule { display: flex; flex-wrap: wrap; gap: 6px; }
 .rv-rule span { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 99px; font-size: 12px; font-weight: 650; }
@@ -2355,6 +2357,13 @@ table.data tr.clickable:hover td { background: var(--surface-2); }
 .rvc-marks .good svg { color: var(--good); }
 .rvc-marks .bad { color: var(--bad); font-weight: 620; }
 .rvc-marks .warn { color: var(--warn); }
+
+/* versions the LNV already has, each beside its row */
+.rv-inlnv { padding: 6px 0 14px; }
+.rv-inlnv + .rv-inlnv { border-top: 1px solid var(--border); padding-top: 12px; }
+.rv-inlnv.off .rvc { opacity: .5; }
+.rv-inlnv-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; font-size: 13.5px; }
+.rv-inlnv-head .rvc-marks { margin-top: 0; }
 
 /* details that get filled */
 .rv-fills { display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }

@@ -1,5 +1,17 @@
 # MRM changelog
 
+## 0.39.0 – 2026-11-02 (minor)
+- New matching rule: one Muso recording against one LNV row; Exact = same credits (title, version, album, writers, publisher) and same ISRC, linked by the app; Possible = only one of the two, you decide; neither = not in the LNV
+
+## 0.38.0 – 2026-11-02 (minor)
+- Possible match needs something in common (same ISRC, or the same title plus a shared writer besides the client or the same publisher); versions already in the LNV are shown beside their LNV row to check, with Right / Not this version
+
+## 0.37.1 – 2026-11-02 (patch)
+- Exact match now counts the same company under another name (Saregama India / Saregama US) and a shared ISRC; Possible only holds songs with the same ISRC or the same title with credits a little different; the rest go to Not in the LNV
+
+## 0.37.0 – 2026-11-02 (minor)
+- Song versions (remix, lofi, sad …) become their own LNV rows with Original Work and Original Movie / Album columns; only the original maps to the matched LNV row; a version's ISRC no longer fills the original's row
+
 ## 0.36.1 – 2026-10-31 (patch)
 - LNV vs IPRS page made cleaner: repeated numbers and long text removed, extra details fold away, Accept strong asks first
 

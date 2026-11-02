@@ -177,6 +177,7 @@ function Final({ data, clientId, go }: { data: StepsPayload; clientId: number; g
             <li><b>{n(c1.in_lnv)}</b> {src} songs are in the LNV already</li>
             <li><b>{n(c1.filled_rows)}</b> LNV rows get details {src} has and the LNV left blank</li>
             <li><b>{n(c1.adding)}</b> new songs are added to the LNV</li>
+            {c1.versions_new > 0 && <li><b>{n(c1.versions_new)}</b> versions (remix, lofi …) get rows of their own, with their original song and film in two new columns</li>}
             <li><b>{n(c1.not_ours)}</b> songs are left out – not the client's writing</li>
             {c1.undecided > 0 && <li><b>{n(c1.undecided)}</b> new songs have no answer yet, so they are not added</li>}
           </ul> : <p className="muted">Needs the {src} export.</p>}

@@ -965,12 +965,12 @@ class DataCleanEngineTests(TestCase):
         self.assertIn("Ravi Kumar Verma", r["client_names"])
         matched = {m["song"]["title"]: sorted(l["row"] for l in m["links"]) for m in r["matched"]}
         self.assertEqual(matched, {"Pyaar Ka Geet": [2, 3]})
-        # The same song = the same writers and a shared publisher. Same ISRC and title, but "Malik Varma" on Muso and
-        # "MALIK VERMA" in the LNV: not linked – the closest row is shown, and the two spellings are asked once
-        dil = next(m for m in r["missing"] if m["title"] == "Dil Ki Baat")
-        self.assertEqual([(c["row"], c["writers"]) for c in dil["near"]], [(4, "differ"), (5, "differ")])
-        self.assertNotIn("decision", dil)   # a near LNV row: no "add" from the app
-        self.assertEqual(r["check"], [])
+        # Exact = the same credits (title, version, album, writers, publisher) and ISRC; possible = one of the two.
+        # Dil Ki Baat has the ISRC of rows 4 and 5 but "Malik Varma" on Muso and "MALIK VERMA" in the LNV: possible,
+        # not linked – a person decides, and the two spellings are asked once
+        self.assertEqual([(c["song"]["title"], [(x["row"], x["rec"]["level"]) for x in c["candidates"]]) for c in r["check"]],
+                         [("Dil Ki Baat", [(4, "possible"), (5, "possible")])])
+        self.assertEqual([m["title"] for m in r["missing"]], ["Brand New Hit"])
         dups = {c["kind"]: c for c in r["duplicates"]}
         self.assertEqual(sorted(x["row"] for x in dups["duplicate"]["rows"]), [2, 3])
         self.assertEqual(dups["duplicate"]["decision"]["choice"], "duplicate")   # answered by the app: same song, same film
@@ -1032,6 +1032,47 @@ class DataCleanEngineTests(TestCase):
         r = self._match({"link:INXY12300011": {"choice": "same", "data": {"rows": [3]}}})
         self.assertEqual([(l["row"], l.get("confirmed")) for m in r["matched"] if m["key"] == "link:INXY12300011" for l in m["links"]], [(3, True)])
 
+    def test_versions_get_rows_of_their_own(self):
+        from openpyxl import load_workbook
+        from .engine import dataclean, export
+        r = self._match()
+        song = next(m for m in r["matched"] if m["song"]["title"] == "Pyaar Ka Geet")["song"]
+        # The original is the song's LNV row; the lofi is a version of it, with its own recording
+        self.assertEqual(song["original"]["isrcs"], ["INXY12300011"])
+        self.assertEqual([(p["type"], p["isrcs"], p["lnv_row"]) for p in song["parts"]], [("Lofi", ["INXY12300010"], None)])
+        self.assertNotIn("INXY12300010", [f["value"] for f in r["fills"]])   # a version's ISRC never fills the original's row
+        plan = dataclean.lnv_versions(r, self.master["songs"])
+        self.assertEqual([(v["title"], v["original"]["title"], v["original"]["album"], v["original"]["row"]) for v in plan["rows"]],
+                         [("Pyaar Ka Geet - Lofi Flip", "Pyaar Ka Geet", "Film A", 2)])
+        out = f"{self.tmp}/final.xlsx"
+        with open(out, "wb") as f:
+            f.write(export.final_report(f"{self.tmp}/lnv.xlsx", dsp={"fills": [], "adds": [], "repeats": [], "source": "Muso", "versions": plan}))
+        rows = [list(x) for x in load_workbook(out).active.iter_rows(values_only=True)]
+        head = rows[0]
+        added = next(x for x in rows if x[1] == "Pyaar Ka Geet - Lofi Flip")
+        self.assertEqual((added[head.index("ISRC")], added[head.index("Original Work")], added[head.index("Original Movie / Album")]),
+                         ("INXY12300010", "Pyaar Ka Geet", "Film A"))
+        # An LNV row that already is the version is linked to it, named, and never added again
+        lnv = f"{self.tmp}/lnv_lofi.xlsx"
+        _lnv_file(lnv, LNV_ROWS + [("Pyaar Ka Geet Lofi", None, "Lofi Hits", "Ravi Kumar Verma", "Anand Bakshi")])
+        from .engine.master import parse_master
+        master = parse_master(lnv)
+        from .engine.songmerge import analyse, songs
+        merge = analyse(self.dsp["rows"])
+        groups = songs(merge, {f"merge:{k}": {"choice": "accepted"} for k in merge["items"]})
+        r = dataclean.apply_decisions(dataclean.match(master, self.dsp, CLIENT, groups=groups), {})
+        song = next(m for m in r["matched"] if m["song"]["title"] == "Pyaar Ka Geet")
+        self.assertEqual(sorted(l["row"] for l in song["links"]), [2, 3])
+        plan = dataclean.lnv_versions(r, master["songs"])
+        self.assertEqual((plan["rows"], [(v["row"], v["original"]["row"]) for v in plan["named"]]), ([], [(7, 2)]))
+        self.assertNotIn(7, [c["row"] for c in song["song"]["near"]])   # never offered as the song itself
+        # The reviewer says row 7 is not this version: it is added as a new row, and row 7 is left as it is
+        decisions = {"version:INXY12300010": {"choice": "none", "data": {"rows": [7]}}}
+        aliases, links = dataclean.learned(decisions)
+        r = dataclean.apply_decisions(dataclean.match(master, self.dsp, CLIENT, aliases, links, groups), decisions)
+        plan = dataclean.lnv_versions(r, master["songs"])
+        self.assertEqual(([v["title"] for v in plan["rows"]], plan["named"]), (["Pyaar Ka Geet - Lofi Flip"], []))
+
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
 class DataCleanApiTests(TestCase):
@@ -1076,12 +1117,12 @@ class DataCleanApiTests(TestCase):
         self.assertEqual(res.status_code, 200)
         r = res.json()["result"]
         self.assertEqual(next(c for c in r["duplicates"] if c["key"] == dup["key"])["decision"]["choice"], "duplicate")
-        # Dil Ki Baat waits for a person: its closest LNV row has the writer spelled differently
-        self.assertEqual(r["open"]["missing"], 1, [(m["key"], m.get("decision")) for m in r["missing"]])
+        # Dil Ki Baat waits for a person: a possible match – same ISRC, the writer spelled differently
+        self.assertEqual((r["open"]["missing"], r["open"]["check"]), (0, 1), [(m["key"], m.get("decision")) for m in r["missing"]])
         bad = self.client.post(f"{url}decisions/", {"items": [{"key": "missing:X", "choice": "duplicate"}]}, content_type="application/json")
         self.assertEqual(bad.status_code, 400)
         # Client page shows the open counts
-        self.assertEqual(self.client.get(f"/api/clients/{cid}/").json()["clean"]["summary"]["open"]["missing"], 1)
+        self.assertEqual(self.client.get(f"/api/clients/{cid}/").json()["clean"]["summary"]["open"]["check"], 1)
 
         res = self.client.get(f"{url}export/")
         self.assertEqual(res.status_code, 200)
@@ -1184,17 +1225,18 @@ class StepsApiTests(TestCase):
         c = one["counts"]["1"]
         self.assertEqual((c["rows"], c["recordings"], c["songs"], c["in_lnv"], c["adding"]), (4, 4, 3, 1, 1))
         got = cases()
-        self.assertEqual(sorted(got), ["missing:Brand New Hit", "missing:Dil Ki Baat", "names:Malik Varma  ·  MALIK VERMA",
+        self.assertEqual(sorted(got), ["check:Dil Ki Baat", "missing:Brand New Hit", "names:Malik Varma  ·  MALIK VERMA",
                                        "twice:Dil Ki Baat", "twice:Pyaar Ka Geet", "versions:Pyaar Ka Geet"])
-        # Dil Ki Baat: the closest LNV row fails the rule (other writer spelling) – shown, not linked, no app answer
-        dil = got["missing:Dil Ki Baat"]
-        self.assertEqual(([r["row"] for r in dil["lnv"]], dil["lnv"][0]["check"]["writers"], dil["answer"]["choice"]), ([4, 5], "differ", None))
+        # Dil Ki Baat: a possible match (same ISRC, the writer spelled differently) – shown, not linked, no app answer
+        dil = got["check:Dil Ki Baat"]
+        self.assertEqual(([r["row"] for r in dil["lnv"]], dil["lnv"][0]["check"]["level"], dil["answer"]["choice"]), ([4, 5], "possible", None))
+        self.assertIn("Different writers", [w["text"] for w in dil["lnv"][0]["why"]])
         # "Same person", answered once for every client: Dil Ki Baat is LNV row 4 now
         name = got["names:Malik Varma  ·  MALIK VERMA"]
         decide({"key": name["answer"]["key"], "choice": "same", "data": name["names"]})
         got = cases()
         self.assertTrue(got["names:Malik Varma  ·  MALIK VERMA"]["done"])
-        self.assertNotIn("missing:Dil Ki Baat", got)
+        self.assertEqual((got["check:Dil Ki Baat"]["auto"], got["check:Dil Ki Baat"]["answer"]["rows"]), (True, [4]))   # exact now
         self.assertEqual(self.client.get(f"{url}?step=1").json()["counts"]["1"]["in_lnv"], 2)
         v = got["versions:Pyaar Ka Geet"]
         self.assertEqual([(r["fields"]["Title"], r["version"], r["in"]) for r in v["muso"]],

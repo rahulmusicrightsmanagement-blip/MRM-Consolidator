@@ -583,7 +583,7 @@ def client_master(request, client_id):
 ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:")
 CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}, "name": {"same", "different"},
                  "junk": {"fix", "ok"}, "missing": {"add", "not_ours"}, "fill": {"accept", "reject"}, "link": {"same", "none"},
-                 "merge": {"accepted", "rejected", "pending"}, "type": {"set"},
+                 "merge": {"accepted", "rejected", "pending"}, "type": {"set"}, "version": {"same", "none"},
                  "writer": {"ignore", "keep"}, "pub": {"same", "different"}}
 # Answers about people and companies, not about one client's songs: kept once, for every client
 GLOBAL_DECISIONS = ("name:", "writer:", "pub:")
@@ -837,6 +837,9 @@ def lnv_update_export(request, client_id):
     run = _iprs_run(client)
     result = compute(run) if run else None
     try:
+        if dsp_part:   # each version of a song the LNV lacks gets a row of its own
+            parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
+            dsp_part["versions"] = dataclean.lnv_versions(clean, parsed["songs"])
         if result and result.get("final"):
             content = export.final_report(master.file.path, result["iprs"], result["final"], _master_edits(client),
                                           fill_plan(run, result), dsp_part)

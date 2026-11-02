@@ -22,7 +22,7 @@ its parts.
 import re
 from collections import OrderedDict
 
-from . import songmerge
+from . import dataclean, songmerge
 from .steps import _names, _user, lnv_record
 
 KIND_HELP = {
@@ -32,8 +32,6 @@ KIND_HELP = {
     "different": "The copies credit completely different people – a data error or a different work.",
 }
 ORDER = {"names": 0, "versions": 1, "isrc": 2, "check": 3, "missing": 4, "twice": 5, "left_out": 6}
-WRITERS = {"same": "Same writers", "differ": "Different writers", "blank": "Writers missing"}
-PUBLISHER = {"same": "Same publisher", "differ": "Different publisher", "unchecked": "Publisher not checked"}
 
 
 def _recording(rows, recs, ids, rid, rtype, source):
@@ -51,11 +49,29 @@ def _recording(rows, recs, ids, rid, rtype, source):
                 "Year": dates[0][:10] if dates else ""}}
 
 
+REC_MARKS = {"isrc": ("Same ISRC", "Other ISRC"), "title": ("Same title", "Other title or version"),
+             "album": ("Same album", "Other album"), "writers": ("Same writers", "Different writers"),
+             "publisher": ("Same publisher", "Other publisher")}
+
+
 def _candidate(rec, c):
-    """An LNV record as a candidate: its score, evidence, and the same-song rule's verdict."""
-    return {**rec(c["row"]), "score": c.get("score"),
-            "why": [{"text": e, "good": True} for e in c.get("evidence", [])] + [{"text": f, "good": False} for f in c.get("flags", []) + c.get("notes", [])],
-            "check": {"writers": c.get("writers"), "publisher": c.get("publisher")} if c.get("writers") else None}
+    """An LNV record as a candidate: the user's rule on it, against the DSP recording that fits it best (via)."""
+    r = c.get("rec") or {}
+    why = []
+    for k, (good, bad) in REC_MARKS.items():
+        v = r.get(k)
+        if k == "isrc" and not v and not rec(c["row"])["fields"]["ISRC"]:
+            why.append({"text": "No ISRC in the LNV", "good": True})
+        elif v in (True, "same"):
+            why.append({"text": good, "good": True})
+        elif v in ("blank", "unchecked"):
+            why.append({"text": f"{good.split(' ', 1)[1].capitalize()} missing", "good": False})
+        elif v is not None:
+            why.append({"text": bad, "good": False})
+    return {**rec(c["row"]), "score": c.get("score"), "why": why,
+            "check": {"writers": c.get("writers"), "publisher": c.get("publisher"), "isrc": bool(c.get("isrc")),
+                      "title": c.get("title") or 0, "odd": c.get("odd", [0, 0]), "shared": c.get("shared", 0),
+                      "level": r.get("level"), "via": r.get("via")} if c.get("writers") else None}
 
 
 def _lnv_part(kind, item, rec):
@@ -105,15 +121,37 @@ def _name_case(key, a, b, songs, links, d, source):
             "answer": {"key": key, "choice": (d or {}).get("choice"), "by": "you" if d else None}, "done": bool(d)}
 
 
+def _in_lnv(song, rec, recording, rid_of):
+    """The song's versions the LNV already has, each beside its LNV row, for the reviewer to check. answer: same
+    (the reviewer said right) · none (they said it is not this version – it is then added as a new row) · None (the
+    app's match, from a shared ISRC or the same title and version tag)."""
+    album = lambda r: dataclean.album_key(r["fields"].get("Film / album") or "")
+    year = lambda r: str(r["fields"].get("Year") or "")[:4]
+    out = []
+    for p in song.get("parts", []):
+        row = p["lnv_row"] or (p["refused"][-1] if p.get("refused") else None)
+        if not row:
+            continue
+        lnv = rec(row)
+        muso = recording(rid_of[p["rows"][0]])
+        out.append({"key": p["key"], "type": p["type"], "row": row, "muso": muso, "lnv": lnv,
+                    "isrc": bool(set(p["isrcs"]) & set(lnv["fields"]["ISRC"])),
+                    "album": bool(album(muso)) and album(muso) == album(lnv), "year": bool(year(muso)) and year(muso) == year(lnv),
+                    "answer": "none" if not p["lnv_row"] else "same" if p.get("confirmed") else None})
+    return out
+
+
 FILL_FIELDS = {"Movie / album": "Film / album", "Release year": "Year", "Lyricists": "Lyricist", "Composers": "Composer",
                "Singers": "Singer"}
 
 
 def _new_row(song):
-    """The LNV row an added song becomes (from its main DSP version)."""
-    return {"Title": song["title"], "Film / album": song.get("album", ""), "Lyricist": song.get("lyricists", [])[:6],
-            "Composer": song.get("composers", [])[:6], "Singer": song.get("singers", [])[:6], "ISRC": song.get("isrcs", [])[:1],
-            "Year": song.get("year", ""), "Length": song.get("duration", ""), "Label": song.get("label", "")}
+    """The LNV row an added song becomes: its original (each version gets a row of its own), or with no original on
+    the DSP, its main version."""
+    o = song.get("original") or (song.get("parts") or [song])[0]
+    return {"Title": o["title"], "Film / album": o.get("album", ""), "Lyricist": song.get("lyricists", [])[:6],
+            "Composer": song.get("composers", [])[:6], "Singer": o.get("singers", [])[:6], "ISRC": o.get("isrcs", [])[:1],
+            "Year": o.get("year", ""), "Length": o.get("duration", ""), "Label": o.get("label", "")}
 
 
 def _updates(fills_by_row, rows):
@@ -150,7 +188,14 @@ def build(dsp, analysis, decisions, clean, master):
     types = {}
     for song in songmerge._final(analysis, decisions):
         types.update(songmerge._types(rows, recs, song))
-    recording = lambda rid, rtype=None: _recording(rows, recs, ids, rid, rtype or types[rid], source)
+    # Where each DSP row goes in the LNV: the song's own row (the original), or a version's row – one the LNV has
+    # (lnv_row), else a new one naming the original
+    goes = {}
+    for kind, item, _ in entries:
+        s = song_of(kind, item)
+        goes.update({i: {"part": "original"} for i in (s.get("original") or {}).get("rows", [])})
+        goes.update({i: {"part": "version", "lnv_row": p["lnv_row"]} for p in s.get("parts", []) for i in p["rows"]})
+    recording = lambda rid, rtype=None: {**_recording(rows, recs, ids, rid, rtype or types[rid], source), **goes.get(recs[rid][0], {})}
 
     cases, covered = [], set()
     for item_id, it in analysis["items"].items():
@@ -176,6 +221,7 @@ def build(dsp, analysis, decisions, clean, master):
             "merge": {"key": f"merge:{item_id}", "status": status, "by": "you" if status != "pending" else "app"},
             "muso": muso, "lnv": lnv, "answer": answer, "new_row": _new_row(song_of(kind, item)),
             "updates": _updates(fills_by_row, answer["rows"]),
+            "in_lnv": _in_lnv(song_of(kind, item), rec, recording, rid_of),
             "done": status != "pending" and answer["by"] == "you",
         })
 
@@ -193,16 +239,13 @@ def build(dsp, analysis, decisions, clean, master):
         case_kind = "check" if kind in ("check", "matched") else "left_out" if left_out else "missing"
         cases.append({
             "id": item["key"], "kind": case_kind, "title": song_of(kind, item)["title"],
-            "why": {"check": "Same writers and a shared publisher – the app linked it" if auto
-                    else f"Same writers – {source} has no publisher, so it could not be checked" if item.get("unchecked")
-                    else "The app is not sure which LNV row this is",
-                    "missing": (f"Closest LNV row {lnv[0]['row']} is not the same song – "
-                                + ", ".join(t for t in (WRITERS[lnv[0]['check']['writers']] if lnv[0]['check']['writers'] != 'same' else '',
-                                                        PUBLISHER[lnv[0]['check']['publisher']] if lnv[0]['check']['publisher'] == 'differ' else '') if t).lower()
-                                if lnv and lnv[0].get("check") else f"No LNV row has this {source} song"),
+            "why": {"check": "Exact match – the app linked it" if auto
+                    else "Possible match – the same ISRC or the same credits, not both: check and decide",
+                    "missing": f"No LNV row has this {source} song's ISRC or credits" + (" – the closest are other songs" if lnv else ""),
                     "left_out": answer.get("why", "")}[case_kind],
             "merge": None, "muso": muso, "lnv": lnv, "answer": answer, "new_row": _new_row(song_of(kind, item)),
             "updates": _updates(fills_by_row, answer["rows"]), "popularity": song_of(kind, item).get("popularity") or 0,
+            "in_lnv": _in_lnv(song_of(kind, item), rec, recording, rid_of),
             "done": answer["by"] == "you" or left_out or auto, "auto": auto,
         })
 
@@ -237,11 +280,13 @@ def build(dsp, analysis, decisions, clean, master):
     cases.sort(key=lambda c: (c["done"], ORDER[c["kind"]], -len(c["muso"]), -c.get("popularity", 0), c["title"].lower()))
     asked_cases = [c for c in cases if not c.get("auto")]
     linked = {r for c in clean["matched"] for r in [l["row"] for l in c["links"]]} \
-        | {r for c in clean["check"] for r in ((_user(c) or {}).get("data") or {}).get("rows", [])}
+        | {r for c in clean["check"] for r in ((_user(c) or {}).get("data") or {}).get("rows", [])} \
+        | {p["lnv_row"] for c in clean["matched"] for p in c["song"].get("parts", []) if p["lnv_row"]}
     lnv_only = [{"row": s["row"], "title": s["title"], "film": s.get("movie", ""), "year": s.get("release_year", ""),
                  "writers": _names(s.get("authors", []) + s.get("composers", []))[:4]}
                 for s in master["songs"] if s["row"] not in linked]
     choice = lambda m: (m.get("decision") or {}).get("choice") or ("not_ours" if m["credit"] in ("performer", "medley") else None)
+    versions = dataclean.lnv_versions(clean, master["songs"])
     return {
         "source": source,
         "counts": {"rows": len(rows), "recordings": len(recs), "songs": len(final_songs),
@@ -251,6 +296,7 @@ def build(dsp, analysis, decisions, clean, master):
                    "undecided": sum(1 for m in clean["missing"] if not choice(m)),
                    "fills": sum(1 for f in clean["fills"] if (f.get("decision") or {}).get("choice") == "accept"),
                    "filled_rows": len({f["row"] for f in clean["fills"] if (f.get("decision") or {}).get("choice") == "accept"}),
+                   "versions_new": len(versions["rows"]), "versions_named": len(versions["named"]),
                    "lnv": len(master["songs"]), "lnv_only": len(lnv_only),
                    "cases": len(asked_cases), "open": sum(1 for c in asked_cases if not c["done"]),
                    # open cases the app has no answer for: the real doubts

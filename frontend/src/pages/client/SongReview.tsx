@@ -71,17 +71,17 @@ function itemsOf(c: ReviewCase, d: Draft | null): CleanDecisionIn[] {
 
 const ready = (c: ReviewCase, d: Draft) => d.choice !== null && (c.kind === 'names' || d.choice !== 'same' || d.rows.length > 0)
 
-/** How a song stands against the LNV. Exact: an LNV row with the same title and writers and a publisher name that
- *  really appears on both sides. Possible: it has LNV rows, but not such a row. New: no LNV row at all. */
+/** How a song stands against the LNV, one recording against one LNV row. Exact: the same credits – title, version,
+ *  album, writers, publisher – and the same ISRC (or the LNV has none yet). Possible: the same ISRC or the same
+ *  credits, not both. New: neither; the closest LNV rows are other songs. */
 type Match = 'exact' | 'possible' | 'new' | 'other'
 const MATCHES = [['exact', 'Exact'], ['possible', 'Possible'], ['new', 'Not in the LNV']] as const
 function matchOf(c: ReviewCase): Match {
   if (c.kind === 'names' || c.kind === 'twice') return 'other'
-  if (!c.lnv.length) return 'new'
-  const pubs = c.muso.flatMap((r) => list(r.fields.Publisher))
-  const titles = list(c.muso[0]?.fields.Title)
-  return c.lnv.some((r) => r.check?.writers === 'same' && r.check.publisher === 'same' && cellOf('Title', titles, list(r.fields.Title)) === 'same'
-    && list(r.fields.Publisher).some((x) => inList('Publisher', pubs, x))) ? 'exact' : 'possible'
+  const levels = c.lnv.map((r) => r.check?.level)
+  if (levels.includes('exact')) return 'exact'
+  // a song that is only a version the LNV already has (same ISRC) is in the LNV too
+  return levels.includes('possible') || c.in_lnv?.some((v) => v.isrc && v.answer !== 'none') ? 'possible' : 'new'
 }
 
 /** What a case does to the LNV, in two words – for the list. */
@@ -230,7 +230,7 @@ export default function SongReview({ d, save }: {
         </div>
         {kind === 'lnv_only' ? <LnvOnly d={d} />
           : sel ? <CaseView key={`${sel.id}-${sel.done}-${JSON.stringify(sel.answer)}-${sel.merge?.status}`} c={sel} source={d.source} done={isDone(sel)}
-            pos={at + 1} total={shown.length} prev={() => go(-1)} next={() => go(1)} possible={matches.get(sel.id) === 'possible'} answer={(draft) => answer(sel, draft)} last={last} undoLast={undoLast}
+            pos={at + 1} total={shown.length} prev={() => go(-1)} next={() => go(1)} possible={matches.get(sel.id) === 'possible'} answer={(draft) => answer(sel, draft)} last={last} undoLast={undoLast} save={save}
             wideBtn={<WideBtn wide={wide} toggle={() => setWide(!wide)} />} />
             : <div className="sm-detail sm-detail-none muted">Nothing to show.</div>}
       </div>
@@ -421,9 +421,10 @@ export const WideBtn = ({ wide, toggle }: { wide: boolean; toggle: () => void })
   </button>
 )
 
-function CaseView({ c, source, done, pos, total, prev, next, possible, answer, last, undoLast, wideBtn }: {
+function CaseView({ c, source, done, pos, total, prev, next, possible, answer, last, undoLast, wideBtn, save }: {
   c: ReviewCase; source: string; done: boolean; pos: number; total: number; prev: () => void; next: () => void
   possible: boolean; answer: (d: Draft | null) => void; last: { c: ReviewCase; text: string } | null; undoLast: () => void; wideBtn: ReactNode
+  save: (items: CleanDecisionIn[]) => Promise<boolean>
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(c))
   const [opened, setOpened] = useState<number | null>(null)   // the version whose details are open
@@ -434,7 +435,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   const names = c.names
   const main = c.muso[0]
   // LNV rows the same-song rule turned down: not the same song, so they stay folded away and are linked only by the reviewer
-  const near = c.lnv.length > 0 && c.lnv.every((r) => r.check && (r.check.writers !== 'same' || r.check.publisher === 'differ'))
+  const near = c.lnv.length > 0 && c.lnv.every((r) => r.check && !r.check.level)
   const single = !twice && !near && c.lnv.length === 1
   // a song with one LNV row needs no tick: its button says which row
   const sameRows = draft.rows.length ? draft.rows : single ? [c.lnv[0].row!] : []
@@ -460,8 +461,15 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   const kept = updates.filter((u) => !draft.reject.includes(u.key)).length
   const versions = allVersions ? c.muso : c.muso.slice(0, 8)
   const inCount = merging ? draft.in.length : c.muso.length
+  // where each version lands in the LNV: the original on the song's row, every other version on a row of its own
+  const isIn = (r: CaseRecord) => !merging || draft.in.includes(r.id!)
+  const placing = draft.choice === 'same' || draft.choice === 'add'
+  const goes = (r: CaseRecord) => !placing || !isIn(r) || !r.part ? ''
+    : r.part === 'version' ? (r.lnv_row ? `Row ${r.lnv_row} already` : 'New row')
+      : draft.choice === 'add' ? 'New row' : `Row ${sameRows.join(' + ')}`
+  const newVersions = placing ? c.muso.filter((r) => isIn(r) && r.part === 'version' && !r.lnv_row).length : 0
+  const versionsLine = newVersions ? ` ${newVersions} version${newVersions > 1 ? 's get rows' : ' gets a row'} of ${newVersions > 1 ? 'their' : 'its'} own, naming the original.` : ''
 
-  const fails = near ? [c.lnv.some((r) => r.check?.writers !== 'same') && 'writers', c.lnv.some((r) => r.check?.publisher === 'differ') && 'publisher'].filter(Boolean).join(' and ') : ''
   const outcome = names
     ? draft.choice === 'same' ? `From now on “${names.a}” and “${names.b}” are one person – for every client.`
       : draft.choice === 'different' ? 'They stay two people; the app stops asking.' : 'Are these two spellings one person?'
@@ -469,10 +477,10 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
     ? draft.choice === 'different' ? 'Nothing changes – they are two songs.'
       : draft.rows.length ? (c.isrc ? `The ISRC stays on LNV row ${draft.rows[0]} only.` : `LNV row ${draft.rows[0]} is kept; the other row is marked as a repeat, never deleted.`)
         : c.isrc ? 'Tick the LNV row the ISRC belongs to.' : 'Tick the LNV row to keep, or say they are different songs.'
-    : draft.choice === 'same' ? `LNV row ${draft.rows.join(' + ')} ${kept ? `gets ${kept} blank detail${kept > 1 ? 's' : ''} filled from ${source}` : 'stays as it is'}.`
-      : draft.choice === 'add' ? 'A new row is added to the LNV.'
+    : draft.choice === 'same' ? `LNV row ${draft.rows.join(' + ')} ${kept ? `gets ${kept} blank detail${kept > 1 ? 's' : ''} filled from ${source}` : 'stays as it is'}.${versionsLine}`
+      : draft.choice === 'add' ? `A new row is added to the LNV.${versionsLine}`
         : draft.choice === 'not_ours' ? "Nothing goes into the LNV – not the client's song."
-          : near ? `No LNV row has the same writers and publisher. Tick one only if ${source}'s credits are wrong.`
+          : near ? `No LNV row has the same ISRC or the same credits. Tick one only if ${source}'s data is wrong.`
             : c.lnv.length > 1 ? 'Tick the LNV row this song is, or add it as a new song.'
               : c.lnv.length ? `Is this ${source} song LNV row ${c.lnv[0].row}?` : 'Add it to the LNV, or skip it.'
 
@@ -481,7 +489,10 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
     pick: single ? undefined : { on: draft.rows.includes(r.row!), radio: twice, change: () => pick(r.row!),
       label: twice ? (c.isrc ? 'Has the ISRC' : 'Keep this row') : near ? 'Link anyway' : 'This is the song' },
   }))
-  const musoCol: Col[] = twice || !main ? [] : [{ r: main, badge: c.muso.length > 1 ? `${source} – main version` : source, tone: 'muso', open: () => setOpened(0) }]
+  // the Muso side is the recording the LNV row was compared with (its ISRC, album, credits), not every version pooled
+  const via = c.lnv.find((r) => draft.rows.includes(r.row!))?.check?.via ?? c.lnv[0]?.check?.via
+  const shownAt = Math.max(0, c.muso.findIndex((r) => via != null && r.sheet_rows?.includes(via)))
+  const musoCol: Col[] = twice || !main ? [] : [{ r: c.muso[shownAt], badge: c.muso.length > 1 ? `${source} – ${shownAt ? c.muso[shownAt].version ?? 'version' : 'main version'}` : source, tone: 'muso', open: () => setOpened(shownAt) }]
   // a turned-down row joins the comparison only once the reviewer ticks it
   const cols: Col[] = [...musoCol, ...(near ? lnvCols.filter((x) => x.pick?.on) : lnvCols)]
   const closest = near ? lnvCols.filter((x) => !x.pick?.on) : []
@@ -512,7 +523,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
 
         {closest.length > 0 && !possible && (
           <Part id="closest" initial={false} title={`Closest LNV row${closest.length > 1 ? 's' : ''} – not the same song`}
-            note={`different ${fails}; open only if you think ${source}'s credits are wrong`}>
+            note={`no same ISRC or credits; open only if you think ${source}'s data is wrong`}>
             <Compare cols={[...musoCol, ...closest]} />
           </Part>
         )}
@@ -535,12 +546,36 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
           </Part>
         )}
 
+        {!!c.in_lnv?.length && (
+          <Part id="in-lnv" title={`${c.in_lnv.length} version${c.in_lnv.length > 1 ? 's' : ''} already in the LNV`} note="Check each: is it the same recording?">
+            {c.in_lnv.map((v) => (
+              <div key={v.key} className={`rv-inlnv ${v.answer === 'none' ? 'off' : ''}`}>
+                <div className="rv-inlnv-head">
+                  <b>{v.type}</b>
+                  <span className="rvc-marks">{([['isrc', 'ISRC'], ['album', 'album'], ['year', 'year']] as const).map(([k, label]) => (
+                    <span key={k} className={v[k] ? 'good' : 'bad'}>{v[k] ? <Check size={12} /> : <X size={12} />}{v[k] ? 'Same' : 'Other'} {label}</span>))}</span>
+                  <span className="grow" />
+                  {v.answer === 'none' ? <>
+                    <span className="muted">Not this version – it gets a new row</span>
+                    <button type="button" className="rv-text-btn" onClick={() => save([{ key: v.key, choice: null }])}><Undo2 size={14} />Undo</button>
+                  </> : <>
+                    {v.answer === 'same' ? <span className="rv-done-name"><Check size={13} />Right</span>
+                      : <button type="button" className="rv-text-btn" onClick={() => save([{ key: v.key, choice: 'same', data: { rows: [v.row] } }])}><Check size={14} />Right</button>}
+                    <button type="button" className="rv-text-btn" onClick={() => save([{ key: v.key, choice: 'none', data: { rows: [v.row] } }])}><X size={14} />Not this version</button>
+                  </>}
+                </div>
+                <Compare cols={[{ r: v.muso, badge: `${source} – ${v.type}`, tone: 'muso' }, { r: v.lnv, badge: `LNV row ${v.row}`, tone: 'lnv', open: () => setOpenedRow(v.row) }]} />
+              </div>
+            ))}
+          </Part>
+        )}
+
         {c.muso.length > 1 && (
           <Part id={`versions-${c.kind === 'versions' || c.kind === 'isrc' ? 'open' : 'shut'}`} initial={c.kind === 'versions' || c.kind === 'isrc'}
             title={`${c.muso.length} ${source} versions`} note={merging && inCount < c.muso.length ? `${inCount} counted as this song` : 'Click one to see everything about it'}>
             <div className="rv-table-wrap">
               <table className="rv-versions rv-clean">
-                <thead><tr>{merging && <th title="Same song" />}<th>Title</th><th>Album</th><th>Singer</th>{c.kind === 'isrc' && <th>ISRC</th>}<th>Year</th></tr></thead>
+                <thead><tr>{merging && <th title="Same song" />}<th>Title</th><th>Album</th><th>Singer</th>{c.kind === 'isrc' && <th>ISRC</th>}<th>Year</th>{placing && <th>In the LNV</th>}</tr></thead>
                 <tbody>{versions.map((r, i) => {
                   const on = !merging || draft.in.includes(r.id!)
                   const diff = creditsDiff(r, main)
@@ -555,6 +590,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
                       <td>{singers.slice(0, 2).join(', ')}{singers.length > 2 && <span className="muted"> +{singers.length - 2}</span>}</td>
                       {c.kind === 'isrc' && <td className="mono small">{list(r.fields.ISRC).join(', ')}</td>}
                       <td className="muted nowrap">{value(r.fields.Year).slice(0, 4)}</td>
+                      {placing && <td className={`nowrap rv-goes ${r.part === 'version' && !r.lnv_row ? 'new' : ''}`}>{goes(r)}</td>}
                     </tr>
                   )
                 })}</tbody>

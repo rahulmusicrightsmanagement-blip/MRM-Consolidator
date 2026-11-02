@@ -510,8 +510,19 @@ export interface SongRecord {
 export type CaseKind = 'names' | 'versions' | 'isrc' | 'check' | 'missing' | 'left_out' | 'twice'
 export interface CaseRecord extends SongRecord {
   id?: number; sheet_rows?: number[]; in?: boolean
+  /** Where this DSP recording goes in the LNV: the song's own row (original), or a version's row – lnv_row when the LNV has it */
+  part?: 'original' | 'version'; lnv_row?: number | null
   /** The same-song rule on this LNV row: writers same · differ · blank; publisher same · differ · unchecked */
-  check?: { writers: 'same' | 'differ' | 'blank'; publisher: 'same' | 'differ' | 'unchecked' } | null
+  check?: {
+    writers: 'same' | 'differ' | 'blank'; publisher: 'same' | 'differ' | 'unchecked'
+    /** a shared ISRC · title likeness 0-100 · writers on the DSP side only, on the LNV side only */
+    isrc?: boolean; title?: number; odd?: [number, number]
+    /** writers on both sides besides the client */
+    shared?: number
+    /** the user's rule against the DSP recording that fits best (its first sheet row: via): exact – the same
+     *  credits (title, version, album, writers, publisher) and ISRC · possible – one of the two · null – neither */
+    level?: 'exact' | 'possible' | null; via?: number
+  } | null
 }
 export interface CaseAnswer {
   /** Song cases: the DSP song's key; choice same (rows) · add · not_ours */
@@ -530,6 +541,9 @@ export interface ReviewCase {
   new_row: Record<string, string | string[]> | null
   /** Blank fields of the chosen LNV rows the DSP song fills in */
   updates: { key: string; row: number; field: string; value: string; more: number; accept: boolean; by: 'app' | 'you' }[]
+  /** The song's versions the LNV already has, each beside its LNV row; answer: same (right) · none (not this
+   *  version – added as a new row) · null (the app's match) */
+  in_lnv?: { key: string; type: string; row: number; muso: CaseRecord; lnv: CaseRecord; isrc: boolean; album: boolean; year: boolean; answer: 'same' | 'none' | null }[]
   /** "Same person?" cases: the two spellings and songs they keep apart */
   names?: { a: string; b: string; songs: string[] }
 }
@@ -538,6 +552,8 @@ export interface Step1 {
   counts: {
     rows: number; recordings: number; songs: number; in_lnv: number; adding: number; not_ours: number; undecided: number
     lnv: number; lnv_only: number; cases: number; open: number; needs: number; kinds: Record<CaseKind, number>; fills: number; filled_rows: number
+    /** versions getting a row of their own · LNV version rows getting their original named */
+    versions_new: number; versions_named: number
   }
   cases: ReviewCase[]
   lnv_only: { row: number; title: string; film: string; year: string; writers: string[] }[]
