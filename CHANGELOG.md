@@ -1,5 +1,125 @@
 # MRM changelog
 
+## 0.40.1 – 2026-11-03 (patch)
+- Saved is now its own tab above the list: every saved answer (yours and the app's), what it puts into the LNV, filters, search, Open and Undo
+
+## 0.40.0 – 2026-11-03 (minor)
+- Muso & LNV: two-stage matching (1 recording: title, album, ISRC, year · 2 work: title, album, writers, publisher – both = exact, one = possible); the matched recording is the original and every other recording gets its own LNV row naming it; choose the LNV or Muso value where they differ; new Saved tab listing every saved answer and what it puts into the LNV; saving no longer flips back
+
+## 0.39.2 – 2026-11-03 (patch)
+- One case per song with all its recordings (a song was split into several cases); a lofi or remix row the LNV has is never asked as the song itself, only checked under versions already in the LNV
+
+## 0.39.1 – 2026-11-03 (patch)
+- Fixed songs showing in the wrong tab and twice (two Muso songs with one ISRC shared an id), and versions already in the LNV showing under songs they don't belong to; the version check now shows the recording that has the LNV row's ISRC
+
+## 0.39.0 – 2026-11-02 (minor)
+- New matching rule: one Muso recording against one LNV row; Exact = same credits (title, version, album, writers, publisher) and same ISRC, linked by the app; Possible = only one of the two, you decide; neither = not in the LNV
+
+## 0.38.0 – 2026-11-02 (minor)
+- Possible match needs something in common (same ISRC, or the same title plus a shared writer besides the client or the same publisher); versions already in the LNV are shown beside their LNV row to check, with Right / Not this version
+
+## 0.37.1 – 2026-11-02 (patch)
+- Exact match now counts the same company under another name (Saregama India / Saregama US) and a shared ISRC; Possible only holds songs with the same ISRC or the same title with credits a little different; the rest go to Not in the LNV
+
+## 0.37.0 – 2026-11-02 (minor)
+- Song versions (remix, lofi, sad …) become their own LNV rows with Original Work and Original Movie / Album columns; only the original maps to the matched LNV row; a version's ISRC no longer fills the original's row
+
+## 0.36.1 – 2026-10-31 (patch)
+- LNV vs IPRS page made cleaner: repeated numbers and long text removed, extra details fold away, Accept strong asks first
+
+## 0.36.0 – 2026-10-31 (minor)
+- Muso & LNV and LNV vs IPRS: click an LNV row to see all three files, search looks through every song, the app remembers your place, keyboard help; fixed stale counts, slow downloads with no feedback, cut-off step text, and added a warning before sending lists to IPRS
+
+## 0.35.1 – 2026-10-31 (patch)
+- Muso & LNV: Exact match and Possible match tabs are back; dropdown fixed
+
+## 0.35.0 – 2026-10-31 (minor)
+- Muso & LNV: click any version to see all its details; cleaner page with one row of tabs, one filter and a simpler versions list
+
+## 0.34.0 – 2026-10-31 (minor)
+- LNV vs IPRS step is back to the original screen from the live version: How the catalogue came out, To decide, Client/General amend, Not registered, New from IPRS, side-by-side review with Same/Different; its count now matches To decide
+
+## 0.33.0 – 2026-10-30 (minor)
+- New tabs in step 2: Exact match, Possible match and Not in the LNV, including the songs the app linked by itself
+
+## 0.32.3 – 2026-10-30 (patch)
+- LNV rows with different writers or publisher no longer sit next to the Muso song: they are folded away as not the same song, and the only answers shown are add or skip
+
+## 0.32.2 – 2026-10-30 (patch)
+- Fixed the song list on the left not scrolling
+
+## 0.32.1 – 2026-10-30 (patch)
+- Clearer same-song screen: only names really missing on the other side are marked, the top line no longer reads as if Muso and the LNV match, Same company under another name is said plainly, versions show every writer and publisher difference
+
+## 0.32.0 – 2026-10-30 (minor)
+- Review uses the full width with no empty margin on the left, shorter top of the page, and Undo for the last answer after moving on
+
+## 0.31.0 – 2026-10-30 (minor)
+- Simpler review screen: Muso and LNV side by side with only the differing names marked, answer buttons always on screen, one click answers and moves on, fewer filters and repeated text
+
+## 0.30.0 – 2026-10-30 (minor)
+- Review without boxes: Muso and the LNV side by side in one table; folding sidebar, Expand for the song, Less/More on Biggest wins, each part and the step text
+
+## 0.29.0 – 2026-10-30 (minor)
+- New professional look: sidebar with the client's four steps, clean white pages with fine lines instead of boxes, a progress track for the steps
+
+## 0.28.0 – 2026-10-30 (minor)
+- One flow per client: 1 Files, 2 Muso & LNV, 3 LNV vs IPRS, 4 Final LNV; clients open at their step; client list shows where each client is; old tools moved to More tools
+
+## 0.27.0 – 2026-10-30 (minor)
+- Fewer songs to check (Needs you / App answered), IPRS step rebuilt like step 1, one final LNV with Muso and IPRS together, final LNV in seconds and faster first open
+
+## 0.26.1 – 2026-10-30 (patch)
+- Removed the progress card from step 1
+
+## 0.26.0 – 2026-10-30 (minor)
+- Biggest wins (one answer settles many songs: a name, a non-writer, a publisher) and a progress bar showing where every Muso song stands
+
+## 0.25.0 – 2026-10-30 (minor)
+- Same-song rule: Muso maps to an LNV row only with the same writers and a shared publisher; Same person? cases answered once for every client
+
+## 0.24.0 – 2026-10-29 (minor)
+- Step 1 shows the LNV as the master and Muso as what adds or updates it: LNV row cards, what changes in the LNV, Muso versions, one choice; new Download updated LNV
+
+## 0.23.0 – 2026-10-29 (minor)
+- Muso and LNV checked together: one case per song (its Muso versions + its LNV rows in one block), one Confirm, two steps instead of three
+
+## 0.22.0 – 2026-10-29 (minor)
+- Step 1 Clean Muso now works like MRM-Extractor's Song Merge: same ISRC + same writers merged, suggestions and ISRC conflicts to review (A/R keys), merged list, manual type, Excel download
+
+## 0.21.0 – 2026-10-29 (minor)
+- Consolidate in three steps, one after the other: 1 clean Muso (duplicate rows merged into songs), 2 Muso vs LNV, 3 LNV vs IPRS – every case shown as full records one below another with differences marked; no yes/no questions
+
+## 0.20.1 – 2026-10-29 (patch)
+- Uploads failed after a rebuild (backend/media was deleted by the tests and recreated by Docker as root): tests now use a temporary folder; the Add-client wizard waits for the LNV before the Muso and IPRS files
+
+## 0.20.0 – 2026-10-29 (minor)
+- Song check: LNV, Muso export and IPRS report checked together in one screen – one verdict per song, only the open questions asked one at a time; Add client is now two steps (details, the three files); spreadsheets read up to 20× faster
+
+## 0.19.0 – 2026-10-29 (minor)
+- Data clean rebuilt like the Extractor's Song Merge: one queue per kind of decision, list on the left and one case on the right compared field by field with Same / Different marks and evidence points, one-key decisions saved in the background; duplicates no longer lump versions, remakes or other recordings together (Laxmikant: 158 → 25 to decide); IPRS mapping compare look restored
+
+## 0.18.1 – 2026-10-28 (patch)
+- Data clean is now a side-by-side compare: LNV on the left, the export on the right, one line per song with a coloured status and an Outcome menu the app pre-fills; filters for To decide, Duplicates, Missing, ISRC problems; no more questions
+
+## 0.18.0 – 2026-10-28 (minor)
+- Data clean answers what it is sure of by itself (same ISRC + title, same title + writer, certain duplicates, clean missing songs, empty cells) and asks only the rest – Laxmikant: 1,918 questions down to 437; every app answer shows why and can be changed
+
+## 0.17.2 – 2026-10-28 (patch)
+- Data clean shows every problem of a check at once in one clear list – plain question and answer buttons on each row, To answer / Answered / All, search, tick-boxes to answer many together; one-question-at-a-time mode removed
+
+## 0.17.1 – 2026-10-28 (patch)
+- Data clean made simple: the two sheets clearly labelled (LNV vs export), a plain-language summary, a numbered list of checks, and one question at a time with Yes / No / Skip buttons (keys Y N S) – table view still there for doing many at once
+
+## 0.17.0 – 2026-10-28 (minor)
+- New Data clean step: today's LNV vs one Muso / Apple Music / Spotify sheet – matching and duplicate finding in one pass, review tabs for ISRC & duplicates, artist names, missing details and links to check, plus a discrepancy & duplicate report
+
+## 0.16.4 – 2026-10-24 (patch)
+- Opening a big report is much faster: catalogue save looks works up by index and only rewrites what changed; processed reports survive app updates
+
+## 0.16.3 – 2026-10-24 (patch)
+- Much faster matching for big catalogues (Laxmikant: ~7.5 min → ~23 s): master index for codes and titles, cached name clean-up; results unchanged
+
 ## 0.16.2 – 2026-10-24 (patch)
 - Removed unused files and old code; all spreadsheet types (xlsx, csv, ods …) kept out of git
 

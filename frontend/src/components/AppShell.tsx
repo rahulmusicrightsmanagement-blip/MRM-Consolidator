@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { ChevronRight, KeyRound, LogOut, Moon, Plus, Search, Sun, SunMoon, Users } from 'lucide-react'
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { ChevronsUpDown, KeyRound, LayoutGrid, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Sun, SunMoon, Users, X } from 'lucide-react'
 import { CommandPalette } from './CommandPalette'
 import { Kbd } from './ui'
 import { useAuth } from '../lib/auth'
@@ -20,11 +20,14 @@ function readTheme(): Theme {
   }
 }
 
-/** One top bar, no sidebar: Home › current reconciliation, search, theme and "New". */
-export function AppShell({ children, trail }: { children: ReactNode; trail?: ReactNode }) {
+/** Sidebar (app navigation, plus the open client's steps in `side`) and a slim top bar with the trail. */
+export function AppShell({ children, trail, side }: { children: ReactNode; trail?: ReactNode; side?: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(readTheme)
   const [palette, setPalette] = useState(false)
-  const navigate = useNavigate()
+  const [open, setOpen] = useState(false)   // the sidebar on small screens
+  const [mini, setMini] = useState(() => { try { return localStorage.getItem('mrm-side-mini') === '1' } catch { return false } })
+  const fold = () => { setMini(!mini); try { localStorage.setItem('mrm-side-mini', mini ? '0' : '1') } catch { /* private mode */ } }
+  const { pathname, search } = useLocation()
 
   useEffect(() => {
     const root = document.documentElement
@@ -40,37 +43,54 @@ export function AppShell({ children, trail }: { children: ReactNode; trail?: Rea
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
+  useEffect(() => setOpen(false), [pathname, search])
 
   return (
-    <div className="app">
-      <header className="appbar">
-        <Link to="/" className="logo">
-          <span className="logo-mark" aria-hidden>
-            <svg viewBox="0 0 32 32" width="17" height="17"><path d="M12 22.5a3 3 0 1 1-2-2.83V9.5l11-2.5v12.5a3 3 0 1 1-2-2.83V10.6l-7 1.6z" fill="currentColor" /></svg>
-          </span>
-          <strong>MRM</strong><span className="logo-sub">Consolidator</span>
-        </Link>
-        {trail && <><ChevronRight size={16} className="muted trail-sep" /><div className="trail">{trail}</div></>}
-        <div className="appbar-right">
-          <button type="button" className="search-trigger" onClick={() => setPalette(true)} aria-label="Search">
-            <Search size={15} /><span>Search…</span><Kbd>Ctrl K</Kbd>
-          </button>
-          <button type="button" className="icon-btn" onClick={() => setTheme(NEXT[theme])} aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`}>
-            {theme === 'light' ? <Sun size={18} /> : theme === 'dark' ? <Moon size={18} /> : <SunMoon size={18} />}
-          </button>
-          <button type="button" className="btn primary" onClick={() => navigate('/clients/new')}><Plus size={15} /><span className="hide-sm">Add client</span></button>
-          <UserMenu />
+    <div className={`shell2 ${open ? 'nav-open' : ''} ${mini ? 'mini' : ''}`}>
+      <aside className="side" aria-label="Navigation">
+        <div className="side-top">
+          <Link to="/" className="logo">
+            <span className="logo-mark" aria-hidden>
+              <svg viewBox="0 0 32 32" width="16" height="16"><path d="M12 22.5a3 3 0 1 1-2-2.83V9.5l11-2.5v12.5a3 3 0 1 1-2-2.83V10.6l-7 1.6z" fill="currentColor" /></svg>
+            </span>
+            <span className="logo-text"><strong>MRM</strong><small>Consolidator</small></span>
+          </Link>
+          <button type="button" className="icon-btn side-close" onClick={() => setOpen(false)} aria-label="Close menu"><X size={18} /></button>
+          <button type="button" className="icon-btn side-fold" onClick={fold} title={mini ? 'Expand the sidebar' : 'Collapse the sidebar'} aria-label={mini ? 'Expand the sidebar' : 'Collapse the sidebar'}>
+            {mini ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button>
         </div>
-      </header>
-      <main className="page">{children}</main>
-      <footer className="app-footer"><b>MRM-Consolidator</b><span>Music Rights Management</span><span>·</span><span>v{VERSION}</span></footer>
+        <button type="button" className="side-search" onClick={() => setPalette(true)} title="Search (Ctrl K)">
+          <Search size={14} /><span className="lbl">Search</span><Kbd>Ctrl K</Kbd>
+        </button>
+        <nav className="side-nav">
+          <NavLink to="/" end title="Clients"><LayoutGrid size={16} /><span className="lbl">Clients</span></NavLink>
+          <NavLink to="/clients/new" title="Add client"><Plus size={16} /><span className="lbl">Add client</span></NavLink>
+        </nav>
+        {side}
+        <div className="side-foot">
+          <UserMenu theme={theme} onTheme={() => setTheme(NEXT[theme])} />
+        </div>
+      </aside>
+      <div className="side-scrim" onClick={() => setOpen(false)} aria-hidden />
+
+      <div className="main2">
+        <header className="topbar2">
+          <button type="button" className="icon-btn side-open" onClick={() => setOpen(true)} aria-label="Open menu"><Menu size={18} /></button>
+          <nav className="crumbs2" aria-label="Breadcrumb">
+            <Link to="/">Clients</Link>
+            {trail && <><span className="sep">/</span><span className="current">{trail}</span></>}
+          </nav>
+        </header>
+        <main className="page">{children}</main>
+        <footer className="app-footer"><b>MRM-Consolidator</b><span>Music Rights Management</span><span>·</span><span>v{VERSION}</span></footer>
+      </div>
       <CommandPalette open={palette} onClose={() => setPalette(false)} />
     </div>
   )
 }
 
-/** Avatar button with the signed-in user, their account, Users (super admin only) and Sign out. */
-function UserMenu() {
+/** The signed-in user at the foot of the sidebar: account, Users (admins), theme and Sign out. */
+function UserMenu({ theme, onTheme }: { theme: Theme; onTheme: () => void }) {
   const { user, signOut } = useAuth()
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
@@ -90,15 +110,19 @@ function UserMenu() {
   const go = (to: string) => { setOpen(false); navigate(to) }
   return (
     <div className="user-menu" ref={ref}>
-      <button type="button" className="avatar" onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open} title={label}>
-        {label.slice(0, 1).toUpperCase()}
+      <button type="button" className="user-row" onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open}>
+        <span className="avatar">{label.slice(0, 1).toUpperCase()}</span>
+        <span className="user-row-text"><b>{label}</b><small>{user.is_super_admin ? 'Super admin' : user.is_admin ? 'Admin' : 'Member'}</small></span>
+        <ChevronsUpDown size={14} className="muted" />
       </button>
       {open && (
         <div className="user-pop" role="menu">
-          <div className="user-pop-head"><b>{label}</b>{user.name && <span className="muted small">{user.email}</span>}
-            {user.is_admin && <span className="muted small">{user.is_super_admin ? 'Super admin' : 'Admin'}</span>}</div>
+          <div className="user-pop-head"><b>{label}</b>{user.name && <span className="muted small">{user.email}</span>}</div>
           {user.is_admin && <button type="button" role="menuitem" onClick={() => go('/users')}><Users size={15} />Users</button>}
           <button type="button" role="menuitem" onClick={() => go('/account')}><KeyRound size={15} />Change password</button>
+          <button type="button" role="menuitem" onClick={onTheme}>
+            {theme === 'light' ? <Sun size={15} /> : theme === 'dark' ? <Moon size={15} /> : <SunMoon size={15} />}
+            Theme: {theme === 'system' ? 'automatic' : theme}</button>
           <button type="button" role="menuitem" onClick={async () => { setOpen(false); await signOut(); navigate('/login') }}><LogOut size={15} />Sign out</button>
         </div>
       )}

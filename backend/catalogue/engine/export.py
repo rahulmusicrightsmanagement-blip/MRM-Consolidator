@@ -7,8 +7,10 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from .dataclean import person_key, phonetic, same_people, title_key
 from .iprs import SHARE_KEYS
 from .master import read_layout
+from .xlsx_patch import PatchSheet
 from .normalize import clean_text, norm_ipi, norm_title, same_party
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E46")
@@ -201,6 +203,155 @@ def _write_iprs_work(ws, layout, row, w, sn, fill, status):
         _put(ws, row, b["fields"].get("client_status"), status, fill)
 
 
+REPEAT_FILL = PatternFill("solid", fgColor="FBD9C9")
+# Data clean fill fields -> the LNV's work field, or its contributor slots
+DSP_FIELDS = {"ISRC": "isrc", "Release year": "release_year", "Duration": "duration", "Label": "label", "Movie / album": "movie"}
+DSP_SLOTS = {"Singers": "singers", "Lyricists": "authors", "Composers": "composers"}
+
+
+def _put_names(ws, layout, row, group, names, fill):
+    slots = layout["slots"].get(group, [])
+    for n, name in enumerate(names[:len(slots)]):
+        _put(ws, row, slots[n]["name"], name, fill)
+        if group == "singers":
+            _put(ws, row, slots[n]["role"], "S", fill)
+    return len(names) > len(slots)
+
+
+def lnv_update(master_path, fills, adds, repeats, source):
+    """The LNV updated from the DSP export only (no IPRS report yet) – see final_report."""
+    return final_report(master_path, dsp={"fills": fills, "adds": adds, "repeats": repeats, "source": source})
+
+
+PICK_FIELDS = {"Title": "title", "Film / album": "movie", "Year": "release_year", "ISRC": "isrc", "Label": "label"}
+PICK_SLOTS = {"Lyricist": "authors", "Composer": "composers", "Singer": "singers"}
+
+
+def _replace_names(ws, layout, row, group, names, fill):
+    """The names of one contributor group replaced: a slot keeps its IPI only while it holds the same person; slots
+    left over are emptied."""
+    from .dataclean import person_key
+    slots = layout["slots"].get(group, [])
+    for n, slot in enumerate(slots):
+        old = clean_text(ws.cell(row, slot["name"] + 1).value)
+        new = names[n] if n < len(names) else ""
+        if person_key(old) == person_key(new):
+            continue
+        cell = ws.cell(row, slot["name"] + 1)
+        cell.value = new or None
+        cell.fill = fill
+        for k in ("cae", "joshua"):
+            ws.cell(row, slot[k] + 1).value = None
+        if group == "singers":
+            ws.cell(row, slot["role"] + 1).value = "S" if new else None
+    return len(names) > len(slots)
+
+
+def _picks(ws, layout, dsp):
+    """Values the reviewer took from the DSP over the LNV's own, where the two differ (yellow)."""
+    fields, changes = layout["fields"], []
+    title_of = lambda row: clean_text(ws.cell(row, fields["title"] + 1).value) if "title" in fields else ""
+    for p in dsp.get("picks", []):
+        row, field, value = p["row"], p["field"], p["value"]
+        values = [v for v in (value if isinstance(value, list) else [value]) if v]
+        if not values:
+            continue
+        if field in PICK_SLOTS:
+            slots = layout["slots"].get(PICK_SLOTS[field], [])
+            old = ", ".join(x for x in (clean_text(ws.cell(row, sl["name"] + 1).value) for sl in slots) if x)
+            title = title_of(row)
+            more = _replace_names(ws, layout, row, PICK_SLOTS[field], values, FILLED_FILL)
+            new = ", ".join(values) + (" (not all fit the LNV's slots)" if more else "")
+        else:
+            col = fields.get(PICK_FIELDS.get(field))
+            if col is None:
+                continue
+            title = title_of(row)
+            old = clean_text(ws.cell(row, col + 1).value)
+            new = values[0][:4] if field == "Year" else values[0]
+            cell = ws.cell(row, col + 1)
+            cell.value, cell.fill = new, FILLED_FILL
+        changes.append([row, title, f"{field} changed", f"{old or '(blank)'} → {new} – the {dsp['source']} value, chosen by the reviewer"])
+    return changes
+
+
+def _dsp_changes(ws, layout, dsp):
+    """Step 1's answers on the LNV's own rows: blank fields the DSP fills (yellow – never over a value the LNV, or
+    IPRS just now, has), and rows entered twice marked (orange – never deleted)."""
+    fields, changes = layout["fields"], _picks(ws, layout, dsp)
+    title_of = lambda row: clean_text(ws.cell(row, fields["title"] + 1).value) if "title" in fields else ""
+    for f in dsp.get("fills", []):
+        row, field, value = f["row"], f["field"], f["value"]
+        if field in DSP_SLOTS:
+            slots = layout["slots"].get(DSP_SLOTS[field], [])
+            if any(clean_text(ws.cell(row, sl["name"] + 1).value) for sl in slots):
+                continue
+            if _put_names(ws, layout, row, DSP_SLOTS[field], [v.strip() for v in value.split(",") if v.strip()], FILLED_FILL):
+                value += " (not all fit the LNV's slots)"
+        else:
+            col = fields.get(DSP_FIELDS.get(field))
+            if col is None or clean_text(ws.cell(row, col + 1).value):
+                continue
+            _put(ws, row, col, value, FILLED_FILL)
+        changes.append([row, title_of(row), f"{field} filled", f"{value} – from {dsp['source']}"])
+    for r in dsp.get("repeats", []):
+        if "title" in fields:
+            ws.cell(r["row"], fields["title"] + 1).fill = REPEAT_FILL
+        changes.append([r["row"], title_of(r["row"]), "Entered twice", f"The same song as row {r['keep']}, which is kept – check and remove"])
+    return changes
+
+
+def _write_dsp_song(ws, layout, row, song, sn, extra=None):
+    """One DSP song (or one version of it) as a new LNV row."""
+    fields = layout["fields"]
+    values = {"sn": sn, "title": song["title"], "isrc": (song.get("isrcs") or [""])[0], "movie": song.get("album", ""),
+              "release_year": (song.get("year") or "")[:4], "duration": song.get("duration", ""), "label": song.get("label", ""),
+              **(extra or {})}
+    for field, value in values.items():
+        _put(ws, row, fields.get(field), value, ADDED_FILL)
+    _put_names(ws, layout, row, "authors", song.get("lyricists", []), ADDED_FILL)
+    _put_names(ws, layout, row, "composers", song.get("composers", []), ADDED_FILL)
+    _put_names(ws, layout, row, "singers", song.get("singers", []), ADDED_FILL)
+
+
+ORIGINAL_COLUMNS = {"original_work": "Original Work", "original_movie": "Original Movie / Album"}
+
+
+def _original_columns(ws, layout):
+    """The columns naming a version's original work: the LNV's own, else two new ones after its last column."""
+    fields = layout["fields"]
+    last = max([c for c, h in enumerate(ws[1]) if clean_text(h.value)] + [-1])
+    for field, header in ORIGINAL_COLUMNS.items():
+        if field not in fields:
+            last += 1
+            fields[field] = last
+            _put(ws, 1, last, header, ADDED_FILL)
+
+
+def _version_of(v):
+    o = v["original"]
+    return f"{v['type']} of '{o['title']}'" + (f" (row {o['row']})" if o.get("row") else "")
+
+
+def _same_new_version(v, work):
+    """A version to add and an IPRS-only work to add that are one recording: an ISRC, or the whole title (version
+    tag and all) and the writers."""
+    if work.get("isrc_valid") and work["isrc_valid"] in v["isrcs"]:
+        return True
+    return phonetic(v["title"]) == phonetic(work["title"]) and _same_new_song(v, work)
+
+
+def _same_new_song(song, work):
+    """A DSP song to add and an IPRS-only work to add that are one song: same title, and the same writers or ISRC."""
+    if title_key(song["title"]) != title_key(work["title"]):
+        return False
+    if work.get("isrc_valid") and work["isrc_valid"] in (song.get("isrcs") or []):
+        return True
+    a = {person_key(n) for n in song.get("lyricists", []) + song.get("composers", [])} - {""}
+    b = {person_key(p["name"]) for p in work.get("authors", []) + work.get("composers", [])} - {""}
+    return bool(a and b) and same_people(a, b)
+
+
 def lnv_action_report(master_path, iprs, final, tunecodes, society, status):
     """Our master (LNV format) cut down to the songs that need this action at this society.
 
@@ -374,45 +525,88 @@ def _write_fill_row(ws, iprs_blocks, row, f):
     return changes
 
 
-def final_report(master_path, iprs, final, edits=(), fill=None):
-    """Our master, completed: the IPRS columns filled from the IPRS report (yellow), the songs IPRS has that the
-    master was missing appended (green), and the values the reviewer chose to take from IPRS (yellow)."""
-    wb = openpyxl.load_workbook(master_path)
-    ws = wb.worksheets[0]
+def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=None):
+    """The final LNV: the client's own LNV file with everything applied – the IPRS columns filled from the IPRS
+    report and the values the reviewer chose to take from IPRS (yellow), step 1's answers from the DSP export (blank
+    fields filled, yellow; repeats marked, orange), and the songs the LNV was missing appended (green): the DSP's new
+    songs and the IPRS-only works, a song that is both added once. A DSP song's versions the LNV lacks (remix, lofi …)
+    get rows of their own (VERSION "MOD") naming their original in two columns, Original Work and Original Movie /
+    Album, added after the LNV's last column. Every change is listed in "MRM changes"."""
+    ws = PatchSheet(master_path)   # only the changed cells are written: a whole LNV takes openpyxl about a minute
     layout = read_layout([c.value for c in ws[1]])
     iprs_blocks = [b for b in layout["blocks"] if b["society"] == "IPRS"]
-    works = {w["internal_no"]: w for w in iprs["works"]}
+    works = {w["internal_no"]: w for w in (iprs or {}).get("works", [])}
     plan = {f["key"]: f for f in (fill or {}).get("rows", [])}
     changes = []
 
-    for r in final["rows"]:
+    for r in (final or {}).get("rows", []):
         if r["origin"] == "master" and r["key"] in plan:
             changes += _write_fill_row(ws, iprs_blocks, r["master_row"], plan[r["key"]])
-
     changes += apply_master_edits(ws, layout, edits, works)
+    if dsp:
+        changes += _dsp_changes(ws, layout, dsp)
 
     last = max([s for s in range(1, ws.max_row + 1) if any(ws.cell(s, c).value not in (None, "") for c in (1, 2))] + [1])
     sn = last - 1
-    for r in final["added"]:
+    added_works = [works[r["iprs_works"][0]] for r in (final or {}).get("added", [])]
+    iprs_rows = {}
+    for r in (final or {}).get("added", []):
         w = works[r["iprs_works"][0]]
         last += 1
         sn += 1
+        iprs_rows[w["internal_no"]] = last
         _write_iprs_work(ws, layout, last, w, sn, ADDED_FILL, "")
         changes.append([last, w["title"], "Added song", f"Missing from master; IPRS work {w['internal_no']}"])
         if r["key"] in plan:
             changes += _write_fill_row(ws, iprs_blocks, last, plan[r["key"]])
+    added = {}   # song key -> its new row, for the versions naming it
+    versions = (dsp or {}).get("versions") or {}
+    if versions.get("rows") or versions.get("named") or any(s.get("origin") for s in (dsp or {}).get("adds", [])):
+        _original_columns(ws, layout)
+    for song in (dsp or {}).get("adds", []):
+        if "original" in song:   # the song's row holds its original only; each version gets a row of its own below
+            if not song["original"]:
+                continue
+            song = {**song, **song["original"]}
+        twin = next((w for w in added_works if _same_new_song(song, w)), None)
+        if twin:
+            added[song["key"]] = iprs_rows[twin["internal_no"]]
+            changes.append([None, song["title"], "Not added twice", f"Also new from {dsp['source']}; added once, from IPRS work {twin['internal_no']}"])
+            continue
+        last += 1
+        sn += 1
+        added[song["key"]] = last
+        g = song.get("origin")
+        _write_dsp_song(ws, layout, last, song, sn,
+                        {"version": "MOD", "original_work": g["title"], "original_movie": g["album"], "language": g.get("language", "")} if g
+                        else {"version": "ORI"} if "original" in song else None)
+        changes.append([last, song["title"], "Added recording" if g else "Added song",
+                        (f"A new recording of '{g['title']}' (row {g['row']}); " if g else "Not in the LNV; ") + f"from {dsp['source']}"
+                        + (f" (ISRC {song['isrcs'][0]})" if song.get("isrcs") else "")])
 
-    if "MRM changes" in wb.sheetnames:
-        del wb["MRM changes"]
-    log = wb.create_sheet("MRM changes")
-    log.append(["Master row", "Title", "Change", "Detail"])
-    for cell in log[1]:
-        cell.fill, cell.font = HEADER_FILL, HEADER_FONT
-    for c in changes:
-        log.append(c)
-    for col, width in zip("ABCD", (12, 45, 22, 90)):
-        log.column_dimensions[col].width = width
-    return _bytes(wb)
+    fields = layout["fields"]
+    for v in versions.get("named", []):
+        o = v["original"]
+        if not any(clean_text(ws.cell(v["row"], fields[f] + 1).value) for f in ORIGINAL_COLUMNS):
+            _put(ws, v["row"], fields["original_work"], o["title"], FILLED_FILL)
+            _put(ws, v["row"], fields["original_movie"], o["album"], FILLED_FILL)
+            changes.append([v["row"], clean_text(ws.cell(v["row"], fields["title"] + 1).value), "Original named", _version_of(v)])
+    for v in versions.get("rows", []):
+        o = v["original"]
+        twin = next((w for w in added_works if _same_new_version(v, w)), None)
+        if twin:
+            changes.append([None, v["title"], "Not added twice", f"Also new from {dsp['source']}; added once, from IPRS work {twin['internal_no']}"])
+            continue
+        last += 1
+        sn += 1
+        if o.get("add"):
+            o = {**o, "row": added.get(o["add"])}
+        _write_dsp_song(ws, layout, last, v, sn, {"version": "MOD", "language": o.get("language", ""),
+                                                  "original_work": o["title"], "original_movie": o["album"]})
+        changes.append([last, v["title"], "Added version", f"{_version_of({**v, 'original': o})}; not in the LNV; from {dsp['source']}"
+                        + (f" (ISRC {v['isrcs'][0]})" if v.get("isrcs") else "")])
+
+    return ws.save(changes, ["LNV row", "Title", "Change", "Detail"], (10, 45, 22, 90))
 
 
 def step_workbook(step, result, actions=None):
@@ -472,4 +666,86 @@ def catalogue_workbook(client, works):
                     + [w["registrations"].get(s, {}).get("label", "—") for s in societies]
                     + [w["open_tasks"], "Yes" if w["credited"] else "No"])
     _sheet(wb, "Catalogue", header, rows)
+    return _bytes(wb)
+
+
+# ---- Data clean -------------------------------------------------------------
+CLEAN_CHOICES = {"duplicate": "Duplicate", "different": "Not the same", "owner": "ISRC belongs to one row",
+                 "neither": "Neither row", "same": "Same", "fix": "Fix in LNV", "ok": "OK as is", "add": "Add to LNV",
+                 "not_ours": "Not our work", "accept": "Accept", "reject": "Reject", "none": "Not in LNV"}
+CREDIT_LABELS = {"writer": "Client is a writer", "shared": "Other composers credited too", "medley": "Medley / mashup",
+                 "performer": "Client not credited as writer"}
+
+
+def _decision(item):
+    d = item.get("decision")
+    if not d:
+        return "Open"
+    label = ("App: " if d.get("auto") else "") + CLEAN_CHOICES.get(d["choice"], d["choice"])
+    data = d.get("data") or {}
+    if data.get("keep"):
+        label += f" – keep {data['keep']}"
+    if data.get("row"):
+        label += f" – row {data['row']}"
+    if data.get("rows"):
+        label += " – rows " + ", ".join(str(r) for r in data["rows"])
+    return label
+
+
+def clean_workbook(client, dsp_name, result):
+    """Step 1 discrepancy and duplicate report: today's LNV against one DSP sheet, with every reviewer decision."""
+    wb = _new_book()
+    s, src = result["summary"], result["source"]
+    _sheet(wb, "Summary", ["", ""], [
+        ["Client", client.name], ["DSP sheet", f"{dsp_name} ({src['name']} · sheet {src['sheet']})"],
+        ["DSP rows", src["rows"]], ["Recordings (by ISRC)", src["recordings"]], ["Songs (versions together)", src["songs"]],
+        ["LNV songs", result["lnv"]["songs"]], ["DSP songs found in the LNV", s["matched"]],
+        ["LNV rows confirmed by the DSP", s["lnv_rows_matched"]], ["LNV rows not on this DSP sheet", s["lnv_not_on_dsp"]],
+        ["Possible LNV duplicates (cases)", s["duplicates"]], ["Artist name spellings to check", s["names"]],
+        ["DSP songs not in the LNV", s["unmatched"]], ["… where the client is a writer", s["missing_writer"]],
+        ["LNV blanks the DSP can fill", s["fills"]], ["Links to check", s["check"]],
+        ["Treated as the client", ", ".join(result["client_names"])],
+    ], widths={"": 40})
+    links = lambda ls: "; ".join(f"row {l['row']}: {l['lnv']['title']}" for l in ls)
+    _sheet(wb, "Matched", ["DSP song", "Album", "ISRCs", "LNV rows", "Score /10", "Evidence", "How", "Decision", "Note"],
+           [[m["song"]["title"], m["song"]["album"], ", ".join(m["song"]["isrcs"]), links(m["links"]),
+             max(l["score"] for l in m["links"]), " · ".join(m["links"][0]["evidence"]),
+             "Confirmed by reviewer" if m["confirmed"] else m.get("auto") or "Automatic", _decision(m),
+             " · ".join(m.get("notes") or [])] for m in result["matched"]],
+           widths={"Evidence": 60, "LNV rows": 50, "Note": 60})
+    dup_rows = []
+    for c in result["duplicates"]:
+        for n, r in enumerate(c["rows"]):
+            dup_rows.append([c["key"], "Wrong ISRC" if c["kind"] == "wrong_isrc" else "Duplicate", r["row"], r["title"], r["movie"],
+                             ", ".join(r["isrcs"]), ", ".join(r["writers"]),
+                             ", ".join(f"{k} {v}" for k, v in r["codes"].items()),
+                             "Suggested keeper" if r["row"] == c["keeper"] else "",
+                             " · ".join(c["reasons"]) if n == 0 else "", _decision(c) if n == 0 else ""])
+    _sheet(wb, "LNV duplicates", ["Case", "Kind", "LNV row", "Title", "Movie", "ISRC", "Writers", "Society codes", "Keeper",
+                                  "Why", "Decision"], dup_rows, widths={"Why": 60, "Case": 18})
+    names = [n for n in result["names"] if n["kind"] == "spelling"]
+    _sheet(wb, "Artist names", ["Spelling", "Other spellings", "Times (LNV / DSP)", "Looks like", "Times (LNV / DSP) ",
+                                "Similarity %", "Songs", "Changes a match?", "Decision"],
+           [[n["a"]["spelling"], ", ".join(n["a"]["spellings"][1:]), f"{n['a']['lnv']} / {n['a']['dsp']}", n["b"]["spelling"],
+             f"{n['b']['lnv']} / {n['b']['dsp']}", n["similarity"], "; ".join(n["a"]["songs"] + n["b"]["songs"]),
+             "No – for information" if n.get("info") else "Yes", _decision(n)]
+            for n in names])
+    _sheet(wb, "Junk names", ["Name", "Times", "Songs", "Decision"],
+           [[n["name"], n["count"], "; ".join(n["songs"]), _decision(n)] for n in result["names"] if n["kind"] == "junk"])
+    _sheet(wb, "Missing in LNV", ["DSP song", "Album", "Year", "Popularity", "Credit", "Lyricists", "Composers",
+                                  "Other composers", "Versions", "ISRCs", "Link", "Decision"],
+           [[m["title"], m["album"], m["year"], m["popularity"], CREDIT_LABELS[m["credit"]], ", ".join(m["lyricists"]),
+             ", ".join(m["composers"]), ", ".join(m["other_composers"]),
+             ", ".join(f"{k} ×{v}" for k, v in m["versions"].items()), ", ".join(m["isrcs"]), m["link"], _decision(m)]
+            for m in result["missing"]], widths={"Link": 40})
+    _sheet(wb, "Fill blanks", ["LNV row", "LNV title", "Field", "Value from DSP", "From DSP song", "Match score", "Decision"],
+           [[f["row"], f["title"], f["field"], f["value"], f["song"], f["score"], _decision(f)] for f in result["fills"]])
+    check_rows = []
+    for c in result["check"]:
+        for n, x in enumerate(c["candidates"]):
+            check_rows.append([c["song"]["title"] if n == 0 else "", c["song"]["album"] if n == 0 else "",
+                               ", ".join(c["song"]["isrcs"]) if n == 0 else "", x["row"], x["lnv"]["title"], x["score"],
+                               " · ".join(x["evidence"]), " · ".join(x["flags"]), _decision(c) if n == 0 else ""])
+    _sheet(wb, "To check", ["DSP song", "Album", "ISRCs", "LNV row", "LNV title", "Score /10", "Evidence", "Problem",
+                            "Decision"], check_rows, widths={"Evidence": 50, "Problem": 60})
     return _bytes(wb)

@@ -12,6 +12,7 @@ import Tracker from './pages/Tracker'
 import { ErrorPage } from './components/ErrorPage'
 import ClientLayout from './pages/client/ClientLayout'
 import ClientHome from './pages/client/ClientHome'
+import Consolidate from './pages/client/Consolidate'
 import SocietyWorkspace from './pages/client/SocietyWorkspace'
 import NewClient from './pages/NewClient'
 import Tasks from './pages/client/Tasks'
@@ -29,7 +30,8 @@ function RunRedirect() {
   return null
 }
 
-// Login → client tracker → add client (details · master · societies) → client home → one workspace per society.
+// Login → clients → add client (details · the three files) → the client's flow: 1 files · 2 Muso & LNV ·
+// 3 LNV vs IPRS · 4 final LNV. Follow-up tasks, the catalogue and the society workspaces ("More tools") sit beside it.
 const router = createBrowserRouter([{ errorElement: <ErrorPage />, children: [
   { path: '/login', element: <Login /> },
   { element: <RequireAuth />, children: [
@@ -39,7 +41,11 @@ const router = createBrowserRouter([{ errorElement: <ErrorPage />, children: [
       path: '/clients/:clientId',
       element: <ClientLayout />,
       children: [
-        { index: true, element: <ClientHome /> },
+        { index: true, element: <Consolidate /> },
+        { path: 'consolidate', element: <Consolidate /> },
+        { path: 'tools', element: <ClientHome /> },
+        { path: 'check', element: <Navigate to="../consolidate" replace /> },
+        { path: 'clean', element: <Navigate to="../consolidate" replace /> },
         { path: 'societies/:society', element: <SocietyWorkspace /> },
         { path: 'tasks', element: <Tasks /> },
         { path: 'catalogue', element: <Catalogue /> },

@@ -94,17 +94,32 @@ def _ids(iprs_works, master_song, prs_works, tc_row):
     return ids
 
 
-def _find_work(existing, ids, title):
-    for key in ("IPRS", "PRS", "ISWC"):
-        wanted = set(ids.get(key, []))
-        if not wanted:
-            continue
-        for work in existing:
-            if wanted & set(work.identifiers.get(key, [])):
-                return work
-    t = norm_title(title)
-    same_title = [w for w in existing if norm_title(w.title) == t]
-    return same_title[0] if len(same_title) == 1 else None
+class _WorkIndex:
+    """The client's works by IPRS / PRS code, ISWC and title, so each song finds its work with a few lookups
+    instead of a scan of the whole catalogue (13,000 songs × 13,000 works). A work, once taken by a song, is
+    skipped; among several matches the earliest work wins, as a scan in catalogue order would."""
+
+    def __init__(self, works):
+        self.pos = {id(w): n for n, w in enumerate(works)}
+        self.taken = set()
+        self.by = {key: {} for key in ("IPRS", "PRS", "ISWC")}
+        self.by_title = {}
+        for w in works:
+            for key, index in self.by.items():
+                for value in (w.identifiers or {}).get(key, []):
+                    index.setdefault(value, []).append(w)
+            self.by_title.setdefault(norm_title(w.title), []).append(w)
+
+    def take(self, work):
+        self.taken.add(id(work))
+
+    def find(self, ids, title):
+        for key in ("IPRS", "PRS", "ISWC"):
+            found = [w for v in set(ids.get(key, [])) for w in self.by[key].get(v, []) if id(w) not in self.taken]
+            if found:
+                return min(found, key=lambda w: self.pos[id(w)])
+        same_title = [w for w in self.by_title.get(norm_title(title), []) if id(w) not in self.taken]
+        return same_title[0] if len(same_title) == 1 else None
 
 
 def is_latest(run):
@@ -149,6 +164,10 @@ WORK_FIELDS = ["title", "alt_titles", "identifiers", "language", "category", "du
                "credits", "sources", "last_run", "updated_at"]
 
 
+def _snapshot(work):
+    return [getattr(work, f) if f != "last_run" else work.last_run_id for f in WORK_FIELDS if f != "updated_at"]
+
+
 @transaction.atomic
 def sync_run(run, result):
     """Write one processed report into the client's catalogue. Returns a 'what changed' summary."""
@@ -167,6 +186,8 @@ def sync_run(run, result):
     finals = {r["key"]: r for r in result["final"]["rows"]}
 
     existing = list(client.works.all())
+    index = _WorkIndex(existing)
+    before = {id(w): _snapshot(w) for w in existing}
     next_no = 1 + max([int(w.mrm_id.split("-")[1]) for w in existing] + [0])
     changes = {"new_works": [], "status_changes": [], "verified": [], "reopened": [], "new_tasks": []}
     seen = set()       # id() of the Work objects this report covers (new ones have no database id yet)
@@ -178,7 +199,7 @@ def sync_run(run, result):
         master_song = songs_by_row.get(final["master_row"])
         prs_works = [prs_by_code[c] for c in row["societies"].get("PRS", {}).get("codes", []) if c in prs_by_code]
         ids = _ids(iprs_works, master_song, prs_works, row)
-        work = _find_work([w for w in existing if id(w) not in seen], ids, row["title"])
+        work = index.find(ids, row["title"])
         created = work is None
         if created:
             work = Work(client=client, mrm_id=f"W-{next_no:04d}", first_run=run)
@@ -209,6 +230,7 @@ def sync_run(run, result):
         if latest:
             work.last_run = run
         seen.add(id(work))
+        index.take(work)
         if created:
             existing.append(work)
             changes["new_works"].append(work.mrm_id)
@@ -216,7 +238,8 @@ def sync_run(run, result):
 
     writes = _Writes()
     new_works = [w for w, _, created in planned if created]
-    old_works = [w for w, _, created in planned if not created]
+    # Only works whose stored fields changed are written back – re-opening a report rewrites nothing.
+    old_works = [w for w, _, created in planned if not created and _snapshot(w) != before[id(w)]]
     Work.objects.bulk_create(new_works, batch_size=BATCH)   # fills in their ids
     for work in old_works:
         work.updated_at = writes.now
@@ -248,6 +271,8 @@ def sync_run(run, result):
                                                         text=f"{society}: {reg.get_status_label()} → {Registration.label(status)}"))
                     changes["status_changes"].append({"work": work.mrm_id, "title": work.title, "society": society,
                                                       "from": reg.status, "to": status})
+            values = (status, res["codes"], res["method"], res["issues"], run.id)
+            if reg.pk and (reg.status, reg.codes, reg.found_by, reg.issues, reg.last_run_id) != values:
                 writes.changed_regs.append(reg)
             reg.status, reg.codes, reg.found_by, reg.issues, reg.last_run = status, res["codes"], res["method"], res["issues"], run
         _plan_tasks(client, work, tasks.get(work.id, {}), row, run, changes, writes)

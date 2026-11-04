@@ -44,7 +44,7 @@ function SocietyCard({ s, clientId }: { s: SocietySummary; clientId: number }) {
       )}
       <div className="soc-tile-actions">
         <Button variant={s.status === 'completed' ? 'default' : 'primary'} onClick={go}>
-          {s.status === 'not_started' ? `Start ${s.code}` : s.status === 'completed' ? 'Open' : 'Continue'}<ArrowRight size={15} />
+          {s.status === 'not_started' ? `Start ${s.code}` : `Open the ${s.code} workspace`}<ArrowRight size={15} />
         </Button>
         <span className="grow" />
         <Button variant="ghost" icon={<Trash2 size={15} />} aria-label={`Delete ${s.code}`} title={`Delete ${s.code}`} onClick={() => setAsk(true)} />
@@ -86,6 +86,8 @@ function AddSociety() {
   )
 }
 
+/** More tools: the society workspaces (IPRS step by step, other societies), the master file and catalogue health.
+ *  The everyday work is the Consolidate flow; these are for checking and for societies beyond IPRS. */
 export default function ClientHome() {
   const { detail, clientId, refresh } = useClient()
   const toast = useToast()
@@ -103,7 +105,9 @@ export default function ClientHome() {
   return (
     <div className="stack">
       <section>
-        <h2 className="section-h">Reconciliation</h2>
+        <h2 className="section-h">More tools</h2>
+        <p className="muted tools-lede">The everyday work is the four steps in the sidebar. Here are the files and the society workspaces behind it –
+          each society's report checked step by step, and societies beyond IPRS (PRS, ASCAP, SOCAN…).</p>
         <div className="soc-tiles">
           <div className={`soc-tile master ${m ? 'completed' : 'not_started'}`}>
             <div className="soc-tile-head">

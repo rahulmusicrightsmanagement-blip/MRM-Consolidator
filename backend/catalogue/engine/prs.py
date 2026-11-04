@@ -4,9 +4,8 @@ import csv
 import io
 import re
 
-import openpyxl
-
 from .normalize import clean_id, clean_text, norm_iswc
+from .xlsx import read_rows
 
 
 class SocietyFormatError(Exception):
@@ -15,11 +14,7 @@ class SocietyFormatError(Exception):
 
 def _read_table(path):
     if str(path).lower().endswith((".xlsx", ".xlsm")):
-        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-        ws = wb.worksheets[0]
-        ws.reset_dimensions()
-        rows = [[clean_id(v) for v in r] for r in ws.iter_rows(values_only=True)]
-        wb.close()
+        rows = [[clean_id(v) for v in r] for r in read_rows(path)]
     else:
         raw = open(path, "rb").read()
         text = raw.decode("utf-8-sig", errors="replace")
