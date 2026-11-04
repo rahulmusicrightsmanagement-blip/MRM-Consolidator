@@ -965,11 +965,13 @@ class DataCleanEngineTests(TestCase):
         self.assertIn("Ravi Kumar Verma", r["client_names"])
         matched = {m["song"]["title"]: sorted(l["row"] for l in m["links"]) for m in r["matched"]}
         self.assertEqual(matched, {"Pyaar Ka Geet": [2, 3]})
-        # Exact = the same credits (title, version, album, writers, publisher) and ISRC; possible = one of the two.
-        # Dil Ki Baat has the ISRC of rows 4 and 5 but "Malik Varma" on Muso and "MALIK VERMA" in the LNV: possible,
-        # not linked – a person decides, and the two spellings are asked once
+        # The user's two stages: 1 the recording (title, album, ISRC, year) · 2 the work (title, album, writers,
+        # publisher); both = exact, one = possible. Dil Ki Baat has row 4's ISRC, title and film but "Malik Varma" on
+        # Muso and "MALIK VERMA" in the LNV: stage 1 only, possible – a person decides, the two spellings asked once.
+        # Row 5 shares only the ISRC: listed so it is never added twice
         self.assertEqual([(c["song"]["title"], [(x["row"], x["rec"]["level"]) for x in c["candidates"]]) for c in r["check"]],
-                         [("Dil Ki Baat", [(4, "possible"), (5, "possible")])])
+                         [("Dil Ki Baat", [(4, "possible"), (5, "isrc_only")])])
+        self.assertEqual((r["check"][0]["candidates"][0]["rec"]["stage1"], r["check"][0]["candidates"][0]["rec"]["stage2"]), (True, False))
         self.assertEqual([m["title"] for m in r["missing"]], ["Brand New Hit"])
         dups = {c["kind"]: c for c in r["duplicates"]}
         self.assertEqual(sorted(x["row"] for x in dups["duplicate"]["rows"]), [2, 3])
@@ -1242,6 +1244,8 @@ class StepsApiTests(TestCase):
         self.assertEqual([(r["fields"]["Title"], r["version"], r["in"]) for r in v["muso"]],
                          [("Pyaar Ka Geet", "Original", True), ("Pyaar Ka Geet - Lofi Flip", "Lofi", True)])
         self.assertEqual(([r["row"] for r in v["lnv"]], v["answer"]["choice"], v["answer"]["by"], v["done"]), ([2, 3], "same", "app", False))
+        # one case per song: the merge items it is made of travel with it, each with its recordings
+        self.assertEqual([(m["key"], m["ids"]) for m in v["merge"]["items"]], [("merge:G2", [3, 2])])
         self.assertEqual(got["missing:Brand New Hit"]["answer"]["choice"], "add")
         self.assertEqual(c["open"], 6)
 
@@ -1257,7 +1261,10 @@ class StepsApiTests(TestCase):
         hit = cases()["missing:Brand New Hit"]
         decide({"key": "link:" + hit["answer"]["song"], "choice": "none"}, {"key": "missing:" + hit["answer"]["song"], "choice": "not_ours"})
         one = self.client.get(f"{url}?step=1").json()
-        self.assertEqual((one["counts"]["1"]["adding"], one["counts"]["1"]["not_ours"]), (0, 1))
+        # the lofi on its own is a new recording of LNV row 2 (same title and writers): added, naming that original
+        self.assertEqual((one["counts"]["1"]["adding"], one["counts"]["1"]["not_ours"]), (1, 1))
+        lofi_case = next(x for x in one["step"]["cases"] if x["title"] == "Pyaar Ka Geet - Lofi Flip")
+        self.assertEqual((lofi_case["origin"]["row"], lofi_case["answer"]["choice"]), (2, "add"))
         self.assertTrue(next(x for x in one["step"]["cases"] if x["title"] == "Brand New Hit")["done"])
 
         # The LNV updated with the answers: the lofi (its own song now) and nothing else is added; the change log says so
@@ -1265,6 +1272,14 @@ class StepsApiTests(TestCase):
         self.assertEqual(res.status_code, 200)
         log = openpyxl.load_workbook(io.BytesIO(res.content))["MRM changes"]
         self.assertNotIn("Brand New Hit", [r[1] for r in log.iter_rows(min_row=2, values_only=True)])
+        # the lofi's new row names its original, LNV row 2
+        self.assertIn(("Pyaar Ka Geet - Lofi Flip", "Added version", "Lofi of 'Pyaar Ka Geet' (row 2)"), [(r[1], r[2], r[3].split(";")[0]) for r in log.iter_rows(min_row=2, values_only=True)])
+        # A value the reviewer took from Muso over the LNV's own goes into that LNV cell
+        self.assertEqual(decide({"key": "pick:4:Title", "choice": "muso", "data": {"value": "Dil Ki Baat (Muso)"}}), {"saved": 1})
+        self.assertEqual(self.client.get(f"{url}?step=1").json()["step"]["picks"], {"pick:4:Title": "Dil Ki Baat (Muso)"})
+        book = openpyxl.load_workbook(io.BytesIO(self.client.get(f"/api/clients/{cid}/steps/lnv/").content))
+        self.assertEqual(book.worksheets[0].cell(4, 2).value, "Dil Ki Baat (Muso)")
+        self.assertIn((4, "Title changed"), [(r[0], r[2]) for r in book["MRM changes"].iter_rows(min_row=2, values_only=True)])
         res = self.client.get(f"/api/clients/{cid}/steps/merged/")
         self.assertEqual(res.status_code, 200)
         wb = openpyxl.load_workbook(io.BytesIO(res.content))

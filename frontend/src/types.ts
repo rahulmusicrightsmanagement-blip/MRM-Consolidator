@@ -451,7 +451,7 @@ export interface User {
 
 /* ---------- data clean (step 1: today's LNV against one DSP sheet) ---------- */
 
-export type CleanChoice = 'ignore' | 'keep' | 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none' | 'accepted' | 'rejected' | 'pending' | 'set'
+export type CleanChoice = 'ignore' | 'keep' | 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none' | 'accepted' | 'rejected' | 'pending' | 'set' | 'muso'
 export interface CleanDecisionT { choice: CleanChoice; data?: { keep?: number | string; row?: number; rows?: number[] }; auto?: boolean; why?: string }
 export type CreditKind = 'writer' | 'shared' | 'medley' | 'performer'
 
@@ -514,14 +514,16 @@ export interface CaseRecord extends SongRecord {
   part?: 'original' | 'version'; lnv_row?: number | null
   /** The same-song rule on this LNV row: writers same · differ · blank; publisher same · differ · unchecked */
   check?: {
-    writers: 'same' | 'differ' | 'blank'; publisher: 'same' | 'differ' | 'unchecked'
+    writers: 'same' | 'close' | 'differ' | 'blank'; publisher: 'same' | 'differ' | 'unchecked'
     /** a shared ISRC · title likeness 0-100 · writers on the DSP side only, on the LNV side only */
     isrc?: boolean; title?: number; odd?: [number, number]
     /** writers on both sides besides the client */
     shared?: number
     /** the user's rule against the DSP recording that fits best (its first sheet row: via): exact – the same
      *  credits (title, version, album, writers, publisher) and ISRC · possible – one of the two · null – neither */
-    level?: 'exact' | 'possible' | null; via?: number
+    level?: 'exact' | 'possible' | 'isrc_only' | null; via?: number
+    /** the user's two stages: 1 the recording (title, album, ISRC, year) · 2 the work (title, album, writers, publisher) */
+    stage1?: boolean; stage2?: boolean
   } | null
 }
 export interface CaseAnswer {
@@ -533,7 +535,8 @@ export interface CaseAnswer {
 }
 export interface ReviewCase {
   id: string; kind: CaseKind; title: string; why: string; tone?: string | null; isrc?: boolean; popularity?: number
-  merge: { key: string; status: 'pending' | 'accepted' | 'rejected'; by: 'app' | 'you' } | null
+  /** step 1's merge items this song is made of: each one's recordings (ids) and answer */
+  merge: { key: string; status: 'pending' | 'accepted' | 'rejected'; by: 'app' | 'you'; items: { key: string; ids: number[]; status: string }[] } | null
   muso: CaseRecord[]; lnv: CaseRecord[]; answer: CaseAnswer; done: boolean
   /** Linked surely by the app, never asked: listed only under the match tabs */
   auto?: boolean
@@ -546,6 +549,9 @@ export interface ReviewCase {
   in_lnv?: { key: string; type: string; row: number; muso: CaseRecord; lnv: CaseRecord; isrc: boolean; album: boolean; year: boolean; answer: 'same' | 'none' | null }[]
   /** "Same person?" cases: the two spellings and songs they keep apart */
   names?: { a: string; b: string; songs: string[] }
+  /** A song not in the LNV that is a new recording of an LNV work: that row (named as its original in the new row);
+   *  sure – the same writers, else only a shared writer */
+  origin?: (CaseRecord & { sure: boolean }) | null
 }
 export interface Step1 {
   source: string
@@ -554,7 +560,11 @@ export interface Step1 {
     lnv: number; lnv_only: number; cases: number; open: number; needs: number; kinds: Record<CaseKind, number>; fills: number; filled_rows: number
     /** versions getting a row of their own · LNV version rows getting their original named */
     versions_new: number; versions_named: number
+    /** values taken from the DSP over the LNV's own */
+    picks: number
   }
+  /** "pick:<row>:<field>" -> the DSP value the reviewer chose over the LNV's */
+  picks: Record<string, string | string[]>
   cases: ReviewCase[]
   lnv_only: { row: number; title: string; film: string; year: string; writers: string[] }[]
   /** One answer that settles many songs: a name under two spellings, a DSP name that is no writer, one company under two names */

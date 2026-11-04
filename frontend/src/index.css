@@ -2519,3 +2519,36 @@ tr:hover > td > .rv-ver-open { color: var(--brand); }
 .sg-purpose { margin-bottom: 12px; }
 .sg-purpose > span { font-size: 12px; font-weight: 600; color: var(--muted); }
 @media (max-width: 1600px) { .cs .mv-tabs { top: 152px; gap: 0; } .cs .mv-tabs button { padding: 8px 8px; gap: 5px; font-size: 12.5px; } } /* the step text wraps to two lines here */
+
+/* step 2: the two stages, the LNV-or-Muso choice and the Saved tab */
+.rvc-level { font-size: 12px; font-weight: 680; color: var(--muted); margin-right: 2px; }
+.rvc-level.exact { color: var(--good); }
+.rvc-level.possible, .rvc-level.isrc_only { color: var(--warn); }
+.rv-picks table { width: auto; min-width: 60%; }
+.rv-pick-opt { display: inline-flex; align-items: baseline; gap: 7px; cursor: pointer; color: var(--muted); }
+.rv-pick-opt.on { color: var(--text); font-weight: 600; }
+.rv-pick-opt input { align-self: center; accent-color: var(--brand); }
+.rv-saved-tab { margin-left: auto; color: var(--good) !important; font-weight: 650; }
+.rv-saved-tab svg { margin-right: 2px; }
+.rv-bump { animation: rv-bump .5s ease-out; }
+@keyframes rv-bump { 0% { transform: scale(1.6); background: var(--good-bg); } 100% { transform: scale(1); } }
+.rv-saved-group { display: flex; flex-direction: column; gap: 6px; padding-right: 24px; }
+.rv-saved-group h4 { font-size: 14px; font-weight: 650; }
+.rv-saved-new td:first-child { box-shadow: inset 3px 0 0 var(--good); }
+.rv-views { display: flex; gap: 22px; margin: 0 0 10px; border-bottom: 1px solid var(--border); }
+.rv-views button { display: inline-flex; align-items: center; gap: 7px; padding: 8px 0 9px; margin-bottom: -1px; border: 0; border-bottom: 2px solid transparent; background: none; font: inherit; font-size: 14.5px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.rv-views button:hover { color: var(--text); }
+.rv-views button.on { color: var(--text); border-bottom-color: var(--brand); }
+.rv-views button span { padding: 1px 8px; border-radius: 99px; background: var(--surface-3); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rv-views button:last-child svg { color: var(--good); }
+.rv-views button:last-child span { background: var(--good-bg); color: var(--good); }
+.rv-saved { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); }
+.rv-saved-top { position: sticky; top: 0; z-index: 3; display: flex; flex-direction: column; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--surface); border-radius: var(--r-lg) var(--r-lg) 0 0; }
+.rv-saved-sum { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; font-size: 13px; color: var(--muted); }
+.rv-saved-sum b { margin-right: 5px; font-size: 18px; font-weight: 680; color: var(--text); font-variant-numeric: tabular-nums; }
+.rv-saved-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+.rv-saved-tools .sm-search { flex: 1; min-width: 200px; max-width: 360px; }
+.rv-saved-body { display: flex; flex-direction: column; gap: 22px; padding: 16px 20px 24px; }
+.rv-saved-group { padding-right: 0; }
+.rv-by { font-size: 12px; font-weight: 600; color: var(--muted); }
+.rv-by.you { color: var(--good); }

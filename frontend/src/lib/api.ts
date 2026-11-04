@@ -45,7 +45,7 @@ export type MasterEditIn = { master_row: number; field: string; internal_no: str
 
 export type CleanDecisionIn = {
   key: string; choice: CleanChoice | null
-  data?: { keep?: number | string; row?: number; rows?: number[]; excluded?: number[]; type?: string; cover?: string; a?: string; b?: string; songs?: string[]; name?: string }
+  data?: { keep?: number | string; row?: number; rows?: number[]; excluded?: number[]; type?: string; cover?: string; a?: string; b?: string; songs?: string[]; name?: string; value?: string | string[] }
 }
 
 export interface TaskPatch { state?: TaskState; owner?: string; due_date?: string | null; note?: string }

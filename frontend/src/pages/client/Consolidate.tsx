@@ -43,18 +43,28 @@ export default function Consolidate() {
   // the step a client opens at is kept in the address: it does not jump when a file or an answer moves the client on
   useEffect(() => { if (!params.get('step')) setParams({ step: String(step) }, { replace: true }) }, [params, step, setParams])
 
+  // only the newest load may show: an older answer arriving late would undo what the reviewer just saved
+  const seq = useRef(0)
   const load = useCallback(async (s = want.current) => {
+    const mine = ++seq.current
     try {
       const d = await api.steps(clientId, STEPS[s - 1].api)
-      if (s === want.current) { setData(d); setLoaded(s); setError(null) }
-    } catch (e) { setError((e as Error).message) }
+      if (s === want.current && mine === seq.current) { setData(d); setLoaded(s); setError(null) }
+    } catch (e) { if (mine === seq.current) setError((e as Error).message) }
   }, [clientId])
   useEffect(() => { load(step) }, [step, load])
 
-  /** Save, then show the step again with the change applied everywhere it matters. */
+  /** Save, then show the step again with the change applied everywhere it matters. Answers given one after another
+   *  share one reload: it starts once the last save is in. */
+  const pending = useRef(0)
   const save = async (work: () => Promise<unknown>) => {
     setSaving((x) => x + 1)
-    try { await work(); await load(); void refresh(); return true } catch (e) { toast(`Not saved: ${(e as Error).message}`, 'bad'); return false } finally { setSaving((x) => x - 1) }
+    pending.current += 1
+    try { await work(); return true } catch (e) { toast(`Not saved: ${(e as Error).message}`, 'bad'); return false } finally {
+      pending.current -= 1
+      if (!pending.current) { await load(); void refresh() }
+      setSaving((x) => x - 1)
+    }
   }
 
   const upload = async (slot: 'lnv' | 'dsp' | 'iprs', file: File) => {

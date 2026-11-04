@@ -1,5 +1,17 @@
 # MRM changelog
 
+## 0.40.1 – 2026-11-03 (patch)
+- Saved is now its own tab above the list: every saved answer (yours and the app's), what it puts into the LNV, filters, search, Open and Undo
+
+## 0.40.0 – 2026-11-03 (minor)
+- Muso & LNV: two-stage matching (1 recording: title, album, ISRC, year · 2 work: title, album, writers, publisher – both = exact, one = possible); the matched recording is the original and every other recording gets its own LNV row naming it; choose the LNV or Muso value where they differ; new Saved tab listing every saved answer and what it puts into the LNV; saving no longer flips back
+
+## 0.39.2 – 2026-11-03 (patch)
+- One case per song with all its recordings (a song was split into several cases); a lofi or remix row the LNV has is never asked as the song itself, only checked under versions already in the LNV
+
+## 0.39.1 – 2026-11-03 (patch)
+- Fixed songs showing in the wrong tab and twice (two Muso songs with one ISRC shared an id), and versions already in the LNV showing under songs they don't belong to; the version check now shows the recording that has the LNV row's ISRC
+
 ## 0.39.0 – 2026-11-02 (minor)
 - New matching rule: one Muso recording against one LNV row; Exact = same credits (title, version, album, writers, publisher) and same ISRC, linked by the app; Possible = only one of the two, you decide; neither = not in the LNV
 

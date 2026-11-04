@@ -580,11 +580,11 @@ def client_master(request, client_id):
 # ---------------------------------------------------------------- data clean (step 1: today's LNV against one DSP sheet)
 
 # Decisions that point at rows of the LNV: they go when a new LNV arrives. Name, junk and missing-song decisions stay.
-ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:")
+ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:")
 CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}, "name": {"same", "different"},
                  "junk": {"fix", "ok"}, "missing": {"add", "not_ours"}, "fill": {"accept", "reject"}, "link": {"same", "none"},
                  "merge": {"accepted", "rejected", "pending"}, "type": {"set"}, "version": {"same", "none"},
-                 "writer": {"ignore", "keep"}, "pub": {"same", "different"}}
+                 "writer": {"ignore", "keep"}, "pub": {"same", "different"}, "pick": {"muso"}}
 # Answers about people and companies, not about one client's songs: kept once, for every client
 GLOBAL_DECISIONS = ("name:", "writer:", "pub:")
 
@@ -833,6 +833,9 @@ def lnv_update_export(request, client_id):
             "repeats": [{"row": r["row"], "keep": d["data"]["keep"]} for c in clean["duplicates"] for d in [c.get("decision") or {}]
                         if d.get("choice") == "duplicate" and not d.get("auto") and (d.get("data") or {}).get("keep")
                         for r in c["rows"] if r["row"] != d["data"]["keep"]],
+            # the values the reviewer took from the DSP over the LNV's own: "pick:<row>:<field>" = muso, data.value
+            "picks": [{"row": int(k.split(":")[1]), "field": k.split(":", 2)[2], "value": (d.get("data") or {}).get("value")}
+                      for k, d in decisions.items() if k.startswith("pick:") and d.get("choice") == "muso"],
             "source": dsp.source}
     run = _iprs_run(client)
     result = compute(run) if run else None

@@ -223,10 +223,62 @@ def lnv_update(master_path, fills, adds, repeats, source):
     return final_report(master_path, dsp={"fills": fills, "adds": adds, "repeats": repeats, "source": source})
 
 
+PICK_FIELDS = {"Title": "title", "Film / album": "movie", "Year": "release_year", "ISRC": "isrc", "Label": "label"}
+PICK_SLOTS = {"Lyricist": "authors", "Composer": "composers", "Singer": "singers"}
+
+
+def _replace_names(ws, layout, row, group, names, fill):
+    """The names of one contributor group replaced: a slot keeps its IPI only while it holds the same person; slots
+    left over are emptied."""
+    from .dataclean import person_key
+    slots = layout["slots"].get(group, [])
+    for n, slot in enumerate(slots):
+        old = clean_text(ws.cell(row, slot["name"] + 1).value)
+        new = names[n] if n < len(names) else ""
+        if person_key(old) == person_key(new):
+            continue
+        cell = ws.cell(row, slot["name"] + 1)
+        cell.value = new or None
+        cell.fill = fill
+        for k in ("cae", "joshua"):
+            ws.cell(row, slot[k] + 1).value = None
+        if group == "singers":
+            ws.cell(row, slot["role"] + 1).value = "S" if new else None
+    return len(names) > len(slots)
+
+
+def _picks(ws, layout, dsp):
+    """Values the reviewer took from the DSP over the LNV's own, where the two differ (yellow)."""
+    fields, changes = layout["fields"], []
+    title_of = lambda row: clean_text(ws.cell(row, fields["title"] + 1).value) if "title" in fields else ""
+    for p in dsp.get("picks", []):
+        row, field, value = p["row"], p["field"], p["value"]
+        values = [v for v in (value if isinstance(value, list) else [value]) if v]
+        if not values:
+            continue
+        if field in PICK_SLOTS:
+            slots = layout["slots"].get(PICK_SLOTS[field], [])
+            old = ", ".join(x for x in (clean_text(ws.cell(row, sl["name"] + 1).value) for sl in slots) if x)
+            title = title_of(row)
+            more = _replace_names(ws, layout, row, PICK_SLOTS[field], values, FILLED_FILL)
+            new = ", ".join(values) + (" (not all fit the LNV's slots)" if more else "")
+        else:
+            col = fields.get(PICK_FIELDS.get(field))
+            if col is None:
+                continue
+            title = title_of(row)
+            old = clean_text(ws.cell(row, col + 1).value)
+            new = values[0][:4] if field == "Year" else values[0]
+            cell = ws.cell(row, col + 1)
+            cell.value, cell.fill = new, FILLED_FILL
+        changes.append([row, title, f"{field} changed", f"{old or '(blank)'} → {new} – the {dsp['source']} value, chosen by the reviewer"])
+    return changes
+
+
 def _dsp_changes(ws, layout, dsp):
     """Step 1's answers on the LNV's own rows: blank fields the DSP fills (yellow – never over a value the LNV, or
     IPRS just now, has), and rows entered twice marked (orange – never deleted)."""
-    fields, changes = layout["fields"], []
+    fields, changes = layout["fields"], _picks(ws, layout, dsp)
     title_of = lambda row: clean_text(ws.cell(row, fields["title"] + 1).value) if "title" in fields else ""
     for f in dsp.get("fills", []):
         row, field, value = f["row"], f["field"], f["value"]
@@ -508,6 +560,9 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
         if r["key"] in plan:
             changes += _write_fill_row(ws, iprs_blocks, last, plan[r["key"]])
     added = {}   # song key -> its new row, for the versions naming it
+    versions = (dsp or {}).get("versions") or {}
+    if versions.get("rows") or versions.get("named") or any(s.get("origin") for s in (dsp or {}).get("adds", [])):
+        _original_columns(ws, layout)
     for song in (dsp or {}).get("adds", []):
         if "original" in song:   # the song's row holds its original only; each version gets a row of its own below
             if not song["original"]:
@@ -521,14 +576,15 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
         last += 1
         sn += 1
         added[song["key"]] = last
-        _write_dsp_song(ws, layout, last, song, sn, {"version": "ORI"} if "original" in song else None)
-        changes.append([last, song["title"], "Added song", f"Not in the LNV; from {dsp['source']}"
+        g = song.get("origin")
+        _write_dsp_song(ws, layout, last, song, sn,
+                        {"version": "MOD", "original_work": g["title"], "original_movie": g["album"], "language": g.get("language", "")} if g
+                        else {"version": "ORI"} if "original" in song else None)
+        changes.append([last, song["title"], "Added recording" if g else "Added song",
+                        (f"A new recording of '{g['title']}' (row {g['row']}); " if g else "Not in the LNV; ") + f"from {dsp['source']}"
                         + (f" (ISRC {song['isrcs'][0]})" if song.get("isrcs") else "")])
 
-    versions = (dsp or {}).get("versions") or {}
-    if versions.get("rows") or versions.get("named"):
-        _original_columns(ws, layout)
-        fields = layout["fields"]
+    fields = layout["fields"]
     for v in versions.get("named", []):
         o = v["original"]
         if not any(clean_text(ws.cell(v["row"], fields[f] + 1).value) for f in ORIGINAL_COLUMNS):
