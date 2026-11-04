@@ -1,5 +1,8 @@
 # MRM changelog
 
+## 2.0.1 – 2026-11-04 (major)
+- Project handed over to SK
+
 ## 0.16.2 – 2026-10-24 (patch)
 - Removed unused files and old code; all spreadsheet types (xlsx, csv, ods …) kept out of git
 
