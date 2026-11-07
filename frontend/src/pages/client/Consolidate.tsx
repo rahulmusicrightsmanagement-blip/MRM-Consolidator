@@ -1,71 +1,41 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, ArrowRight, Check, Download, ListChecks, UploadCloud } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
+import { ArrowLeft, ArrowRight, Check, Download, UploadCloud } from 'lucide-react'
 import { Button } from '../../components/ui'
 import { api } from '../../lib/api'
 import { today, useClient } from '../../lib/client'
 import { RunProvider, useRun } from '../../lib/run'
 import { useToast } from '../../lib/toast'
-import type { Step1, StepsPayload } from '../../types'
+import type { StepsPayload } from '../../types'
 import { IprsMatchStep } from '../run/MatchStep'
-import SongReview, { useStored } from './SongReview'
-import { n } from './Block'
+import Review from './Review'
 
-/** The consolidate flow, one step after the other (the MRM flowchart):
- *    1 Muso & LNV  – one case per song: its DSP versions and the LNV rows that may be it, answered together
- *    2 LNV ↔ IPRS  – the IPRS report's "Match & review" (run/MatchStep): to decide · amend · not registered · new
- *  The app's answer is already applied – the reviewer only clicks where it is wrong. */
+const fmt = (x?: number | null) => (x ?? 0).toLocaleString('en-IN')
 
-
-/* ---------- the page ---------- */
-
-const STEPS = [
-  { n: 1, api: 0, title: 'Files', what: 'The LNV, the Muso export, the IPRS report' },
-  { n: 2, api: 1, title: 'Muso & LNV', what: 'Each song: its versions and its LNV row' },
-  { n: 3, api: 0, title: 'LNV vs IPRS', what: 'Registered, to amend, to register' },
-  { n: 4, api: 0, title: 'Final LNV', what: 'Everything written into the LNV' },
-]
-
+/** The client's flow: upload the two files, review what the app could not decide, download the output.
+ *  An IPRS report is optional; when one is uploaded its check becomes a step of its own. */
 export default function Consolidate() {
   const { clientId, detail, refresh } = useClient()
   const toast = useToast()
   const [params, setParams] = useSearchParams()
-  // a client opens at the step it is at
-  const step = Math.min(4, Math.max(1, Number(params.get('step')) || detail?.journey.step || 1))
   const [data, setData] = useState<StepsPayload | null>(null)
-  const [loaded, setLoaded] = useState(0)   // the step data.step belongs to
   const [error, setError] = useState<string | null>(null)
-  const [saving, setSaving] = useState(0)
   const [busy, setBusy] = useState<Record<string, boolean>>({})
+  const asked = Number(params.get('step'))
+  const step = Math.min(4, Math.max(1, asked || detail?.journey.step || 1))
   const want = useRef(step)
   want.current = step
-  // the step a client opens at is kept in the address: it does not jump when a file or an answer moves the client on
-  useEffect(() => { if (!params.get('step')) setParams({ step: String(step) }, { replace: true }) }, [params, step, setParams])
 
-  // only the newest load may show: an older answer arriving late would undo what the reviewer just saved
   const seq = useRef(0)
-  const load = useCallback(async (s = want.current) => {
+  const load = useCallback(async () => {
     const mine = ++seq.current
     try {
-      const d = await api.steps(clientId, STEPS[s - 1].api)
-      if (s === want.current && mine === seq.current) { setData(d); setLoaded(s); setError(null) }
+      const d = await api.steps(clientId, want.current === 3 ? 3 : 0)
+      if (mine === seq.current) { setData(d); setError(null) }
     } catch (e) { if (mine === seq.current) setError((e as Error).message) }
   }, [clientId])
-  useEffect(() => { load(step) }, [step, load])
-
-  /** Save, then show the step again with the change applied everywhere it matters. Answers given one after another
-   *  share one reload: it starts once the last save is in. */
-  const pending = useRef(0)
-  const save = async (work: () => Promise<unknown>) => {
-    setSaving((x) => x + 1)
-    pending.current += 1
-    try { await work(); return true } catch (e) { toast(`Not saved: ${(e as Error).message}`, 'bad'); return false } finally {
-      pending.current -= 1
-      if (!pending.current) { await load(); void refresh() }
-      setSaving((x) => x - 1)
-    }
-  }
+  useEffect(() => { load() }, [step, load])
 
   const upload = async (slot: 'lnv' | 'dsp' | 'iprs', file: File) => {
     setBusy((b) => ({ ...b, [slot]: true }))
@@ -85,138 +55,106 @@ export default function Consolidate() {
 
   if (error && !data) return <div className="alert bad">{error}</div>
   if (!data) return <div className="loading"><span className="spinner" />Reading the files…</div>
-  const f = data.files
-  const shown = loaded === step ? data.step : null
-  const c = data.counts
-  const src = data.source
-  const allFiles = !!(f.lnv && f.dsp && f.iprs)
-  const results = [
-    allFiles ? 'All three files are in' : `${[f.lnv, f.dsp, f.iprs].filter(Boolean).length} of 3 files`,
-    c['1'] ? `${n(c['1'].songs)} songs · ${n(c['1'].needs)} need you` : `Needs the LNV and the ${src} export`,
-    c['3'] ? `${n(c['3'].review_open)} need you · ${n(c['3'].on_screen_amend)} amend · ${n(c['3'].on_screen_register)} register` : 'Needs the IPRS report',
-    f.lnv ? 'Ready to download' : 'Needs the LNV',
+  const f = data.files, c1 = data.counts['1'], c3 = data.counts['3'], src = data.source
+  const ready = !!(f.lnv && f.dsp)
+  const hasIprs = !!f.iprs
+  const steps = [
+    { n: 1, title: 'Upload files', note: ready ? 'Both files in' : `${[f.lnv, f.dsp].filter(Boolean).length} of 2 files`, done: ready, open: true },
+    { n: 2, title: 'Review matches', note: c1 ? (c1.open ? `${fmt(c1.open)} to review` : 'All reviewed') : 'Needs both files', done: !!c1 && c1.open === 0, open: ready },
+    ...(hasIprs ? [{ n: 3, title: 'IPRS check', note: c3 ? (c3.review_open ? `${fmt(c3.review_open)} to review` : 'All reviewed') : 'Reading the report', done: !!c3 && c3.review_open === 0, open: true }] : []),
+    { n: 4, title: 'Download', note: ready ? 'Output ready' : 'Needs both files', done: false, open: !!f.lnv },
   ]
-  const done = [allFiles, !!c['1'] && c['1'].needs === 0, !!c['3'] && c['3'].review_open === 0, false]
+  const next = (s: number) => steps[steps.findIndex((x) => x.n === s) + 1]?.n ?? s
 
   return (
-    <div className="cs">
-      <nav className="cs-steps four" aria-label="Steps">
-        {STEPS.map((s, i) => (
-          <button key={s.n} type="button" className={`cs-step ${step === s.n ? 'active' : ''} ${done[i] ? 'ready' : ''}`} onClick={() => go(s.n)} aria-current={step === s.n ? 'step' : undefined}>
-            <span className="cs-step-bar" aria-hidden />
-            <span className="cs-step-n">{done[i] ? <Check size={13} strokeWidth={3} /> : s.n}</span>
-            <span className="cs-step-text"><b>{s.title}</b><small>{results[i] || s.what}</small></span>
-          </button>
+    <div className="flow">
+      <ol className="flow-steps" aria-label="Steps">
+        {steps.map((s, i) => (
+          <li key={s.n}>
+            <button type="button" disabled={!s.open} className={`${step === s.n ? 'on' : ''} ${s.done ? 'done' : ''}`} aria-current={step === s.n ? 'step' : undefined} onClick={() => go(s.n)}>
+              <span className="flow-dot">{s.done ? <Check size={14} strokeWidth={3} /> : i + 1}</span>
+              <span className="flow-text"><b>{s.title}</b><small>{s.note}</small></span>
+            </button>
+          </li>
         ))}
-        {(step === 2 || step === 3) && <Button variant="ghost" className="cs-next" onClick={() => go(step + 1)}>Next: {STEPS[step].title}<ArrowRight size={15} /></Button>}
-        <span className={`cs-saving ${saving ? 'on' : ''}`}>{saving ? <><span className="spinner small-dark" />Saving…</> : null}</span>
-      </nav>
+      </ol>
 
-      {step === 1 && (
-        <>
-          <StepHead n={1} title="The client's three files"
-            text={`The LNV is the client's catalogue – the master. The ${src} export brings the songs the stores have; the IPRS report what is registered. Drop each file on its box; you can replace one any time.`} />
-          <div className="cs-files">
-            <FileCard tone="lnv" label="LNV" what="The client's LNV report – the master" file={f.lnv?.name} text={f.lnv && `${n(f.lnv.stats.songs)} songs`}
-              busy={busy.lnv} onFile={(x) => upload('lnv', x)} accept=".xlsx,.xlsm" />
-            <FileCard tone="dsp" label={src} what="Muso, Spotify or Apple Music export" file={f.dsp?.name} text={f.dsp && `${n(f.dsp.stats.rows)} rows`}
-              busy={busy.dsp} onFile={(x) => upload('dsp', x)} accept=".xlsx" disabled={!f.lnv} />
-            <FileCard tone="iprs" label="IPRS" what="The client's IPRS works report" file={f.iprs?.name} text={f.iprs && (f.iprs.works != null ? `${n(f.iprs.works)} works` : 'Report added')}
+      {step === 1 && <>
+        <div className="flow-files">
+          <FileCard tone="lnv" label="Source 1 · LNV report" what="The client's catalogue" file={f.lnv?.name} text={f.lnv && `${fmt(f.lnv.stats.songs)} songs`}
+            busy={busy.lnv} onFile={(x) => upload('lnv', x)} accept=".xlsx,.xlsm" />
+          <FileCard tone="dsp" label={`Source 2 · ${src} export`} what="What the stores have" file={f.dsp?.name} text={f.dsp && `${fmt(f.dsp.stats.rows)} rows`}
+            busy={busy.dsp} onFile={(x) => upload('dsp', x)} accept=".xlsx" disabled={!f.lnv} />
+        </div>
+        <details className="flow-optional" open={hasIprs || undefined}>
+          <summary>Optional: add an IPRS report</summary>
+          <div className="flow-files one">
+            <FileCard tone="iprs" label="IPRS report" what="Adds a check of what is registered" file={f.iprs?.name} text={f.iprs && (f.iprs.works != null ? `${fmt(f.iprs.works)} works` : 'Report added')}
               busy={busy.iprs} onFile={(x) => upload('iprs', x)} accept=".xlsx,.xlsm,.csv" disabled={!f.lnv} />
           </div>
-          {!f.lnv && <p className="cs-files-note muted">Start with the LNV: the other two are compared with it.</p>}
-        </>
-      )}
-      {step === 2 && (
-        <>
-          {!f.lnv || !f.dsp ? <Empty>This step needs the LNV and the {src} export – <button type="button" className="rv-link-btn" onClick={() => go(1)}>add them in step 1</button>.</Empty>
-            : !shown ? <Wait />
-              : <SongReview d={shown as Step1} save={(items) => save(() => api.mergeSave(clientId, items))} />}
-        </>
-      )}
-      {step === 3 && (
-        <>
-          {!f.lnv || !f.iprs ? <Empty>This step needs the LNV and the IPRS report – <button type="button" className="rv-link-btn" onClick={() => go(1)}>add them in step 1</button>.</Empty>
-            : <RunProvider key={data.run} runId={data.run!} onChange={() => { load(); refresh() }}><IprsStep /></RunProvider>}
-        </>
-      )}
-      {step === 4 && <Final data={data} clientId={clientId} go={go} />}
+        </details>
+        <div className="flow-foot"><span className="grow" /><Button variant="primary" disabled={!ready} onClick={() => go(2)}>Compare the files<ArrowRight size={15} /></Button></div>
+      </>}
 
-      {(step === 1 || step === 4) && <div className="cs-foot">
-        {step > 1 && <Button variant="ghost" icon={<ArrowLeft size={15} />} onClick={() => go(step - 1)}>Step {step - 1}: {STEPS[step - 2].title}</Button>}
-        <span className="grow" />
-        {step < 4 && <Button variant="primary" onClick={() => go(step + 1)}>Continue to step {step + 1}: {STEPS[step].title}<ArrowRight size={15} /></Button>}
-      </div>}
+      {step === 2 && (ready
+        ? <Review clientId={clientId} source={src} onChanged={() => { load(); void refresh() }} onNext={() => go(next(2))} />
+        : <Needs go={go}>This step needs the LNV and the {src} export.</Needs>)}
+
+      {step === 3 && (hasIprs && data.run
+        ? <>
+          <RunProvider key={data.run} runId={data.run} onChange={() => { load(); void refresh() }}><IprsStep /></RunProvider>
+          <div className="flow-foot"><span className="grow" /><Button variant="primary" onClick={() => go(4)}>Continue<ArrowRight size={15} /></Button></div>
+        </>
+        : <Needs go={go}>This step needs an IPRS report.</Needs>)}
+
+      {step === 4 && (f.lnv
+        ? <Final data={data} clientId={clientId} go={go} back={steps[steps.length - 2]?.n ?? 1} />
+        : <Needs go={go}>The output needs the client's LNV.</Needs>)}
     </div>
   )
 }
 
-/** Step 3: the IPRS report's own screen, once the report is open. */
 function IprsStep() {
   const { payload, loading, error } = useRun()
-  if (loading && !payload) return <Wait />
+  if (loading && !payload) return <div className="loading"><span className="spinner" />Comparing…</div>
   if (error || !payload) return <div className="alert bad">{error ?? 'Could not open the IPRS report.'}</div>
   return <IprsMatchStep />
 }
 
-/** Step 4: what the final LNV holds, and the downloads. Open doubts do not block it: the app's answer is used. */
-function Final({ data, clientId, go }: { data: StepsPayload; clientId: number; go: (s: number) => void }) {
-  const c1 = data.counts['1'], c3 = data.counts['3']
-  const src = data.source
-  if (!data.files.lnv) return <Empty>The final LNV needs the client's LNV – <button type="button" className="rv-link-btn" onClick={() => go(1)}>add it in step 1</button>.</Empty>
-  const open = (c1?.needs ?? 0) + (c3?.review_open ?? 0)
+/** The output: what it holds and the one download that matters. Open questions do not block it. */
+function Final({ data, clientId, go, back }: { data: StepsPayload; clientId: number; go: (s: number) => void; back: number }) {
+  const c = data.counts['1'], c3 = data.counts['3'], src = data.source
+  const open = c?.open ?? 0
   return (
-    <>
-      <StepHead n={4} title="The final LNV"
-        text={`The client's own LNV file with every answer written in: details filled (yellow), new songs added (green), rows entered twice marked (orange – never deleted), IPRS codes and statuses, and a sheet listing every change.`} />
-      {open > 0 && (
-        <div className="alert warn cs-pending">
-          <span className="grow"><b>{n(open)}</b> songs still need you{c1?.needs ? <> – {n(c1.needs)} in step 2</> : null}{c3?.review_open ? <> – {n(c3.review_open)} in step 3</> : null}.
-            You can download now: where the app has an answer it is used; a song with no answer yet stays out of the final LNV.</span>
-          {!!c1?.needs && <Button variant="ghost" onClick={() => go(2)}>Go to step 2</Button>}
-          {!!c3?.review_open && <Button variant="ghost" onClick={() => go(3)}>Go to step 3</Button>}
-        </div>
-      )}
-      {!!c3?.waiting && (
-        <div className="alert warn cs-pending"><span className="grow">Finish step 3 before sending the lists to IPRS: <b>{n(c3.waiting)}</b> LNV songs are still waiting for your decision there, and until then they can show up on the Registration list even if IPRS already has them.</span></div>
-      )}
-      <div className="fin-grid">
-        <section className="fin-card">
-          <h3><span className="rv-badge muso">{src}</span> From step 2</h3>
-          {c1 ? <ul>
-            <li><b>{n(c1.in_lnv)}</b> {src} songs are in the LNV already</li>
-            <li><b>{n(c1.filled_rows)}</b> LNV rows get details {src} has and the LNV left blank</li>
-            <li><b>{n(c1.adding)}</b> new songs are added to the LNV</li>
-            {c1.versions_new > 0 && <li><b>{n(c1.versions_new)}</b> versions (remix, lofi …) get rows of their own, with their original song and film in two new columns</li>}
-            <li><b>{n(c1.not_ours)}</b> songs are left out – not the client's writing</li>
-            {c1.undecided > 0 && <li><b>{n(c1.undecided)}</b> new songs have no answer yet, so they are not added</li>}
-          </ul> : <p className="muted">Needs the {src} export.</p>}
-        </section>
-        <section className="fin-card">
-          <h3><span className="rv-badge iprs">IPRS</span> From step 3</h3>
-          {c3 ? <ul>
-            <li><b>{n(c3.matched)}</b> LNV songs are registered at IPRS as in the LNV</li>
-            <li><b>{n(c3.on_screen_amend)}</b> to amend at IPRS</li>
-            <li><b>{n(c3.on_screen_register)}</b> to register at IPRS</li>
-            <li><b>{n(c3.iprs_only)}</b> works only IPRS has are added to the LNV</li>
-          </ul> : <p className="muted">Needs the IPRS report.</p>}
-        </section>
+    <div className="dl">
+      <div className="dl-main">
+        <h2>Your updated LNV</h2>
+        <p className="muted">The client's own LNV file. Every change is highlighted <mark>in yellow</mark>.</p>
+        {open > 0 && <div className="alert warn"><span className="grow"><b>{fmt(open)}</b> possible matches are not answered. They are left out of the output until you do.</span>
+          <Button onClick={() => go(2)}>Review them</Button></div>}
+        {c && <ul className="dl-list">
+          <li><b>{fmt(c.linked)}</b><span>{src} recordings linked to their LNV rows</span></li>
+          <li><b>{fmt(c.fills)}</b><span>blank LNV cells filled from {src}</span></li>
+          <li><b>{fmt(c.added)}</b><span>new rows added for songs the LNV does not have</span></li>
+          <li><b>{fmt(c.named)}</b><span>versions name their original in the two new columns, <b>Original Work</b> and <b>Original Movie / Album</b>, next to Movie Name</span></li>
+          {(c.held + c.skipped) > 0 && <li><b>{fmt(c.held + c.skipped)}</b><span>left out: already on another sheet of the LNV, or left out by you</span></li>}
+          {c3 && <li><b>{fmt(c3.on_screen_amend)}</b><span>to amend at IPRS, and <b>{fmt(c3.on_screen_register)}</b> to register</span></li>}
+        </ul>}
+        <FileButton className="primary dl-go" url={api.lnvUpdateUrl(clientId)}>Download updated LNV</FileButton>
+        <p className="small muted">Two sheets are added at the end: <b>MRM changes</b> lists every change, <b>Match report</b> lists every {src} recording and where it ended up.</p>
       </div>
-      <div className="fin-actions">
-        <FileButton className="primary fin-main" url={api.lnvUpdateUrl(clientId)} size={17}>Download the final LNV</FileButton>
-        {data.run && <>
-          <FileButton url={api.exportUrl(data.run, 'amend_lnv')}>Amendment list{c3 ? ` (${n(c3.amend)})` : ''}</FileButton>
-          <FileButton url={api.exportUrl(data.run, 'registration_lnv')}>Registration list{c3 ? ` (${n(c3.register)})` : ''}</FileButton>
-        </>}
-        {data.files.dsp && <FileButton className="ghost" url={api.mergeExportUrl(clientId)}>{src} merged by song</FileButton>}
-        <Link className="btn ghost" to={`/clients/${clientId}/tasks`}><ListChecks size={15} />Follow-up tasks</Link>
-      </div>
-    </>
+      {data.run && <div className="dl-side">
+        <h3>IPRS lists</h3>
+        <FileButton url={api.exportUrl(data.run, 'amend_lnv')}>Amendment list{c3 ? ` (${fmt(c3.amend)})` : ''}</FileButton>
+        <FileButton url={api.exportUrl(data.run, 'registration_lnv')}>Registration list{c3 ? ` (${fmt(c3.register)})` : ''}</FileButton>
+      </div>}
+      <div className="flow-foot wide"><Button variant="ghost" icon={<ArrowLeft size={15} />} onClick={() => go(back)}>Back</Button></div>
+    </div>
   )
 }
 
-/** A download that says it is working: the lists take up to half a minute to build, and an error shows as a message. */
-function FileButton({ url, className = '', size = 15, children }: { url: string; className?: string; size?: number; children: ReactNode }) {
+/** A download that says it is working, and shows an error as a message. */
+function FileButton({ url, className = '', children }: { url: string; className?: string; children: ReactNode }) {
   const toast = useToast()
   const [busy, setBusy] = useState(false)
   const get = async () => {
@@ -233,28 +171,14 @@ function FileButton({ url, className = '', size = 15, children }: { url: string;
     } catch (e) { toast((e as Error).message, 'bad') } finally { setBusy(false) }
   }
   return <button type="button" className={`btn ${className}`} disabled={busy} onClick={get}>
-    {busy ? <><span className={`spinner ${className.includes('primary') ? 'small' : 'small-dark'}`} />Preparing…</> : <><Download size={size} />{children}</>}</button>
+    {busy ? <><span className={`spinner ${className.includes('primary') ? 'small' : 'small-dark'}`} />Preparing…</> : <><Download size={16} />{children}</>}</button>
 }
 
-const Empty = ({ children }: { children: ReactNode }) => <div className="cs-empty"><UploadCloud size={26} /><span>{children}</span></div>
-const Wait = () => <div className="loading"><span className="spinner" />Comparing…</div>
+const Needs = ({ children, go }: { children: ReactNode; go: (s: number) => void }) => (
+  <div className="flow-needs"><UploadCloud size={26} /><span>{children}</span><Button onClick={() => go(1)}>Go to Upload files</Button></div>
+)
 
-function StepHead({ n: num, title, text, children }: { n: number; title: string; text: string; children?: ReactNode }) {
-  const [more, setMore] = useStored('mrm-step-intro', false)
-  return (
-    <header className="cs-head">
-      <div className="grow"><div className="eyebrow">Step {num} of 4</div>
-        <h2>{title}<button type="button" className="cs-more-link" onClick={() => setMore(!more)} aria-expanded={more}>{more ? 'Less' : 'What is this step?'}</button></h2>
-        {more && <p>{text}</p>}</div>
-      {children && <div className="cs-head-side">{children}</div>}
-    </header>
-  )
-}
-
-
-/* ---------- a file's box ---------- */
-
-/** One file's box: drop or click to add it, the same to replace it. Also used by the Add-client wizard. */
+/** One file's box: drop or click to add it, the same to replace it. */
 export function FileCard({ tone, label, what, file, text, busy, onFile, accept, disabled }: {
   tone: string; label: string; what: string; file?: string; text?: string | null; busy?: boolean
   onFile: (f: File) => void; accept: string; disabled?: boolean
@@ -271,7 +195,7 @@ export function FileCard({ tone, label, what, file, text, busy, onFile, accept, 
       <span className="sc-file-icon">{busy ? <span className="spinner small-dark" /> : file ? <Check size={18} /> : <UploadCloud size={18} />}</span>
       <span className="sc-file-text">
         <span className="sc-file-label">{label}</span>
-        {busy ? <b>Reading the file…</b> : file ? <b title={file}>{text || 'Added'}</b> : <b>{disabled ? 'Add the LNV first' : 'Drop the file here'}</b>}
+        {busy ? <b>Reading the file…</b> : file ? <b title={file}>{text || 'Added'}</b> : <b>{disabled ? 'Add the LNV first' : 'Drop the file here, or click'}</b>}
         <small title={file}>{file ?? what}</small>
       </span>
       {file && !busy && <span className="sc-file-replace">Replace</span>}

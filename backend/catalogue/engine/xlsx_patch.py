@@ -13,11 +13,16 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 
 from .xlsx import Book
 
+MAX_COLUMN = 16384   # Excel's last column, XFD
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WORKSHEET = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
 WORKSHEET_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
 ROW_RE = re.compile(r"<row\b[^>]*?(?:/>|>.*?</row>)", re.S)
 CELL_RE = re.compile(r"<c\b([^>]*?)(?:/>|>(.*?)</c>)", re.S)
+CELL_REF_RE = re.compile(r'(<c\b[^>]*?\br=")([A-Z]+)(\d+")')
+RANGE_REF_RE = re.compile(r"(\$?)([A-Z]{1,3})(\$?)(\d+)")
+# Attributes outside the cells that hold cell references on this sheet
+SHEET_REFS = re.compile(r'\b(ref|sqref|activeCell|topLeftCell)="([^"]*)"')
 XF_RE = re.compile(r"<xf\b[^>]*?(?:/>|>.*?</xf>)", re.S)
 
 
@@ -62,6 +67,79 @@ class PatchSheet:
         with Book(path) as book:
             self.rows = book.rows(book.sheetnames[0])
         self.values, self.fills = {}, {}
+        self.inserted = None   # (columns before the new ones, how many) once insert_columns ran
+        self.new_header_style = None
+
+    def insert_columns(self, after, count):
+        """Make room for `count` new columns right after 1-based column `after`, moving everything to their right.
+        Everything read or written afterwards uses the new positions. False when the sheet has no room left."""
+        width = max((len(r) for r in self.rows), default=0)
+        with zipfile.ZipFile(self.path) as z:
+            xml = z.read(self._sheet_path(z)).decode("utf-8")
+            others = [z.read(n).decode("utf-8", "ignore") for n in z.namelist() if n.startswith("xl/worksheets/sheet") and n != self._sheet_path(z)]
+            first_name = re.search(r'<sheet\b[^>]*name="([^"]+)"', z.read("xl/workbook.xml").decode("utf-8")).group(1)
+        m = re.search(r'<dimension ref="[A-Z]+\d+:([A-Z]+)\d+"', xml)
+        if self.inserted or self.values or self.fills or max(width, column_index_from_string(m.group(1)) if m else 0) + count > MAX_COLUMN:
+            return False
+        # Things that point at cells in ways this does not rewrite: the columns then go after the last one instead
+        if re.search(r"<(drawing|legacyDrawing|tableParts)\b", xml):
+            return False
+        if any(RANGE_REF_RE.search(re.sub(r"\[\d+\][^!]*!\$?[A-Z]+\$?\d+(:\$?[A-Z]+\$?\d+)?", "", f)) for f in re.findall(r"<f\b[^>]*>([^<]*)</f>", xml)):
+            return False
+        if any(first_name + "!" in f or f"'{first_name}'!" in f for other in others for f in re.findall(r"<f\b[^>]*>([^<]*)</f>", other) if not re.search(r"\[\d+\]", f)):
+            return False
+        self.inserted = (after, count)
+        self.rows = [tuple(r[:after]) + (None,) * count + tuple(r[after:]) if len(r) > after else r for r in self.rows]
+        return True
+
+    def _sheet_path(self, z):
+        workbook = z.read("xl/workbook.xml").decode("utf-8")
+        rels = z.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+        rid = re.search(r'\bid="([^"]+)"', re.search(r"<sheet\b[^>]*/>", workbook).group(0)).group(1)
+        rel = next(x for x in re.findall(r"<Relationship\b[^>]*/>", rels) if f'Id="{rid}"' in x)
+        return "xl/" + re.search(r'Target="([^"]+)"', rel).group(1).lstrip("/").removeprefix("xl/")
+
+    def _shift(self, xml):
+        """The first sheet's XML with the room insert_columns asked for: cell references, column widths and the ranges
+        of filters, panes and the like move; the header gets the neighbouring header cell's style for the new cells."""
+        after, count = self.inserted
+
+        def move(letters):
+            c = column_index_from_string(letters)
+            return get_column_letter(c + count) if c > after else letters
+
+        def move_refs(value):
+            return RANGE_REF_RE.sub(lambda m: f"{m.group(1)}{move(m.group(2))}{m.group(3)}{m.group(4)}", value)
+
+        start = xml.index("<sheetData")
+        end = xml.index("</sheetData>", start) if "</sheetData>" in xml else start
+        head, body, tail = xml[:start], xml[start:end], xml[end:]
+        beside = re.search(rf'<c\b[^>]*\br="{get_column_letter(after)}1"[^>]*>', body)
+        style = re.search(r'\bs="(\d+)"', beside.group(0)) if beside else None
+        self.new_header_style = int(style.group(1)) if style else None
+        body = CELL_REF_RE.sub(lambda m: f"{m.group(1)}{move(m.group(2))}{m.group(3)}", body)
+        # formulas keep their text; a shared formula's own range moves with its cells
+        body = re.sub(r'(<f\b[^>]*?\bref=")([^"]+)(")', lambda m: m.group(1) + move_refs(m.group(2)) + m.group(3), body)
+        ref = lambda m: f'{m.group(1)}="{move_refs(m.group(2))}"'
+        head, tail = SHEET_REFS.sub(ref, head), SHEET_REFS.sub(ref, tail)
+        body = re.sub(r'(<row\b[^>]*?)\sspans="[^"]*"', r"\1", body)   # a row's column hint would be out of date
+
+        def cols(m):
+            out = []
+            for c in re.findall(r"<col\b[^>]*/>", m.group(1)):
+                lo, hi = int(re.search(r'\bmin="(\d+)"', c).group(1)), int(re.search(r'\bmax="(\d+)"', c).group(1))
+                put = lambda a, b: re.sub(r'\bmax="\d+"', f'max="{b}"', re.sub(r'\bmin="\d+"', f'min="{a}"', c))
+                if hi <= after:
+                    out.append(c)
+                elif lo > after:
+                    out.append(put(lo + count, min(hi + count, MAX_COLUMN)))
+                else:   # the new columns fall inside this block of equal widths
+                    out.extend([put(lo, after), put(after + count + 1, min(hi + count, MAX_COLUMN))])
+            new = "".join(f'<col min="{after + n + 1}" max="{after + n + 1}" width="32" customWidth="1"/>' for n in range(count))
+            at = next((n for n, c in enumerate(out) if int(re.search(r'\bmin="(\d+)"', c).group(1)) > after), len(out))
+            return "<cols>" + "".join(out[:at]) + new + "".join(out[at:]) + "</cols>"
+        head = re.sub(r"<cols>(.*?)</cols>", cols, head, flags=re.S)
+        return head + body + tail
 
     def cell(self, row, col):
         return _Cell(self, row, col)
@@ -74,8 +152,9 @@ class PatchSheet:
     def max_row(self):
         return max([len(self.rows)] + [r for r, _ in self.values])
 
-    def save(self, log_rows, log_header, log_widths, log_name="MRM changes"):
-        """The workbook bytes: the first sheet with the changes, and a fresh sheet listing them."""
+    def save(self, log_rows, log_header, log_widths, log_name="MRM changes", extra_sheets=()):
+        """The workbook bytes: the first sheet with the changes, and a fresh sheet listing them. extra_sheets:
+        [(name, header, rows, widths)] – more fresh sheets after it; a sheet of that name from an earlier run goes."""
         with zipfile.ZipFile(self.path) as z:
             names = z.namelist()
             parts = {n: z.read(n) for n in ("xl/workbook.xml", "xl/_rels/workbook.xml.rels", "[Content_Types].xml", "xl/styles.xml")}
@@ -84,16 +163,19 @@ class PatchSheet:
             types = parts["[Content_Types].xml"].decode("utf-8")
             styles = parts["xl/styles.xml"].decode("utf-8")
 
-            # an earlier "MRM changes" sheet goes (this file may be a final LNV uploaded again)
-            dropped = None
-            m = re.search(rf'<sheet\b[^>]*name="{re.escape(log_name)}"[^>]*/>', workbook)
-            if m:
+            # earlier sheets of ours go (this file may be a final LNV uploaded again)
+            dropped = set()
+            for name in [log_name] + [e[0] for e in extra_sheets]:
+                m = re.search(rf'<sheet\b[^>]*name="{re.escape(escape(name))}"[^>]*/>', workbook)
+                if not m:
+                    continue
                 rid = re.search(r'\bid="([^"]+)"', m.group(0)).group(1)
                 target = re.search(rf'<Relationship\b[^>]*Id="{rid}"[^>]*/>', rels)
-                dropped = "xl/" + re.search(r'Target="([^"]+)"', target.group(0)).group(1).lstrip("/").removeprefix("xl/")
+                gone = "xl/" + re.search(r'Target="([^"]+)"', target.group(0)).group(1).lstrip("/").removeprefix("xl/")
+                dropped.add(gone)
                 workbook = workbook.replace(m.group(0), "")
                 rels = rels.replace(target.group(0), "")
-                types = re.sub(rf'<Override\b[^>]*PartName="/{re.escape(dropped)}"[^>]*/>', "", types)
+                types = re.sub(rf'<Override\b[^>]*PartName="/{re.escape(gone)}"[^>]*/>', "", types)
 
             first = re.search(r"<sheet\b[^>]*/>", workbook).group(0)
             rid = re.search(r'\bid="([^"]+)"', first).group(1)
@@ -101,35 +183,63 @@ class PatchSheet:
             sheet_path = "xl/" + target.lstrip("/").removeprefix("xl/")
 
             finish_styles, style_of, header_style = self._styles(styles)
-            sheet = self._patch_sheet(z.read(sheet_path).decode("utf-8"), style_of)
+            source = z.read(sheet_path).decode("utf-8")
+            if self.inserted:
+                source = self._shift(source)
+                workbook = self._move_defined_names(workbook)
+                # Excel's list of formula cells names their old positions: without it Excel simply rebuilds it
+                if "xl/calcChain.xml" in names:
+                    dropped.add("xl/calcChain.xml")
+                    rels = re.sub(r'<Relationship\b[^>]*calcChain[^>]*/>', "", rels)
+                    types = re.sub(r'<Override\b[^>]*calcChain[^>]*/>', "", types)
+            sheet = self._patch_sheet(source, style_of)
             styles = finish_styles()   # after the sheet: its cells made the new styles
+            if "_xlnm._FilterDatabase" in workbook:
+                workbook = re.sub(r'(<definedName\b[^>]*_xlnm\._FilterDatabase[^>]*localSheetId="0"[^>]*>[^<]*\$)(\d+)(</definedName>)',
+                                  lambda d: f"{d.group(1)}{max(int(d.group(2)), self.last_row)}{d.group(3)}", workbook)
 
-            # the change list as a new sheet
-            n = 1
-            while f"xl/worksheets/sheet{n}.xml" in names:
-                n += 1
-            log_path = f"xl/worksheets/sheet{n}.xml"
-            new_rid = "rIdMrm" + str(n)
-            sheet_id = max(int(x) for x in re.findall(r'sheetId="(\d+)"', workbook)) + 1
+            # the change list, and any other sheets, as new sheets
             prefix = re.search(r'\s(\w+):id="', first).group(1)
-            workbook = workbook.replace("</sheets>", f'<sheet name="{escape(log_name)}" sheetId="{sheet_id}" {prefix}:id="{new_rid}"/></sheets>')
-            rels = rels.replace("</Relationships>", f'<Relationship Id="{new_rid}" Type="{WORKSHEET}" Target="worksheets/sheet{n}.xml"/></Relationships>')
-            types = types.replace("</Types>", f'<Override ContentType="{WORKSHEET_TYPE}" PartName="/{log_path}"/></Types>')
-            log = self._log_sheet(log_header, log_rows, log_widths, header_style)
+            new_sheets, n = {}, 1
+            for name, header, rows, widths in [(log_name, log_header, log_rows, log_widths), *extra_sheets]:
+                while f"xl/worksheets/sheet{n}.xml" in names:
+                    n += 1
+                path, new_rid = f"xl/worksheets/sheet{n}.xml", f"rIdMrm{n}"
+                n += 1
+                sheet_id = max(int(x) for x in re.findall(r'sheetId="(\d+)"', workbook)) + 1
+                workbook = workbook.replace("</sheets>", f'<sheet name="{escape(name)}" sheetId="{sheet_id}" {prefix}:id="{new_rid}"/></sheets>')
+                rels = rels.replace("</Relationships>", f'<Relationship Id="{new_rid}" Type="{WORKSHEET}" Target="worksheets/{path.rsplit("/", 1)[1]}"/></Relationships>')
+                types = types.replace("</Types>", f'<Override ContentType="{WORKSHEET_TYPE}" PartName="/{path}"/></Types>')
+                new_sheets[path] = self._log_sheet(header, rows, widths, header_style)
 
             out = io.BytesIO()
             with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=3) as w:
                 changed = {"xl/workbook.xml": workbook, "xl/_rels/workbook.xml.rels": rels, "[Content_Types].xml": types,
                            "xl/styles.xml": styles, sheet_path: sheet}
                 for info in z.infolist():
-                    if info.filename == dropped:
+                    if info.filename in dropped and info.filename not in new_sheets:
                         continue
                     if info.filename in changed:
                         w.writestr(info.filename, changed[info.filename].encode("utf-8"))
-                    else:
+                    elif info.filename not in new_sheets:
                         w.writestr(info, z.read(info.filename))
-                w.writestr(log_path, log.encode("utf-8"))
+                for path, xml in new_sheets.items():
+                    w.writestr(path, xml.encode("utf-8"))
         return out.getvalue()
+
+    def _move_defined_names(self, workbook):
+        """Names on the first sheet (Excel's filter range) move with its columns."""
+        first = re.search(r'<sheet\b[^>]*name="([^"]+)"', workbook).group(1)
+        after, count = self.inserted
+
+        def move(m):
+            text = m.group(2)
+            if f"{first}!" not in text and f"'{first}'!" not in text:
+                return m.group(0)
+            shift = lambda r: f"{r.group(1)}{get_column_letter(column_index_from_string(r.group(2)) + count) if column_index_from_string(r.group(2)) > after else r.group(2)}{r.group(3)}{r.group(4)}"
+            sheet, _, cells = text.rpartition("!")
+            return f"{m.group(1)}{sheet}!{RANGE_REF_RE.sub(shift, cells)}{m.group(3)}"
+        return re.sub(r"(<definedName\b[^>]*>)([^<]*)(</definedName>)", move, workbook)
 
     def _styles(self, styles):
         """Add a fill per colour used, and a cell style per (old style, colour) – the cell keeps its font and borders."""
@@ -199,6 +309,9 @@ class PatchSheet:
         out.append(xml[end:])
         sheet = "".join(out)
         last_row = max([len(self.rows)] + list(edits))
+        self.last_row = last_row
+        # the sheet's filter takes in the rows added below it
+        sheet = re.sub(r'(<autoFilter\b[^>]*\bref="[A-Z]+\d+:[A-Z]+)(\d+)"', lambda d: f'{d.group(1)}{max(int(d.group(2)), last_row)}"', sheet, count=1)
         return re.sub(r'(<dimension ref="[A-Z]+\d+:)([A-Z]+)(\d+)"',
                       lambda d: f'{d.group(1)}{d.group(2)}{max(int(d.group(3)), last_row)}"', sheet, count=1)
 
@@ -212,7 +325,8 @@ class PatchSheet:
         for c, (value, rgb, has_value) in edits.items():
             attrs, inner, _ = cells.get(c, ("", None, ""))
             s = re.search(r'\bs="(\d+)"', attrs)
-            style = style_of(int(s.group(1)) if s else None, rgb)
+            new_header = r == 1 and self.inserted and self.inserted[0] < c <= self.inserted[0] + self.inserted[1]
+            style = style_of(int(s.group(1)) if s else self.new_header_style if new_header else None, rgb)
             ref = f"{get_column_letter(c)}{r}"
             st = f' s="{style}"' if style is not None else ""
             if not has_value:   # only the colour changes

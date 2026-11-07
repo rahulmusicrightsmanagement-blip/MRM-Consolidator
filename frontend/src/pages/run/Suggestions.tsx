@@ -6,7 +6,7 @@ import type { DecisionItem, MasterEditIn } from '../../lib/api'
 import type { ReviewItem } from '../../lib/model'
 import { samePerson } from '../../lib/names'
 import { useRun } from '../../lib/run'
-import { useStored } from '../client/SongReview'
+import { useStored } from '../../lib/stored'
 import type { Candidate, Contributor, IprsWork, MasterPerson, MasterSong } from '../../types'
 
 /** A decision made on screen, sent to the server in batches (one reprocessing instead of one per click). */

@@ -1,5 +1,8 @@
 # MRM changelog
 
+## 1.0.0 – 2026-11-05 (major)
+- New three-bucket Muso vs LNV comparison (exact, possible, not found) using the oldest release as the original; Original Work and Original Movie / Album columns next to Movie Name; every change in the output highlighted yellow; simpler Upload, Review, Download screens; version shown bottom right
+
 ## 0.40.1 – 2026-11-03 (patch)
 - Saved is now its own tab above the list: every saved answer (yours and the app's), what it puts into the LNV, filters, search, Open and Undo
 

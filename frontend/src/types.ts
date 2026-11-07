@@ -351,7 +351,7 @@ export interface ClientMetrics {
   coverage: Record<string, Coverage>
   tasks: { open: number; closed: number; total: number; overdue: number; verified: number; by_type: Record<string, { open: number; closed: number }> }
   stage: { index: number; label: string }
-  /** Where the client is in the consolidate flow: 1 files · 2 Muso & LNV · 3 LNV vs IPRS · 4 final LNV */
+  /** Where the client is in the flow: 1 upload · 2 review · 3 IPRS check (when there is a report) · 4 download */
   journey: { step: number; label: string; steps: string[]; files: { lnv: boolean; dsp: boolean; iprs: boolean }
     needs: { '2': number | null; '3': number | null }; source: string }
   review: number
@@ -451,7 +451,7 @@ export interface User {
 
 /* ---------- data clean (step 1: today's LNV against one DSP sheet) ---------- */
 
-export type CleanChoice = 'ignore' | 'keep' | 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none' | 'accepted' | 'rejected' | 'pending' | 'set' | 'muso'
+export type CleanChoice = 'ignore' | 'keep' | 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none' | 'accepted' | 'rejected' | 'pending' | 'set' | 'muso' | 'new' | 'skip'
 export interface CleanDecisionT { choice: CleanChoice; data?: { keep?: number | string; row?: number; rows?: number[] }; auto?: boolean; why?: string }
 export type CreditKind = 'writer' | 'shared' | 'medley' | 'performer'
 
@@ -506,71 +506,25 @@ export interface SongRecord {
   fields: Record<string, string | string[]>
   version?: string; why?: string | { text: string; good: boolean }[] | null; score?: number | null; popularity?: number
 }
-/** Step 1: the DSP export and the LNV in one pass, one case per song (a block of records one below another). */
-export type CaseKind = 'names' | 'versions' | 'isrc' | 'check' | 'missing' | 'left_out' | 'twice'
-export interface CaseRecord extends SongRecord {
-  id?: number; sheet_rows?: number[]; in?: boolean
-  /** Where this DSP recording goes in the LNV: the song's own row (original), or a version's row – lnv_row when the LNV has it */
-  part?: 'original' | 'version'; lnv_row?: number | null
-  /** The same-song rule on this LNV row: writers same · differ · blank; publisher same · differ · unchecked */
-  check?: {
-    writers: 'same' | 'close' | 'differ' | 'blank'; publisher: 'same' | 'differ' | 'unchecked'
-    /** a shared ISRC · title likeness 0-100 · writers on the DSP side only, on the LNV side only */
-    isrc?: boolean; title?: number; odd?: [number, number]
-    /** writers on both sides besides the client */
-    shared?: number
-    /** the user's rule against the DSP recording that fits best (its first sheet row: via): exact – the same
-     *  credits (title, version, album, writers, publisher) and ISRC · possible – one of the two · null – neither */
-    level?: 'exact' | 'possible' | 'isrc_only' | null; via?: number
-    /** the user's two stages: 1 the recording (title, album, ISRC, year) · 2 the work (title, album, writers, publisher) */
-    stage1?: boolean; stage2?: boolean
-  } | null
+/** One recording of the DSP sheet against the LNV (backend: engine/reconcile.py). */
+export interface CompareLnvRow { row: number; title: string; album: string; isrcs: string[]; year: string; lyricists: string[]; composers: string[]; singers: string[]; label: string; duration: string; language: string }
+export interface CompareCandidate {
+  row: number; level: 'exact' | 'possible'; reason: string | null
+  isrc: 'same' | 'blank' | 'differ' | 'none'; title: 'same' | 'similar' | 'differ'; album: 'same' | 'differ'; credits: 'same' | 'close' | 'differ' | 'blank'
+  only_muso: string[]; only_lnv: string[]; lnv: CompareLnvRow
 }
-export interface CaseAnswer {
-  /** Song cases: the DSP song's key; choice same (rows) · add · not_ours */
-  song?: string
-  /** LNV-twice cases: the decision key; choice duplicate/owner (keep) · different/neither */
-  key?: string
-  choice: string | null; rows?: number[]; keep?: number | null; by: 'app' | 'you' | null; why?: string
+export interface CompareItem {
+  key: string; status: 'exact' | 'possible' | 'new'; final: 'linked' | 'add' | 'hold' | 'skip' | 'pending'; hold: string; by: 'you' | 'app'; choice: string | null
+  row: number | null; also: number[]; reason: string | null; credited: boolean
+  original: { title: string; album: string; row: number | null } | null
+  muso: { key: string; title: string; album: string; albums: string[]; isrcs: string[]; own: string[]; date: string; year: string; lyricists: string[]; composers: string[]; singers: string[]; label: string; duration: string; link: string; rows: number[]; type: string; variant: boolean; medley: boolean; popularity: number }
+  candidates: CompareCandidate[]
 }
-export interface ReviewCase {
-  id: string; kind: CaseKind; title: string; why: string; tone?: string | null; isrc?: boolean; popularity?: number
-  /** step 1's merge items this song is made of: each one's recordings (ids) and answer */
-  merge: { key: string; status: 'pending' | 'accepted' | 'rejected'; by: 'app' | 'you'; items: { key: string; ids: number[]; status: string }[] } | null
-  muso: CaseRecord[]; lnv: CaseRecord[]; answer: CaseAnswer; done: boolean
-  /** Linked surely by the app, never asked: listed only under the match tabs */
-  auto?: boolean
-  /** Song cases: the LNV row an added song becomes */
-  new_row: Record<string, string | string[]> | null
-  /** Blank fields of the chosen LNV rows the DSP song fills in */
-  updates: { key: string; row: number; field: string; value: string; more: number; accept: boolean; by: 'app' | 'you' }[]
-  /** The song's versions the LNV already has, each beside its LNV row; answer: same (right) · none (not this
-   *  version – added as a new row) · null (the app's match) */
-  in_lnv?: { key: string; type: string; row: number; muso: CaseRecord; lnv: CaseRecord; isrc: boolean; album: boolean; year: boolean; answer: 'same' | 'none' | null }[]
-  /** "Same person?" cases: the two spellings and songs they keep apart */
-  names?: { a: string; b: string; songs: string[] }
-  /** A song not in the LNV that is a new recording of an LNV work: that row (named as its original in the new row);
-   *  sure – the same writers, else only a shared writer */
-  origin?: (CaseRecord & { sure: boolean }) | null
+export interface ComparePayload {
+  items: CompareItem[]; named: { row: number; title: string; original: { title: string; album: string; row: number | null } }[]
+  families: number; learned: Record<string, string>; reasons: Record<string, string>; source: string; sheet: string
+  counts: { recordings: number; exact: number; possible: number; new: number; open: number; added: number; linked: number; held: number; skipped: number; named: number; fills: number; lnv_rows: number; families: number; lnv_untouched: number; tagged_older: number }
 }
-export interface Step1 {
-  source: string
-  counts: {
-    rows: number; recordings: number; songs: number; in_lnv: number; adding: number; not_ours: number; undecided: number
-    lnv: number; lnv_only: number; cases: number; open: number; needs: number; kinds: Record<CaseKind, number>; fills: number; filled_rows: number
-    /** versions getting a row of their own · LNV version rows getting their original named */
-    versions_new: number; versions_named: number
-    /** values taken from the DSP over the LNV's own */
-    picks: number
-  }
-  /** "pick:<row>:<field>" -> the DSP value the reviewer chose over the LNV's */
-  picks: Record<string, string | string[]>
-  cases: ReviewCase[]
-  lnv_only: { row: number; title: string; film: string; year: string; writers: string[] }[]
-  /** One answer that settles many songs: a name under two spellings, a DSP name that is no writer, one company under two names */
-  wins: { key: string; kind: 'name' | 'writer' | 'publisher'; songs: number; examples: string[]; a?: string; b?: string; name?: string }[]
-}
-export interface StepDecision { choice: string; data: { keep?: number | string; row?: number; rows?: number[] }; by?: 'app' | 'you' }
 export interface Step3Line { row: number; title: string; film: string; codes: string[]; why: string[] }
 export interface Step3 {
   counts: { works: number; matched: number; review: number; review_open: number; amend: number; register: number; on_screen_amend: number; on_screen_register: number; waiting: number; iprs_only: number }
@@ -586,6 +540,6 @@ export interface StepsPayload {
     iprs: { name: string; uploaded_at: string; run: number; report_date: string | null; works: number | null } | null
   }
   run: number | null; source: string
-  counts: { '1': Step1['counts'] | null; '3': Step3['counts'] | null }
-  step: Step1 | Step3 | null
+  counts: { '1': ComparePayload['counts'] | null; '3': Step3['counts'] | null }
+  step: Step3 | null
 }

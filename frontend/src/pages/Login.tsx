@@ -90,7 +90,7 @@ export default function Login() {
           </button>
           <p className="muted small login-help">Forgot your password? Ask the super admin to reset it.</p>
         </form>
-        <footer className="login-footer">MRM-Consolidator · v{versionFile.trim()}</footer>
+        <footer className="app-footer">V{versionFile.trim()}</footer>
       </main>
     </div>
   )

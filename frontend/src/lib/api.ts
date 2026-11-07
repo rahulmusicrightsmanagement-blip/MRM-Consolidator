@@ -1,6 +1,5 @@
 import type {
-  CleanChoice, CleanPayload, ClientDetail, SongRecord, StepsPayload, ClientRef, Role, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow,
-} from '../types'
+  CleanChoice, CleanPayload, ClientDetail, SongRecord, StepsPayload, ClientRef, Role, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow, ComparePayload } from '../types'
 
 export class ApiError extends Error {
   checks?: { label: string; passed: boolean; detail: string }[]
@@ -110,6 +109,8 @@ export const api = {
   steps: (clientId: number, step: number) => request<StepsPayload>(`/api/clients/${clientId}/steps/?step=${step}`),
   /** What the three files hold for one LNV row. */
   stepRow: (clientId: number, row: number) => request<{ records: SongRecord[] }>(`/api/clients/${clientId}/steps/?row=${row}`).then((d) => d.records),
+  /** The DSP sheet against the LNV: every recording in its bucket. */
+  compare: (clientId: number) => request<{ compare: ComparePayload }>(`/api/clients/${clientId}/compare/`),
   clean: (clientId: number) => request<CleanPayload>(`/api/clients/${clientId}/clean/`),
   uploadDsp: (clientId: number, file: File) => {
     const form = new FormData()
@@ -123,8 +124,7 @@ export const api = {
   /** Every filled column of these DSP sheet rows. */
   cleanRows: (clientId: number, rows: number[]) => request<{ rows: { row: number; fields: { name: string; value: string }[] }[] }>(`/api/clients/${clientId}/clean/rows/?rows=${rows.join(',')}`),
   cleanExportUrl: (clientId: number) => `/api/clients/${clientId}/clean/export/`,
-  /** Save step 1 decisions without rebuilding the result (step 1 keeps its own state while the reviewer works). */
+  /** Save answers without rebuilding the result; the next load has them. */
   mergeSave: (clientId: number, items: CleanDecisionIn[]) => request<{ saved: number }>(`/api/clients/${clientId}/clean/decisions/`, send({ items, quiet: true })),
-  mergeExportUrl: (clientId: number) => `/api/clients/${clientId}/steps/merged/`,
   lnvUpdateUrl: (clientId: number) => `/api/clients/${clientId}/steps/lnv/`,
 }

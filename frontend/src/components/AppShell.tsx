@@ -82,7 +82,7 @@ export function AppShell({ children, trail, side }: { children: ReactNode; trail
           </nav>
         </header>
         <main className="page">{children}</main>
-        <footer className="app-footer"><b>MRM-Consolidator</b><span>Music Rights Management</span><span>·</span><span>v{VERSION}</span></footer>
+        <footer className="app-footer">V{VERSION}</footer>
       </div>
       <CommandPalette open={palette} onClose={() => setPalette(false)} />
     </div>

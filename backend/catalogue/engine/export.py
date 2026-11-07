@@ -7,7 +7,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .dataclean import person_key, phonetic, same_people, title_key
+from .dataclean import person_key, same_people, title_key
 from .iprs import SHARE_KEYS
 from .master import read_layout
 from .xlsx_patch import PatchSheet
@@ -22,8 +22,9 @@ STATUS_FILLS = {
     "review": PatternFill("solid", fgColor="DDE7F7"),
     "error": PatternFill("solid", fgColor="FADBD8"), "warning": PatternFill("solid", fgColor="FFF1CC"),
 }
-ADDED_FILL = PatternFill("solid", fgColor="D9F2E3")
-FILLED_FILL = PatternFill("solid", fgColor="FFF1CC")
+# Every change the app makes to the LNV is yellow: a filled blank, a new row, a named original
+CHANGED_FILL = PatternFill("solid", fgColor="FFFF00")
+ADDED_FILL = FILLED_FILL = CHANGED_FILL
 
 
 def _sheet(wb, title, header, rows, status_col=None, widths=None):
@@ -203,18 +204,20 @@ def _write_iprs_work(ws, layout, row, w, sn, fill, status):
         _put(ws, row, b["fields"].get("client_status"), status, fill)
 
 
-REPEAT_FILL = PatternFill("solid", fgColor="FBD9C9")
+REPEAT_FILL = CHANGED_FILL
 # Data clean fill fields -> the LNV's work field, or its contributor slots
 DSP_FIELDS = {"ISRC": "isrc", "Release year": "release_year", "Duration": "duration", "Label": "label", "Movie / album": "movie"}
 DSP_SLOTS = {"Singers": "singers", "Lyricists": "authors", "Composers": "composers"}
+
+
+ROLE_CODES = {"singers": "S", "authors": "A", "composers": "C"}
 
 
 def _put_names(ws, layout, row, group, names, fill):
     slots = layout["slots"].get(group, [])
     for n, name in enumerate(names[:len(slots)]):
         _put(ws, row, slots[n]["name"], name, fill)
-        if group == "singers":
-            _put(ws, row, slots[n]["role"], "S", fill)
+        _put(ws, row, slots[n]["role"], ROLE_CODES.get(group), fill)
     return len(names) > len(slots)
 
 
@@ -301,44 +304,44 @@ def _dsp_changes(ws, layout, dsp):
     return changes
 
 
+def _release_date(iso):
+    """'2026-08-06' -> '06-08-2026', as the LNV writes dates."""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", iso or "")
+    return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else ""
+
+
 def _write_dsp_song(ws, layout, row, song, sn, extra=None):
-    """One DSP song (or one version of it) as a new LNV row."""
+    """One recording of the DSP sheet as a new LNV row, every cell written yellow."""
     fields = layout["fields"]
     values = {"sn": sn, "title": song["title"], "isrc": (song.get("isrcs") or [""])[0], "movie": song.get("album", ""),
-              "release_year": (song.get("year") or "")[:4], "duration": song.get("duration", ""), "label": song.get("label", ""),
-              **(extra or {})}
+              "release_year": (song.get("year") or "")[:4], "release_date": _release_date(song.get("date")), "duration": song.get("duration", ""),
+              "label": song.get("label", ""), "website": song.get("link", ""), **(extra or {})}
     for field, value in values.items():
-        _put(ws, row, fields.get(field), value, ADDED_FILL)
-    _put_names(ws, layout, row, "authors", song.get("lyricists", []), ADDED_FILL)
-    _put_names(ws, layout, row, "composers", song.get("composers", []), ADDED_FILL)
-    _put_names(ws, layout, row, "singers", song.get("singers", []), ADDED_FILL)
+        _put(ws, row, fields.get(field), value, CHANGED_FILL)
+    _put_names(ws, layout, row, "authors", song.get("lyricists", []), CHANGED_FILL)
+    _put_names(ws, layout, row, "composers", song.get("composers", []), CHANGED_FILL)
+    _put_names(ws, layout, row, "singers", song.get("singers", []), CHANGED_FILL)
 
 
 ORIGINAL_COLUMNS = {"original_work": "Original Work", "original_movie": "Original Movie / Album"}
 
 
-def _original_columns(ws, layout):
-    """The columns naming a version's original work: the LNV's own, else two new ones after its last column."""
+def _original_columns(ws):
+    """The two columns naming a version's original, the LNV's own when it has them: right after Movie Name, where they
+    are seen, or after the last column if the sheet cannot make room there. Returns the layout with them in it."""
+    layout = read_layout([c.value for c in ws[1]])
     fields = layout["fields"]
-    last = max([c for c, h in enumerate(ws[1]) if clean_text(h.value)] + [-1])
-    for field, header in ORIGINAL_COLUMNS.items():
-        if field not in fields:
-            last += 1
-            fields[field] = last
-            _put(ws, 1, last, header, ADDED_FILL)
-
-
-def _version_of(v):
-    o = v["original"]
-    return f"{v['type']} of '{o['title']}'" + (f" (row {o['row']})" if o.get("row") else "")
-
-
-def _same_new_version(v, work):
-    """A version to add and an IPRS-only work to add that are one recording: an ISRC, or the whole title (version
-    tag and all) and the writers."""
-    if work.get("isrc_valid") and work["isrc_valid"] in v["isrcs"]:
-        return True
-    return phonetic(v["title"]) == phonetic(work["title"]) and _same_new_song(v, work)
+    missing = [(f, h) for f, h in ORIGINAL_COLUMNS.items() if f not in fields]
+    if not missing:
+        return layout
+    after = fields.get("movie", fields["title"]) + 1
+    if ws.insert_columns(after, len(missing)):
+        start = after
+    else:
+        start = max([c for c, h in enumerate(ws[1]) if clean_text(h.value)] + [-1]) + 1
+    for n, (_, header) in enumerate(missing):
+        _put(ws, 1, start + n, header, CHANGED_FILL)
+    return read_layout([c.value for c in ws[1]])
 
 
 def _same_new_song(song, work):
@@ -526,87 +529,63 @@ def _write_fill_row(ws, iprs_blocks, row, f):
 
 
 def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=None):
-    """The final LNV: the client's own LNV file with everything applied – the IPRS columns filled from the IPRS
-    report and the values the reviewer chose to take from IPRS (yellow), step 1's answers from the DSP export (blank
-    fields filled, yellow; repeats marked, orange), and the songs the LNV was missing appended (green): the DSP's new
-    songs and the IPRS-only works, a song that is both added once. A DSP song's versions the LNV lacks (remix, lofi …)
-    get rows of their own (VERSION "MOD") naming their original in two columns, Original Work and Original Movie /
-    Album, added after the LNV's last column. Every change is listed in "MRM changes"."""
+    """The final LNV: the client's own LNV file with everything applied, every change yellow – the IPRS columns filled
+    from the IPRS report and the values the reviewer chose to take from IPRS; from the DSP comparison
+    (reconcile.export_plan) blank fields filled, the original of each version named in two columns, Original Work and
+    Original Movie / Album, right after Movie Name, and the songs the LNV was missing added as rows: the DSP's new
+    recordings and the IPRS-only works, a song that is both added once. "MRM changes" lists every change; "Match report"
+    every DSP recording and where it ended up."""
     ws = PatchSheet(master_path)   # only the changed cells are written: a whole LNV takes openpyxl about a minute
-    layout = read_layout([c.value for c in ws[1]])
+    plan = dsp or {}
+    layout = _original_columns(ws) if plan.get("named") or plan.get("adds") else read_layout([c.value for c in ws[1]])
     iprs_blocks = [b for b in layout["blocks"] if b["society"] == "IPRS"]
     works = {w["internal_no"]: w for w in (iprs or {}).get("works", [])}
-    plan = {f["key"]: f for f in (fill or {}).get("rows", [])}
+    fills = {f["key"]: f for f in (fill or {}).get("rows", [])}
     changes = []
 
     for r in (final or {}).get("rows", []):
-        if r["origin"] == "master" and r["key"] in plan:
-            changes += _write_fill_row(ws, iprs_blocks, r["master_row"], plan[r["key"]])
+        if r["origin"] == "master" and r["key"] in fills:
+            changes += _write_fill_row(ws, iprs_blocks, r["master_row"], fills[r["key"]])
     changes += apply_master_edits(ws, layout, edits, works)
     if dsp:
         changes += _dsp_changes(ws, layout, dsp)
 
-    last = max([s for s in range(1, ws.max_row + 1) if any(ws.cell(s, c).value not in (None, "") for c in (1, 2))] + [1])
+    fields = layout["fields"]
+    for v in plan.get("named", []):
+        o = v["original"]
+        if not any(clean_text(ws.cell(v["row"], fields[f] + 1).value) for f in ORIGINAL_COLUMNS):
+            _put(ws, v["row"], fields["original_work"], o["title"], CHANGED_FILL)
+            _put(ws, v["row"], fields["original_movie"], o["album"], CHANGED_FILL)
+            changes.append([v["row"], v["title"], "Original named", f"{o['title']} · {o['album']}"])
+
+    # New rows go below every row holding anything: an LNV row can have data and no title
+    last = max(ws.max_row, 1)
     sn = last - 1
     added_works = [works[r["iprs_works"][0]] for r in (final or {}).get("added", [])]
-    iprs_rows = {}
     for r in (final or {}).get("added", []):
         w = works[r["iprs_works"][0]]
         last += 1
         sn += 1
-        iprs_rows[w["internal_no"]] = last
-        _write_iprs_work(ws, layout, last, w, sn, ADDED_FILL, "")
+        _write_iprs_work(ws, layout, last, w, sn, CHANGED_FILL, "")
         changes.append([last, w["title"], "Added song", f"Missing from master; IPRS work {w['internal_no']}"])
-        if r["key"] in plan:
-            changes += _write_fill_row(ws, iprs_blocks, last, plan[r["key"]])
-    added = {}   # song key -> its new row, for the versions naming it
-    versions = (dsp or {}).get("versions") or {}
-    if versions.get("rows") or versions.get("named") or any(s.get("origin") for s in (dsp or {}).get("adds", [])):
-        _original_columns(ws, layout)
-    for song in (dsp or {}).get("adds", []):
-        if "original" in song:   # the song's row holds its original only; each version gets a row of its own below
-            if not song["original"]:
-                continue
-            song = {**song, **song["original"]}
+        if r["key"] in fills:
+            changes += _write_fill_row(ws, iprs_blocks, last, fills[r["key"]])
+    for song in plan.get("adds", []):
         twin = next((w for w in added_works if _same_new_song(song, w)), None)
         if twin:
-            added[song["key"]] = iprs_rows[twin["internal_no"]]
             changes.append([None, song["title"], "Not added twice", f"Also new from {dsp['source']}; added once, from IPRS work {twin['internal_no']}"])
             continue
         last += 1
         sn += 1
-        added[song["key"]] = last
-        g = song.get("origin")
-        _write_dsp_song(ws, layout, last, song, sn,
-                        {"version": "MOD", "original_work": g["title"], "original_movie": g["album"], "language": g.get("language", "")} if g
-                        else {"version": "ORI"} if "original" in song else None)
-        changes.append([last, song["title"], "Added recording" if g else "Added song",
-                        (f"A new recording of '{g['title']}' (row {g['row']}); " if g else "Not in the LNV; ") + f"from {dsp['source']}"
-                        + (f" (ISRC {song['isrcs'][0]})" if song.get("isrcs") else "")])
+        o = song.get("original") or {}
+        _write_dsp_song(ws, layout, last, song, sn, {"version": "MOD" if o else "ORI", "language": o.get("language", ""),
+                                                     "original_work": o.get("title", ""), "original_movie": o.get("album", "")})
+        changes.append([last, song["title"], "Added version" if o else "Added song",
+                        (f"Of '{o['title']}'; " if o else "") + f"not in the LNV; from {dsp['source']}" + (f" (ISRC {song['isrcs'][0]})" if song.get("isrcs") else "")])
 
-    fields = layout["fields"]
-    for v in versions.get("named", []):
-        o = v["original"]
-        if not any(clean_text(ws.cell(v["row"], fields[f] + 1).value) for f in ORIGINAL_COLUMNS):
-            _put(ws, v["row"], fields["original_work"], o["title"], FILLED_FILL)
-            _put(ws, v["row"], fields["original_movie"], o["album"], FILLED_FILL)
-            changes.append([v["row"], clean_text(ws.cell(v["row"], fields["title"] + 1).value), "Original named", _version_of(v)])
-    for v in versions.get("rows", []):
-        o = v["original"]
-        twin = next((w for w in added_works if _same_new_version(v, w)), None)
-        if twin:
-            changes.append([None, v["title"], "Not added twice", f"Also new from {dsp['source']}; added once, from IPRS work {twin['internal_no']}"])
-            continue
-        last += 1
-        sn += 1
-        if o.get("add"):
-            o = {**o, "row": added.get(o["add"])}
-        _write_dsp_song(ws, layout, last, v, sn, {"version": "MOD", "language": o.get("language", ""),
-                                                  "original_work": o["title"], "original_movie": o["album"]})
-        changes.append([last, v["title"], "Added version", f"{_version_of({**v, 'original': o})}; not in the LNV; from {dsp['source']}"
-                        + (f" (ISRC {v['isrcs'][0]})" if v.get("isrcs") else "")])
-
-    return ws.save(changes, ["LNV row", "Title", "Change", "Detail"], (10, 45, 22, 90))
+    report = plan.get("report")
+    extra = [(report["name"], report["header"], report["rows"], report["widths"])] if report else ()
+    return ws.save(changes, ["LNV row", "Title", "Change", "Detail"], (10, 45, 22, 90), extra_sheets=extra)
 
 
 def step_workbook(step, result, actions=None):

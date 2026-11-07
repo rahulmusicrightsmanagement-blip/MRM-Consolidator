@@ -19,7 +19,7 @@ from django.views.decorators.gzip import gzip_page
 from django.views.decorators.http import require_http_methods
 
 from .drive import DriveError
-from .engine import dataclean, export, review, songmerge, steps
+from .engine import dataclean, export, reconcile, songmerge, steps
 from .engine.fill import fill_iprs_columns
 from .engine.verify import verify as verify_run
 from .engine.iprs import IPRSFormatError, parse_iprs
@@ -326,22 +326,23 @@ def society_summaries(client, coverage, task_counts):
     return out
 
 
-JOURNEY = ["Add the files", "Muso & LNV", "LNV vs IPRS", "Final LNV"]
+JOURNEY = ["Upload files", "Review matches", "IPRS check", "Download"]
 
 
 def _journey(client):
     """Where the client is in the consolidate flow: 1 the files · 2 the DSP export and the LNV · 3 the LNV against
-    IPRS · 4 the final LNV. A step is done when nothing in it needs a person (the counts each step stores)."""
+    IPRS, when there is an IPRS report · 4 the final LNV. A step is done when nothing in it needs a person (the counts
+    each step stores)."""
     master, dsp = _master(client), _dsp(client)
     run = next((r for r in _runs(client) if r.society == "IPRS" and r.active_files().get("iprs")), None)
     files = {"lnv": bool(master), "dsp": bool(dsp), "iprs": bool(run)}
     needs = {"2": ((dsp.summary or {}).get("flow") or {}).get("needs") if dsp else None,
              "3": (run.summary or {}).get("needs") if run else None}
-    if not all(files.values()):
+    if not (files["lnv"] and files["dsp"]):   # the IPRS report is optional
         step = 1
     elif needs["2"] is None or needs["2"] > 0:
         step = 2
-    elif needs["3"] is None or needs["3"] > 0:
+    elif run and (needs["3"] is None or needs["3"] > 0):
         step = 3
     else:
         step = 4
@@ -580,11 +581,11 @@ def client_master(request, client_id):
 # ---------------------------------------------------------------- data clean (step 1: today's LNV against one DSP sheet)
 
 # Decisions that point at rows of the LNV: they go when a new LNV arrives. Name, junk and missing-song decisions stay.
-ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:")
+ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:", "rec:")
 CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}, "name": {"same", "different"},
                  "junk": {"fix", "ok"}, "missing": {"add", "not_ours"}, "fill": {"accept", "reject"}, "link": {"same", "none"},
                  "merge": {"accepted", "rejected", "pending"}, "type": {"set"}, "version": {"same", "none"},
-                 "writer": {"ignore", "keep"}, "pub": {"same", "different"}, "pick": {"muso"}}
+                 "writer": {"ignore", "keep"}, "pub": {"same", "different"}, "pick": {"muso"}, "rec": {"same", "new", "skip", "add"}}
 # Answers about people and companies, not about one client's songs: kept once, for every client
 GLOBAL_DECISIONS = ("name:", "writer:", "pub:")
 
@@ -651,6 +652,42 @@ def _clean_result(client, decisions):
         DspFile.objects.filter(pk=dsp.pk).update(summary=summary)
         dsp.summary = summary
     return master, dsp, result
+
+
+def _compare_result(client, decisions=None):
+    """The DSP sheet against the LNV (reconcile.py): exact, possible, not found. Cached until a file or an answer changes;
+    the client list shows what is open without computing it."""
+    master, dsp = client.active_master(), client.dsp_files.order_by("-uploaded_at").first()
+    if not master or not dsp:
+        return None
+    decisions = _clean_decisions(client) if decisions is None else decisions
+    aliases, _ = dataclean.learned(decisions)
+    answers = {k: d for k, d in decisions.items() if k.startswith("rec:")}
+    stamp = (master.id, master.file.name, dsp.id, dsp.sheet, client.name, json.dumps([aliases, answers], sort_keys=True), ENGINE_VERSION)
+
+    def build():
+        parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
+        sheet = _cached(_dsp_key(dsp), lambda: dataclean.parse_dsp(dsp.file.path, dsp.sheet))
+        aside = _cached(f"master-aside-{master.id}-{ENGINE_VERSION}", lambda: reconcile.other_sheets(master.file.path))
+        with measure("processing"):
+            return reconcile.compare_all(parsed, sheet, client.name, aliases, answers, aside)
+    result = _cached(f"compare-{client.id}-{hashlib.sha1(repr(stamp).encode()).hexdigest()}", build)
+    flow = {"needs": result["counts"]["open"], "songs": result["counts"]["recordings"]}
+    if (dsp.summary or {}).get("flow") != flow:
+        dsp.summary = {**(dsp.summary or {}), "flow": flow}
+        DspFile.objects.filter(pk=dsp.pk).update(summary=dsp.summary)
+    return result
+
+
+@gzip_page
+@require_http_methods(["GET"])
+def client_compare(request, client_id):
+    """Step 2 of the flow: every recording of the DSP sheet, in its bucket."""
+    client = get_object_or_404(Client, pk=client_id)
+    try:
+        return JsonResponse({"compare": _compare_result(client)})
+    except (FileNotFoundError, DriveError) as e:
+        return JsonResponse({"error": f"A spreadsheet could not be opened: {e}"}, status=502)
 
 
 def _clean_payload(client):
@@ -772,9 +809,8 @@ def _iprs_run(client):
 @gzip_page
 @require_http_methods(["GET"])
 def client_steps(request, client_id):
-    """The consolidate flow: ?step=1 the DSP sheet and the LNV, one case per song (review.py) · 3 the LNV against the
-    IPRS report. Every answer carries the files and each step's counts; ?row=N instead returns
-    what the three files hold for that one LNV row."""
+    """The consolidate flow: every step's counts and the files; ?step=3 the LNV against the IPRS report; ?row=N instead
+    what the three files hold for that one LNV row. The DSP comparison has its own address (client_compare)."""
     client = get_object_or_404(Client, pk=client_id)
     master = client.active_master()
     run = _iprs_run(client)
@@ -790,59 +826,38 @@ def client_steps(request, client_id):
         return JsonResponse(out)
     decisions = _clean_decisions(client)
     try:
-        _, dsp, clean = _clean_result(client, decisions)
+        compared = _compare_result(client, decisions)
         result = compute(run) if run else None
         parsed = result["master"] if result and result.get("master") else _cached(
             f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
-        sheet, merge = _dsp_sheet(dsp) if dsp else (None, None)
     except (FileNotFoundError, DriveError) as e:
         return JsonResponse({"error": f"A spreadsheet could not be opened: {e}"}, status=502)
     if request.GET.get("row"):
-        return JsonResponse({"records": steps.records_for_row(parsed, clean, result, int(request.GET["row"]), out["source"])})
+        linked = {"matched": [{"song": i["muso"], "links": [{"row": i["row"]}]} for i in (compared or {}).get("items", []) if i["row"]]}
+        return JsonResponse({"records": steps.records_for_row(parsed, linked, result, int(request.GET["row"]), out["source"])})
     built = {}
-    if clean:
-        built["1"] = review.build(sheet, merge, decisions, clean, parsed)
-        flow = {"needs": built["1"]["counts"]["needs"], "songs": built["1"]["counts"]["songs"]}
-        if (dsp.summary or {}).get("flow") != flow:   # the client list shows where the client is without computing
-            dsp.summary = {**(dsp.summary or {}), "flow": flow}
-            DspFile.objects.filter(pk=dsp.pk).update(summary=dsp.summary)
     if result and result.get("tunecodes"):
         aliases, _ = dataclean.learned(decisions)
         people = dataclean.People(aliases, dataclean._client_keys(parsed["songs"], client.name), dataclean.rules_of(decisions))
         built["3"] = steps.step3(parsed, result, _decisions(run), _not_our_work(client), people, fill_plan(run, result)["summary"])
         files["iprs"]["works"] = result["iprs"]["stats"]["works"]
-    out["counts"] = {k: (built[k]["counts"] if k in built else None) for k in ("1", "3")}
+    out["counts"] = {"1": compared["counts"] if compared else None, "3": built["3"]["counts"] if "3" in built else None}
     out["step"] = built.get(request.GET.get("step", ""))
     return JsonResponse(out)
 
 
 def lnv_update_export(request, client_id):
-    """The final LNV: the client's LNV with step 1's answers (the reviewer's, else the app's) and – once the IPRS
-    report is in – step 2's: IPRS codes and statuses, the IPRS-only works, the values taken from IPRS. One file."""
+    """The final LNV: the client's LNV with the DSP comparison written in (reconcile.export_plan) and – once the IPRS report
+    is in – step 3's: IPRS codes and statuses, the IPRS-only works, the values taken from IPRS. One file."""
     client = get_object_or_404(Client, pk=client_id)
-    decisions = _clean_decisions(client)
-    master, dsp, clean = _clean_result(client, decisions)
+    master = client.active_master()
     if not master:
         return JsonResponse({"error": "Upload the LNV master first"}, status=409)
-    dsp_part = None
-    if clean:
-        choice = lambda item: (item.get("decision") or {}).get("choice")
-        dsp_part = {
-            "fills": [f for f in clean["fills"] if choice(f) == "accept"],
-            "adds": [m for m in clean["missing"] if choice(m) == "add"],
-            "repeats": [{"row": r["row"], "keep": d["data"]["keep"]} for c in clean["duplicates"] for d in [c.get("decision") or {}]
-                        if d.get("choice") == "duplicate" and not d.get("auto") and (d.get("data") or {}).get("keep")
-                        for r in c["rows"] if r["row"] != d["data"]["keep"]],
-            # the values the reviewer took from the DSP over the LNV's own: "pick:<row>:<field>" = muso, data.value
-            "picks": [{"row": int(k.split(":")[1]), "field": k.split(":", 2)[2], "value": (d.get("data") or {}).get("value")}
-                      for k, d in decisions.items() if k.startswith("pick:") and d.get("choice") == "muso"],
-            "source": dsp.source}
     run = _iprs_run(client)
-    result = compute(run) if run else None
     try:
-        if dsp_part:   # each version of a song the LNV lacks gets a row of its own
-            parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
-            dsp_part["versions"] = dataclean.lnv_versions(clean, parsed["songs"])
+        compared = _compare_result(client)
+        dsp_part = reconcile.export_plan(compared) if compared else None
+        result = compute(run) if run else None
         if result and result.get("final"):
             content = export.final_report(master.file.path, result["iprs"], result["final"], _master_edits(client),
                                           fill_plan(run, result), dsp_part)
