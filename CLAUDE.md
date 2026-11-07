@@ -7,7 +7,7 @@ Backend tests: `cd backend && ../.venv/bin/python manage.py test catalogue` (use
 
 ## Versioning – do this after every change
 
-The app version is in `VERSION` (single source; the footer shows it as "MRM-Consolidator … vX.Y.Z").
+The app version is in `VERSION` (single source; the footer shows it as "VX.Y.Z" in the bottom right corner).
 At the end of every task that changes the app's code or behaviour, bump it once with:
 
 ```

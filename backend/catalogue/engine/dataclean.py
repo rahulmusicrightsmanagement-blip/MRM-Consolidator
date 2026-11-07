@@ -1023,49 +1023,6 @@ def _song_brief(s):
             "base": s["base"], "original": s["original"], "parts": s["parts"], "origin": s.get("origin")}
 
 
-def lnv_versions(result, master_songs):
-    """What the answers add to the LNV beside the songs themselves. A song in the LNV (or added to it) keeps its
-    original on its own row; each of its versions the LNV does not have becomes a row of its own naming the original
-    work and its film / album ("rows"), and LNV rows that already are one of its versions get that name too ("named").
-    A version row added for a song the LNV does not have names the song's added row ("add": the song's key)."""
-    by_row = {s["row"]: s for s in master_songs}
-    choice = lambda item: (item.get("decision") or {}).get("choice")
-    homes = [(m["song"], [l["row"] for l in m["links"]]) for m in result["matched"]]
-    homes += [(c["song"], (c["decision"].get("data") or {}).get("rows", [])) for c in result["check"] if choice(c) == "same"]
-    homes += [(m, None) for m in result["missing"] if choice(m) == "add"]
-    rows, named, seen = [], [], set()
-    for song, links in homes:
-        if not song.get("parts"):
-            continue
-        taken = {p["lnv_row"] for p in song["parts"] if p["lnv_row"]}
-        if links is None and song.get("origin"):   # added, a new recording of an LNV work: that row is the original
-            g = song["origin"]
-            original = {"title": g["title"], "album": g["album"], "row": g["row"], "add": None, "language": g.get("language", "")}
-        elif links is None:   # added: the original is the song's new row – or, with no original on the DSP, unnamed
-            o = song.get("original") or {}
-            original = {"title": o.get("title") or song["base"], "album": o.get("album", ""), "row": None,
-                        "add": song["key"] if o else None, "language": ""}
-        else:
-            home = next((by_row[r] for r in links if r not in taken and r in by_row), None) \
-                or next((by_row[r] for r in links if r in by_row), None)
-            if not home:
-                continue
-            original = {"title": home["title"], "album": home.get("movie", ""), "row": home["row"], "add": None,
-                        "language": home.get("language", "")}
-        for p in song["parts"]:
-            if p["lnv_row"]:   # an LNV row with a plain title that holds the version's ISRC is not named a version
-                if p["lnv_row"] != original["row"] and p["lnv_row"] in by_row \
-                        and (p["type"] == REISSUE or version_type(by_row[p["lnv_row"]]["title"]) != ORIGINAL):
-                    named.append({"row": p["lnv_row"], "type": p["type"], "original": original})
-                continue
-            # one recording on two DSP songs (an ISRC conflict kept apart) is added once
-            if seen & set(p["isrcs"]):
-                continue
-            seen.update(p["isrcs"])
-            rows.append({**p, "lyricists": song["lyricists"], "composers": song["composers"], "original": original})
-    return {"rows": rows, "named": named}
-
-
 def _filled(l):
     s = l["song"]
     return (bool(l["isrcs"]) * 2 + bool(l["has_writers"]) * 2 + sum(l["codes"].values()) * 2

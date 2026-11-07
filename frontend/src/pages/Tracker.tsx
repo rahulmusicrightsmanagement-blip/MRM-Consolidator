@@ -1,79 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AlertTriangle, CalendarDays, CheckCircle2, ChevronRight, RefreshCw, Trash2, UserPlus, Users } from 'lucide-react'
+import { AlertTriangle, CalendarDays, ChevronRight, RefreshCw, Trash2, UserPlus, Users } from 'lucide-react'
 import type { CSSProperties } from 'react'
 import { AppShell } from '../components/AppShell'
 import { Button, ConfirmDialog, DataTable, Empty } from '../components/ui'
-import type { Filter } from '../components/ui'
 import { api } from '../lib/api'
-import { fmtDate, pct, today } from '../lib/client'
+import { fmtDate, today } from '../lib/client'
 import { useToast } from '../lib/toast'
-import type { ClientMetrics, ClientRow, SocietySummary } from '../types'
+import type { ClientMetrics, ClientRow } from '../types'
 
 /** The consolidate flow every client goes through, one step after the other. */
-export const STAGES = ['Add the files', 'Muso & LNV', 'LNV vs IPRS', 'Final LNV']
+export const STAGES = ['Upload files', 'Review matches', 'IPRS check', 'Download']
 const at = (c: ClientMetrics) => (c.journey?.step ?? 1) - 1
 
 /** What still needs a person in the client's current step, in a few words. */
 export function journeyNote(j?: ClientMetrics['journey']) {
   if (!j) return ''
-  if (j.step === 1) return [!j.files.lnv && 'the LNV', !j.files.dsp && `the ${j.source} export`, !j.files.iprs && 'the IPRS report'].filter(Boolean).join(', ').replace(/^/, 'Needs ')
+  if (j.step === 1) return [!j.files.lnv && 'the LNV', !j.files.dsp && `the ${j.source} export`].filter(Boolean).join(' and ').replace(/^/, 'Needs ')
   const n = j.needs[String(j.step) as '2' | '3']
   if (j.step === 4) return 'Ready to download'
-  return n == null ? 'Not opened yet' : `${n.toLocaleString('en-IN')} need you`
-}
-
-export function StageDots({ journey }: { journey?: ClientMetrics['journey'] }) {
-  const n = (journey?.step ?? 1) - 1
-  return (
-    <div className="stage-cell" title={STAGES[n]}>
-      <span className="stage-dots" aria-hidden>
-        {[0, 1, 2, 3].map((i) => <span key={i} className={i <= n ? (n === 3 ? 'on done' : 'on') : ''} />)}
-      </span>
-      <span className={`stage-label s${n}`}>Step {n + 1} of 4 · {STAGES[n]}</span>
-    </div>
-  )
-}
-
-/** One society for one client: status, step, and a bar of registered / to amend / to register. */
-export function SocietyCell({ s, code }: { s?: SocietySummary; code?: string }) {
-  if (!s) return <div className="soc-mini empty"><span className="soc-code">{code}</span><span className="small muted">Not added</span></div>
-  const c = s.coverage
-  const amend = c?.statuses.needs_amend ?? 0   // as step 3 counts them
-  const register = c?.statuses.not_registered ?? 0
-  return (
-    <div className={`soc-mini ${s.status}`}>
-      <div className="soc-mini-head">
-        <span className="soc-code">{s.code}</span>
-        <span className={`soc-state ${s.status}`}>
-          {s.status === 'completed' ? <><CheckCircle2 size={12} />Done</> : c ? 'Checked' : 'Not started'}
-        </span>
-      </div>
-      {c ? <>
-        <span className="soc-bar" title={`${c.registered} registered · ${amend} to amend · ${register} to register (of ${c.total})`}>
-          <i className="good" style={{ flexGrow: c.registered }} />
-          <i className="warn" style={{ flexGrow: amend }} />
-          <i className="bad" style={{ flexGrow: register }} />
-        </span>
-        <span className="soc-nums"><b>{pct(c.registered, c.total)}%</b>
-          {amend > 0 && <span className="t-warn">{amend} amend</span>}
-          {register > 0 && <span className="t-bad">{register} register</span>}</span>
-      </> : <span className="small muted">Not checked yet</span>}
-    </div>
-  )
+  return n == null ? 'Not opened yet' : `${n.toLocaleString('en-IN')} to review`
 }
 
 export const initials = (name: string) => name.split(/\s+/).filter(Boolean).map((p) => p[0]).slice(0, 2).join('').toUpperCase()
 /** A steady hue per name, so each client keeps its avatar colour. */
 export const hue = (name: string) => [...name].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) % 360, 7)
 const daysUntil = (d: string) => Math.round((new Date(d + 'T00:00:00').getTime() - new Date(today() + 'T00:00:00').getTime()) / 86400000)
-
-function ago(d?: string | null) {
-  if (!d) return 'No report'
-  const n = -daysUntil(d.slice(0, 10))
-  return n <= 0 ? 'Today' : n === 1 ? 'Yesterday' : n < 30 ? `${n} days ago` : fmtDate(d)
-}
-
 
 function InlineOwner({ value, onSave }: { value: string; onSave: (v: string) => void }) {
   const [v, setV] = useState(value)
@@ -111,7 +63,6 @@ let lastClients: ClientRow[] | null = null
 export default function Tracker() {
   const [clients, setClients] = useState<ClientRow[] | null>(lastClients)
   const [error, setError] = useState<string | null>(null)
-  const [stage, setStage] = useState<number | null>(null)
   const [ask, setAsk] = useState<ClientRow | null>(null)
   const navigate = useNavigate()
   const toast = useToast()
@@ -129,44 +80,19 @@ export default function Tracker() {
     toast('Saved', 'good')
   }
 
-  const stats = useMemo(() => {
-    const list = clients ?? []
-    return {
-      total: list.length,
-      works: list.reduce((n, c) => n + c.works, 0),
-      overdue: list.filter((c) => c.due_date && c.due_date < today() && at(c) < 3).length,
-      byStage: STAGES.map((_, i) => list.filter((c) => at(c) === i).length),
-    }
-  }, [clients])
-
-  const rows = (clients ?? []).filter((c) => stage === null || at(c) === stage)
-  const societyCodes = [...new Set((clients ?? []).flatMap((c) => c.societies.map((s) => s.code)))]
-  const owners = [...new Set((clients ?? []).map((c) => c.owner).filter(Boolean))]
-  const filters: Filter<ClientRow>[] = [
-    { label: 'Owner', options: [...owners.map((o) => ({ id: o, label: o })), { id: '__none', label: 'Unassigned' }], test: (c, v) => v === '__none' ? !c.owner : c.owner === v },
-    { label: 'Due', options: [{ id: 'overdue', label: 'Overdue' }, { id: 'none', label: 'No due date' }], test: (c, v) =>
-      v === 'none' ? !c.due_date : (!!c.due_date && c.due_date < today() && at(c) < 3) },
-  ]
+  const overdue = useMemo(() => (clients ?? []).filter((c) => c.due_date && c.due_date < today() && at(c) < 3).length, [clients])
+  const rows = clients ?? []
 
   return (
     <AppShell>
       <header className="page-header">
         <div><h1>Clients</h1>
-          <p className="lede">{loading ? 'Loading…' : <>{stats.total} client{stats.total === 1 ? '' : 's'} · {stats.works.toLocaleString()} works
-            {stats.overdue > 0 && <> · <span className="t-bad">{stats.overdue} overdue</span></>}</>}</p></div>
+          <p className="lede">{loading ? 'Loading…' : <>{rows.length} client{rows.length === 1 ? '' : 's'}
+            {overdue > 0 && <> · <span className="t-bad">{overdue} overdue</span></>}</>}</p></div>
         <div className="page-actions"><Button variant="primary" icon={<UserPlus size={15} />} onClick={() => navigate('/clients/new')}>Add client</Button></div>
       </header>
 
       <section className="card flush tracker">
-        <div className="tracker-tabs" role="tablist" aria-label="Stage">
-          <button type="button" role="tab" aria-selected={stage === null} className={stage === null ? 'active' : ''} onClick={() => setStage(null)}>
-            All<span className="tab-count">{loading ? '…' : stats.total}</span></button>
-          {STAGES.map((label, i) => (
-            <button key={label} type="button" role="tab" aria-selected={stage === i} className={stage === i ? 'active' : ''} onClick={() => setStage(stage === i ? null : i)}>
-              <span className={`stage-pip p${i}`} />{label}<span className="tab-count">{loading ? '…' : stats.byStage[i]}</span>
-            </button>
-          ))}
-        </div>
         {loading ? (error ? (
           <Empty icon={<AlertTriangle size={22} />} title="Could not load the clients"
             action={<Button icon={<RefreshCw size={14} />} onClick={load}>Try again</Button>}>{error}</Empty>
@@ -174,12 +100,12 @@ export default function Tracker() {
           <div className="loading"><span className="spinner" />Loading clients…</div>
         )) : clients.length === 0 ? (
           <Empty icon={<Users size={22} />} title="No clients yet" action={<Button variant="primary" onClick={() => navigate('/clients/new')}>Add the first client</Button>}>
-            Add a client with its three files – the LNV, the Muso export and the IPRS report – then go through the four steps.
+            Add a client, upload the LNV and the Muso export, review the possible matches, download the updated LNV.
           </Empty>
         ) : (
-          <DataTable<ClientRow> rows={rows} rowKey={(c) => String(c.id)} filters={filters}
+          <DataTable<ClientRow> rows={rows} rowKey={(c) => String(c.id)} 
             search={(c) => `${c.name} ${c.ipi} ${c.owner}`} onRowClick={(c) => navigate(`/clients/${c.id}`)}
-            empty="No clients at this stage."
+            empty="No clients match."
             columns={[
               { key: 'client', header: 'Client', sort: (c) => c.name, render: (c) => (
                 <div className="client-cell">
@@ -188,23 +114,12 @@ export default function Tracker() {
                     <span className="client-sub"><span>{c.works.toLocaleString()} works</span><span className="mono">IPI {c.ipi || '—'}</span></span></div>
                 </div>
               ) },
-              { key: 'progress', header: 'Where it is', sort: (c) => at(c) * 100000 - (c.journey.needs[String(at(c) + 1) as '2'] ?? 0), render: (c) => (
-                <div className="progress-cell"><span className={`journey-n p${at(c)}`}>{at(c) + 1}</span>
-                  <div><span className={`stage-name p${at(c)}`}>{STAGES[at(c)]}</span>
-                    <span className="stage-steps" aria-hidden>{[0, 1, 2, 3].map((i) => <i key={i} className={i <= at(c) ? 'on' : ''} />)}</span>
-                    <span className="journey-note">{journeyNote(c.journey)}</span></div>
-                </div>
-              ) },
-              { key: 'societies', header: 'Societies', render: (c) => (
-                <div className="soc-row">{societyCodes.map((code) => <SocietyCell key={code} code={code} s={c.societies.find((s) => s.code === code)} />)}</div>
+              { key: 'progress', header: 'Next step', sort: (c) => at(c) * 100000 - (c.journey.needs[String(at(c) + 1) as '2'] ?? 0), render: (c) => (
+                <div className="next-cell"><b>{STAGES[at(c)]}</b><span className="muted">{journeyNote(c.journey)}</span></div>
               ) },
               { key: 'owner', header: 'Owner', sort: (c) => c.owner || '~', render: (c) => <InlineOwner value={c.owner} onSave={(v) => patch(c, { owner: v })} /> },
               { key: 'due', header: 'Due', sort: (c) => c.due_date ?? '9999', render: (c) => (
                 <DuePill value={c.due_date ?? null} done={at(c) >= 3} onSave={(v) => patch(c, { due_date: v })} />
-              ) },
-              { key: 'report', header: 'Last report', sort: (c) => c.latest_report?.report_date ?? '', render: (c) => (
-                <div className="report-cell"><span title={fmtDate(c.latest_report?.report_date)}>{ago(c.latest_report?.report_date)}</span>
-                  <span className="muted">{c.report_count} report{c.report_count === 1 ? '' : 's'}</span></div>
               ) },
               { key: 'actions', header: '', render: (c) => (
                 <div className="row-actions">

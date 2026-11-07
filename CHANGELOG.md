@@ -1,5 +1,9 @@
 # MRM changelog
 
+<<<<<<< HEAD
+## 1.0.0 – 2026-11-05 (major)
+- New three-bucket Muso vs LNV comparison (exact, possible, not found) using the oldest release as the original; Original Work and Original Movie / Album columns next to Movie Name; every change in the output highlighted yellow; simpler Upload, Review, Download screens; version shown bottom right
+
 ## 0.40.1 – 2026-11-03 (patch)
 - Saved is now its own tab above the list: every saved answer (yours and the app's), what it puts into the LNV, filters, search, Open and Undo
 
@@ -119,6 +123,10 @@
 
 ## 0.16.3 – 2026-10-24 (patch)
 - Much faster matching for big catalogues (Laxmikant: ~7.5 min → ~23 s): master index for codes and titles, cached name clean-up; results unchanged
+=======
+## 2.0.1 – 2026-11-04 (major)
+- Project handed over to SK
+>>>>>>> e3c1eaf30f81765596ee4ce38adbfb1350a39132
 
 ## 0.16.2 – 2026-10-24 (patch)
 - Removed unused files and old code; all spreadsheet types (xlsx, csv, ods …) kept out of git

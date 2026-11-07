@@ -5,13 +5,11 @@ services:
   mrm:
     build:
       context: .
-      # Use this computer's network while building (avoids DNS/timeout problems downloading packages).
-      network: host
     image: mrm-consolidator:latest
     container_name: mrm-consolidator
     restart: unless-stopped
     ports:
-      - "${MRM_PORT:-8010}:8010"
+      - "${MRM_PORT:-8085}:8010"
     env_file:
       - path: .env
         required: false

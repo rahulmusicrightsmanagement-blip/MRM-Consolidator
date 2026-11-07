@@ -1034,46 +1034,251 @@ class DataCleanEngineTests(TestCase):
         r = self._match({"link:INXY12300011": {"choice": "same", "data": {"rows": [3]}}})
         self.assertEqual([(l["row"], l.get("confirmed")) for m in r["matched"] if m["key"] == "link:INXY12300011" for l in m["links"]], [(3, True)])
 
-    def test_versions_get_rows_of_their_own(self):
-        from openpyxl import load_workbook
-        from .engine import dataclean, export
-        r = self._match()
-        song = next(m for m in r["matched"] if m["song"]["title"] == "Pyaar Ka Geet")["song"]
-        # The original is the song's LNV row; the lofi is a version of it, with its own recording
-        self.assertEqual(song["original"]["isrcs"], ["INXY12300011"])
-        self.assertEqual([(p["type"], p["isrcs"], p["lnv_row"]) for p in song["parts"]], [("Lofi", ["INXY12300010"], None)])
-        self.assertNotIn("INXY12300010", [f["value"] for f in r["fills"]])   # a version's ISRC never fills the original's row
-        plan = dataclean.lnv_versions(r, self.master["songs"])
-        self.assertEqual([(v["title"], v["original"]["title"], v["original"]["album"], v["original"]["row"]) for v in plan["rows"]],
-                         [("Pyaar Ka Geet - Lofi Flip", "Pyaar Ka Geet", "Film A", 2)])
-        out = f"{self.tmp}/final.xlsx"
-        with open(out, "wb") as f:
-            f.write(export.final_report(f"{self.tmp}/lnv.xlsx", dsp={"fills": [], "adds": [], "repeats": [], "source": "Muso", "versions": plan}))
-        rows = [list(x) for x in load_workbook(out).active.iter_rows(values_only=True)]
-        head = rows[0]
-        added = next(x for x in rows if x[1] == "Pyaar Ka Geet - Lofi Flip")
-        self.assertEqual((added[head.index("ISRC")], added[head.index("Original Work")], added[head.index("Original Movie / Album")]),
-                         ("INXY12300010", "Pyaar Ka Geet", "Film A"))
-        # An LNV row that already is the version is linked to it, named, and never added again
-        lnv = f"{self.tmp}/lnv_lofi.xlsx"
-        _lnv_file(lnv, LNV_ROWS + [("Pyaar Ka Geet Lofi", None, "Lofi Hits", "Ravi Kumar Verma", "Anand Bakshi")])
+
+class ReconcileRuleTests(TestCase):
+    """The team's rule, one recording against the LNV: exact, possible, not found; the oldest release is the original."""
+
+    def run_on(self, lnv_rows, muso_rows, decisions=None, aside=None):
+        from .engine import reconcile
+        from .engine.dataclean import parse_dsp
         from .engine.master import parse_master
-        master = parse_master(lnv)
-        from .engine.songmerge import analyse, songs
-        merge = analyse(self.dsp["rows"])
-        groups = songs(merge, {f"merge:{k}": {"choice": "accepted"} for k in merge["items"]})
-        r = dataclean.apply_decisions(dataclean.match(master, self.dsp, CLIENT, groups=groups), {})
-        song = next(m for m in r["matched"] if m["song"]["title"] == "Pyaar Ka Geet")
-        self.assertEqual(sorted(l["row"] for l in song["links"]), [2, 3])
-        plan = dataclean.lnv_versions(r, master["songs"])
-        self.assertEqual((plan["rows"], [(v["row"], v["original"]["row"]) for v in plan["named"]]), ([], [(7, 2)]))
-        self.assertNotIn(7, [c["row"] for c in song["song"]["near"]])   # never offered as the song itself
-        # The reviewer says row 7 is not this version: it is added as a new row, and row 7 is left as it is
-        decisions = {"version:INXY12300010": {"choice": "none", "data": {"rows": [7]}}}
-        aliases, links = dataclean.learned(decisions)
-        r = dataclean.apply_decisions(dataclean.match(master, self.dsp, CLIENT, aliases, links, groups), decisions)
-        plan = dataclean.lnv_versions(r, master["songs"])
-        self.assertEqual(([v["title"] for v in plan["rows"]], plan["named"]), (["Pyaar Ka Geet - Lofi Flip"], []))
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        _lnv_file(f"{tmp}/lnv.xlsx", lnv_rows)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Muso Credits"
+        ws.append(["Type of Object", "Name of the Song / Title", "Name of the Album", "ISRC", "Song Release Date", "Singer", "Lyricist", "Composer", "Music Label",
+                   "Duration (mm:ss)", "Song Link", "Popularity (0-100)", "Muso Track ID"])
+        for n, (title, album, isrc, date, lyricist, composer) in enumerate(muso_rows):
+            ws.append(["Album", title, album, isrc, date, "A Singer", lyricist, composer, "Label", "4:21", "", 10, f"m{n}"])
+        wb.save(f"{tmp}/muso.xlsx")
+        out = reconcile.compare_all(parse_master(f"{tmp}/lnv.xlsx"), parse_dsp(f"{tmp}/muso.xlsx"), CLIENT, decisions=decisions, set_aside=aside)
+        return out, {i["muso"]["title"]: i for i in out["items"]}
+
+    W = ("Ravi Kumar Verma", "Anand Bakshi")   # LNV composer, author
+    S1 = ("S One", "INAA10000001", "Film One", *W)
+
+    def test_exact_needs_all_four(self):
+        _, got = self.run_on([self.S1], [("S One", "Film One", "INAA10000001", "1990-01-01", "Anand Bakshi", "Ravi Kumar Verma")])
+        self.assertEqual((got["S One"]["status"], got["S One"]["row"], got["S One"]["final"]), ("exact", 2, "linked"))
+
+    def test_spelling_and_soundtrack_notes_do_not_break_an_exact_match(self):
+        _, got = self.run_on([("Hamdard", "INAA10000001", "Hate Story 4", "Ravi Kumar Verma (Ravi)", "Amitabh Verma")],
+                             [('Humdard (From "Hate Story IV")', 'Humdard (From "Hate Story IV")', "INAA10000001", "2018-01-01", "Amitabh Varma", "Ravi Verma")])
+        self.assertEqual(got['Humdard (From "Hate Story IV")']["status"], "exact")
+
+    def test_possible_when_credits_differ_a_little(self):
+        _, got = self.run_on([self.S1], [("S One", "Film One", "INAA10000001", "1990-01-01", "Anand Bakshi, Gulzar", "Ravi Kumar Verma")])
+        i = got["S One"]
+        self.assertEqual((i["status"], i["reason"], i["final"], i["row"]), ("possible", "credits", "pending", None))
+        self.assertEqual(i["candidates"][0]["only_muso"], ["Gulzar"])
+
+    def test_possible_when_the_isrc_differs_or_is_missing(self):
+        _, got = self.run_on([self.S1], [("S One", "Film One", "INZZ10000009", "1990-01-01", "Anand Bakshi", "Ravi Kumar Verma")])
+        self.assertEqual((got["S One"]["status"], got["S One"]["reason"]), ("possible", "isrc"))
+        _, got = self.run_on([("S One", None, "Film One", *self.W)], [("S One", "Film One", "INAA10000001", "1990-01-01", "Anand Bakshi", "Ravi Kumar Verma")])
+        self.assertEqual((got["S One"]["status"], got["S One"]["reason"]), ("possible", "isrc_blank"))
+
+    def test_possible_when_title_and_album_only(self):
+        _, got = self.run_on([("S One", None, "Film One", "Ravi Kumar Verma", "Gulzar")], [("S One", "Film One", "INAA10000001", "1990-01-01", "Sameer", "Ravi Kumar Verma")])
+        self.assertEqual((got["S One"]["status"], got["S One"]["reason"]), ("possible", "isrc_blank_credits"))
+
+    def test_not_found_when_nothing_lines_up(self):
+        _, got = self.run_on([self.S1], [("Other Song", "Other Film", "INZZ10000009", "2001-01-01", "Gulzar", "Ravi Kumar Verma")])
+        self.assertEqual((got["Other Song"]["status"], got["Other Song"]["final"], got["Other Song"]["original"]), ("new", "add", None))
+
+    def test_a_row_another_recording_holds_by_isrc_is_not_offered(self):
+        muso = [("S One", "Film One", "INAA10000001", "1990-01-01", "Anand Bakshi", "Ravi Kumar Verma"),
+                ("S One", "Film One Deluxe", "INZZ10000009", "2010-01-01", "Anand Bakshi", "Ravi Kumar Verma")]
+        out, _ = self.run_on([self.S1], muso)
+        by = {i["key"]: i for i in out["items"]}
+        self.assertEqual((by["INAA10000001"]["status"], by["INZZ10000009"]["status"]), ("exact", "new"))
+
+    def test_the_oldest_release_is_the_original_and_versions_name_it(self):
+        muso = [("S One - Remix", "Remix Hits", "INAA10000003", "2020-01-01", "Anand Bakshi", "Ravi Kumar Verma"),
+                ("S One - Lofi", "S One - Lofi", "INAA10000002", "1995-01-01", "Anand Bakshi", "Ravi Kumar Verma"),
+                ("S One", "Best Of", "INAA10000004", "2005-01-01", "Anand Bakshi", "Ravi Kumar Verma"),
+                ("S One", "Film One", "INAA10000001", "1990-01-01", "Anand Bakshi", "Ravi Kumar Verma")]
+        lnv = [self.S1, ("S One - Remix", "INAA10000003", "Film One", *self.W)]
+        out, _ = self.run_on(lnv, muso)
+        by = {i["key"]: i for i in out["items"]}
+        self.assertIsNone(by["INAA10000001"]["original"])   # the 1990 release
+        want = {"title": "S One", "album": "Film One"}
+        for key in ("INAA10000002", "INAA10000003", "INAA10000004"):
+            self.assertEqual({k: by[key]["original"][k] for k in want}, want, key)
+        # The remix is in the LNV (exact, its album is the film through the original), the lofi and the re-release are new rows
+        self.assertEqual((by["INAA10000003"]["status"], by["INAA10000002"]["status"], by["INAA10000004"]["status"]), ("exact", "new", "new"))
+        self.assertEqual([(n["row"], n["original"]["title"], n["original"]["album"]) for n in out["named"]], [(3, "S One", "Film One")])
+
+    def test_a_cover_with_a_stray_early_date_is_not_the_original(self):
+        muso = [("S One", "Cover Hits", "INZZ10000009", "1980-01-01", "Anand Bakshi", "Ravi Kumar Verma"),
+                ("S One", "Film One", "INAA10000001", "1990-01-01", "Anand Bakshi", "Ravi Kumar Verma")]
+        out, _ = self.run_on([self.S1], muso)
+        self.assertEqual({i["key"]: (i["original"] or {}).get("album") for i in out["items"]}, {"INZZ10000009": "Film One", "INAA10000001": None})
+
+    def test_one_row_with_several_isrcs_does_not_join_its_versions(self):
+        muso = [("Baarish", "Yaariyan", "INAA10000001, INAA10000002", "2014-01-01", "Anand Bakshi", "Ravi Kumar Verma"),
+                ("Baarish - Remix", "Yaariyan", "INAA10000002", "2014-01-01", "Anand Bakshi", "Ravi Kumar Verma")]
+        lnv = [("Baarish", "INAA10000001", "Yaariyan", *self.W), ("Baarish - Remix", "INAA10000002", "Yaariyan", *self.W)]
+        _, got = self.run_on(lnv, muso)
+        self.assertEqual((got["Baarish"]["row"], got["Baarish - Remix"]["row"]), (2, 3))
+
+    def test_an_isrc_the_lnv_holds_never_becomes_a_new_row(self):
+        muso = [("Javeda Zindagi", "Anwar", "INAA10000001", "2007-01-01", "Anand Bakshi", "Ravi Kumar Verma"),
+                ("Javeda Zindag", "Anwar Deluxe", "INAA10000001", "2008-01-01", "Anand Bakshi", "Ravi Kumar Verma")]
+        out, _ = self.run_on([("Javeda Zindagi", "INAA10000001", "Anwar", *self.W)], muso)
+        self.assertEqual({i["status"] for i in out["items"]} & {"new"}, set())
+
+    def test_two_versions_on_one_isrc_is_not_exact(self):
+        _, got = self.run_on([("Baarish - Bengali Version", "INAA10000001", "Yaariyan", *self.W)],
+                             [("Baarish - Remix", "Yaariyan", "INAA10000001", "2014-01-01", "Anand Bakshi", "Ravi Kumar Verma")])
+        self.assertEqual((got["Baarish - Remix"]["status"], got["Baarish - Remix"]["reason"]), ("possible", "title"))
+        # one side naming the version, or a tag that is only the film, is the same recording
+        _, got = self.run_on([("Baarish - Bengali Version", "INAA10000001", "Yaariyan", *self.W)],
+                             [("Baarish", "Yaariyan", "INAA10000001", "2014-01-01", "Anand Bakshi", "Ravi Kumar Verma")])
+        self.assertEqual(got["Baarish"]["status"], "exact")
+
+    def test_rhyming_names_stay_two_people(self):
+        from .engine.reconcile import same_name
+        from .engine.dataclean import person_key
+        self.assertFalse(same_name(person_key("Sajid Khan"), person_key("Wajid Khan")))
+        self.assertTrue(same_name(person_key("Amitabh Varma"), person_key("Amitabh Verma")))
+        self.assertTrue(same_name(person_key("Roopkumar Rathod"), person_key("Roop Kumar Rathod")))
+
+    def test_stage_names_are_learned_from_shared_isrcs(self):
+        lnv = [("Song A", "INAA10000001", "Film", "Ravi Kumar Verma", "Rakhi Singh Gupta"), ("Song B", "INAA10000002", "Film", "Ravi Kumar Verma", "Rakhi Singh Gupta"),
+               ("Song C", None, "Film", "Ravi Kumar Verma", "Gulzar"), ("Song D", None, "Film", "Ravi Kumar Verma", "Sameer"), ("Song E", None, "Film", "Ravi Kumar Verma", "Javed")]
+        muso = [("Song A", "Film", "INAA10000001", "2000-01-01", "Turaz", "Ravi Kumar Verma"), ("Song B", "Film", "INAA10000002", "2000-01-01", "Turaz", "Ravi Kumar Verma")]
+        _, got = self.run_on(lnv, muso)
+        self.assertEqual((got["Song A"]["status"], got["Song B"]["status"]), ("exact", "exact"))
+
+    def test_one_shared_isrc_is_not_enough_to_learn_a_name(self):
+        _, got = self.run_on([("Song A", "INAA10000001", "Film", "Ravi Kumar Verma", "Rakhi Singh Gupta"), ("Song C", None, "Film", "Ravi Kumar Verma", "Gulzar"), ("Song D", None, "Film", "Ravi Kumar Verma", "Sameer")],
+                             [("Song A", "Film", "INAA10000001", "2000-01-01", "Turaz", "Ravi Kumar Verma")])
+        self.assertEqual(got["Song A"]["status"], "possible")
+
+    def test_songs_the_team_set_aside_are_not_added_back(self):
+        aside = {"NOT OUR": {"isrcs": ["INZZ10000009"], "titles": [], "bases": []}}
+        muso = [("Other Song", "Other Film", "INZZ10000009", "2001-01-01", "Gulzar", "Ravi Kumar Verma")]
+        _, got = self.run_on([self.S1], muso, aside=aside)
+        self.assertEqual((got["Other Song"]["final"], got["Other Song"]["hold"]), ("hold", "NOT OUR"))
+        _, got = self.run_on([self.S1], muso, {"rec:INZZ10000009": {"choice": "add", "data": {}}}, aside)
+        self.assertEqual(got["Other Song"]["final"], "add")
+
+    def test_a_reviewers_answer_takes_the_row_from_the_others(self):
+        muso = [("S One", "Film One", "INAA10000001", "1990-01-01", "Anand Bakshi", "Ravi Kumar Verma"),
+                ("S One", "Film One", "INAA10000002", "1990-01-02", "Anand Bakshi", "Ravi Kumar Verma")]
+        lnv = [("S One", None, "Film One", *self.W)]
+        out, _ = self.run_on(lnv, muso)
+        self.assertEqual({i["status"] for i in out["items"]}, {"possible"})
+        out, _ = self.run_on(lnv, muso, {"rec:INAA10000001": {"choice": "same", "data": {"row": 2}}})
+        by = {i["key"]: i for i in out["items"]}
+        self.assertEqual((by["INAA10000001"]["row"], by["INAA10000002"]["status"]), (2, "new"))
+
+    def test_titles_and_albums_as_written(self):
+        from .engine.reconcile import compare_titles, film_of, parse_title, same_album
+        self.assertEqual(parse_title('Dhun (From "Saiyaara")'), ("Dhun", "", "Saiyaara"))
+        self.assertEqual(parse_title("Tum Hi Ho Future Rave Mix")[0], "Tum Hi Ho")
+        self.assertEqual(parse_title("Mar Jaayen Cover By Stereogrind")[0], "Mar Jaayen")
+        self.assertEqual(parse_title("Stand By Me")[0], "Stand By Me")
+        self.assertEqual(compare_titles("Tere Bin - Remix By Eric Pillai", "Tere Bin - Eric Pillai Remix"), "same")
+        self.assertEqual(compare_titles("Tere Bin - Remix", "Tere Bin - Lofi"), "similar")
+        self.assertEqual(compare_titles("Ji Huzoor", "Ji Huzoori"), "differ")
+        self.assertEqual(compare_titles("Love Mashup 2019", "Love Mashup 2019"), "same")
+        self.assertEqual(compare_titles("Naam - E - Wafa (Remix)", "Naam-E-Wafa (Remix Version)"), "same")
+        self.assertTrue(same_album("3G (Original Motion Picture Soundtrack)", "3G - A Killer Connection"))
+        self.assertTrue(same_album("Aggar: Passion Betrayal Terror", "Aggar"))
+        self.assertTrue(same_album('Tum Mere Ho (From "Hate Story Iv")', "Hate Story 4"))
+        self.assertFalse(same_album("Hate Story 2", "Hate Story 4"))
+        self.assertFalse(same_album("Khuda Haafiz", "Khuda Haafiz 2"))
+        self.assertEqual(film_of("Gadar 2 (Original Motion Picture Soundtrack)"), "Gadar 2")
+        self.assertEqual(film_of('Dhun (From "Saiyaara")'), "Saiyaara")
+
+
+class InsertColumnsTests(TestCase):
+    def _book(self, path, extra=None):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Main"
+        ws.append(["SN", "Work*", "Movie Name *", "Label", "Composer Name 1"])
+        ws.append([1, "A", "Film", "L", "C"])
+        ws.auto_filter.ref = "A1:E2"
+        ws.column_dimensions["D"].width = 40
+        if extra:
+            extra(wb, ws)
+        wb.save(path)
+
+    def test_columns_move_and_the_file_stays_whole(self):
+        from .engine.xlsx_patch import PatchSheet
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self._book(f"{tmp}/a.xlsx")
+        ws = PatchSheet(f"{tmp}/a.xlsx")
+        self.assertTrue(ws.insert_columns(3, 2))
+        self.assertEqual(ws.cell(2, 6).value, "L")   # reads use the new positions
+        ws.cell(1, 4).value = "Original Work"
+        ws.cell(2, 4).value = "S One"
+        with open(f"{tmp}/b.xlsx", "wb") as f:
+            f.write(ws.save([[2, "A", "x", "y"]], ["Row", "Title", "Change", "Detail"], (5, 5, 5, 5), extra_sheets=[("Match report", ["A"], [["1"]], (5,))]))
+        book = openpyxl.load_workbook(f"{tmp}/b.xlsx")
+        out = book["Main"]
+        self.assertEqual([c.value for c in out[1]], ["SN", "Work*", "Movie Name *", "Original Work", None, "Label", "Composer Name 1"])
+        self.assertEqual([c.value for c in out[2]], [1, "A", "Film", "S One", None, "L", "C"])
+        self.assertEqual(out.auto_filter.ref, "A1:G2")
+        self.assertEqual(out.column_dimensions["F"].width, 40)
+        self.assertEqual(book.sheetnames, ["Main", "MRM changes", "Match report"])
+        # the same file again: our sheets are replaced, not doubled
+        with open(f"{tmp}/c.xlsx", "wb") as f:
+            f.write(PatchSheet(f"{tmp}/b.xlsx").save([], ["Row"], (5,), extra_sheets=[("Match report", ["B"], [["2"]], (5,))]))
+        again = openpyxl.load_workbook(f"{tmp}/c.xlsx")
+        self.assertEqual(again.sheetnames, ["Main", "MRM changes", "Match report"])
+        self.assertEqual(again["Match report"]["A1"].value, "B")
+
+    def test_new_rows_go_below_a_row_with_data_and_no_title(self):
+        from .engine import export
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        _lnv_file(f"{tmp}/lnv.xlsx", [("S One", None, "Film", "Ravi", "Gulzar")])
+        wb = openpyxl.load_workbook(f"{tmp}/lnv.xlsx")
+        wb.active.cell(3, 7, "Only A Composer")   # row 3: no SN, no title, a composer
+        wb.save(f"{tmp}/lnv.xlsx")
+        plan = {"source": "Muso", "fills": [], "named": [], "adds": [{"key": "x", "title": "New", "album": "", "isrcs": [], "lyricists": [], "composers": [], "singers": []}]}
+        with open(f"{tmp}/out.xlsx", "wb") as f:
+            f.write(export.final_report(f"{tmp}/lnv.xlsx", dsp=plan))
+        ws = openpyxl.load_workbook(f"{tmp}/out.xlsx").active
+        head = [c.value for c in ws[1]]
+        self.assertEqual(ws.cell(3, head.index("Composer Name 1") + 1).value, "Only A Composer")
+        self.assertEqual((ws.cell(3, 2).value, ws.cell(4, 2).value), (None, "New"))
+
+    def test_iprs_values_land_in_their_columns_after_the_new_ones(self):
+        from .engine import export
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        _lnv_file(f"{tmp}/lnv.xlsx", [("S One", None, "Film", "Ravi", "Gulzar")])
+        work = {"internal_no": "777", "title": "Iprs Only", "isrc": "INAA10000007", "iswc": "T1234567890", "alt_title": "", "production": "Film X", "language": "HINDI",
+                "duration": "", "category": "FILM", "performer": "", "publishers": [], "composers": [], "authors": []}
+        final = {"rows": [{"origin": "master", "key": "k1", "master_row": 2}], "added": [{"key": "k2", "iprs_works": ["777"]}]}
+        fill = {"rows": [{"key": "k1", "title": "S One", "state": "registered", "status_slot": None, "overflow": [], "blocks": [
+            {"slot": 1, "round": "new", "isrc": "INAA10000001", "iswc": "T1111111111", "internal_no": "555", "client_status": "", "general_status": "", "purpose": ""}]}]}
+        plan = {"source": "Muso", "fills": [], "adds": [], "named": [{"row": 2, "title": "S One", "original": {"title": "S Zero", "album": "Old Film"}}]}
+        with open(f"{tmp}/out.xlsx", "wb") as f:
+            f.write(export.final_report(f"{tmp}/lnv.xlsx", {"works": [work]}, final, [], fill, plan))
+        ws = openpyxl.load_workbook(f"{tmp}/out.xlsx").active
+        head = [c.value for c in ws[1]]
+        at = lambda row, name: ws.cell(row, head.index(name) + 1).value
+        self.assertEqual((at(2, "Original Work"), at(2, "IPRS TUNECODE 1"), at(2, "ISRC 1")), ("S Zero", "555", "INAA10000001"))
+        self.assertEqual((at(3, "Work*"), at(3, "IPRS TUNECODE 1"), at(3, "Movie Name *")), ("Iprs Only", "777", "Film X"))
+        self.assertEqual(ws.cell(3, head.index("Work*") + 1).fill.fgColor.rgb, "FFFFFF00")
+
+    def test_a_sheet_with_its_own_formulas_keeps_its_columns(self):
+        from .engine.xlsx_patch import PatchSheet
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self._book(f"{tmp}/a.xlsx", lambda wb, ws: ws.__setitem__("F2", "=D2&E2"))
+        self.assertFalse(PatchSheet(f"{tmp}/a.xlsx").insert_columns(3, 2))
+        self._book(f"{tmp}/b.xlsx", lambda wb, ws: wb.create_sheet("Other").__setitem__("A1", "=Main!D2"))
+        self.assertFalse(PatchSheet(f"{tmp}/b.xlsx").insert_columns(3, 2))
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
@@ -1211,84 +1416,69 @@ class StepsApiTests(TestCase):
         self.assertIn("INXY12300011", values)
         self.assertNotIn("", values)
 
-    def test_clean_then_compare_with_the_lnv(self):
+    def test_compare_answer_download(self):
         cid = self.client.post("/api/clients/", {"name": CLIENT}, content_type="application/json").json()["id"]
-        url = f"/api/clients/{cid}/steps/"
-        self.assertEqual(self.client.get(f"{url}?step=1").json()["counts"], {"1": None, "3": None})
+        steps_url, url = f"/api/clients/{cid}/steps/", f"/api/clients/{cid}/compare/"
+        self.assertEqual(self.client.get(steps_url).json()["counts"], {"1": None, "3": None})
+        self.assertIsNone(self.client.get(url).json()["compare"])
+        self.assertEqual(self.client.get(f"/api/clients/{cid}/").json()["journey"]["step"], 1)
         self._post(f"/api/clients/{cid}/master/", f"{self.tmp}/lnv.xlsx")
         self._post(f"/api/clients/{cid}/clean/", f"{self.tmp}/muso.xlsx")
         decide = lambda *items: self.client.post(f"/api/clients/{cid}/clean/decisions/", {"items": list(items), "quiet": True},
                                                  content_type="application/json").json()
-        cases = lambda: {c["kind"] + ":" + c["title"]: c for c in self.client.get(f"{url}?step=1").json()["step"]["cases"]}
+        got = lambda: {i["muso"]["title"]: i for i in self.client.get(url).json()["compare"]["items"]}
 
-        # One case per song, the Muso versions and the LNV rows in one block, the app's answer selected:
-        # the original and its lofi flip are one song (same writers), and that song is LNV rows 2 and 3.
-        one = self.client.get(f"{url}?step=1").json()
-        c = one["counts"]["1"]
-        self.assertEqual((c["rows"], c["recordings"], c["songs"], c["in_lnv"], c["adding"]), (4, 4, 3, 1, 1))
-        got = cases()
-        self.assertEqual(sorted(got), ["check:Dil Ki Baat", "missing:Brand New Hit", "names:Malik Varma  ·  MALIK VERMA",
-                                       "twice:Dil Ki Baat", "twice:Pyaar Ka Geet", "versions:Pyaar Ka Geet"])
-        # Dil Ki Baat: a possible match (same ISRC, the writer spelled differently) – shown, not linked, no app answer
-        dil = got["check:Dil Ki Baat"]
-        self.assertEqual(([r["row"] for r in dil["lnv"]], dil["lnv"][0]["check"]["level"], dil["answer"]["choice"]), ([4, 5], "possible", None))
-        self.assertIn("Different writers", [w["text"] for w in dil["lnv"][0]["why"]])
-        # "Same person", answered once for every client: Dil Ki Baat is LNV row 4 now
-        name = got["names:Malik Varma  ·  MALIK VERMA"]
-        decide({"key": name["answer"]["key"], "choice": "same", "data": name["names"]})
-        got = cases()
-        self.assertTrue(got["names:Malik Varma  ·  MALIK VERMA"]["done"])
-        self.assertEqual((got["check:Dil Ki Baat"]["auto"], got["check:Dil Ki Baat"]["answer"]["rows"]), (True, [4]))   # exact now
-        self.assertEqual(self.client.get(f"{url}?step=1").json()["counts"]["1"]["in_lnv"], 2)
-        v = got["versions:Pyaar Ka Geet"]
-        self.assertEqual([(r["fields"]["Title"], r["version"], r["in"]) for r in v["muso"]],
-                         [("Pyaar Ka Geet", "Original", True), ("Pyaar Ka Geet - Lofi Flip", "Lofi", True)])
-        self.assertEqual(([r["row"] for r in v["lnv"]], v["answer"]["choice"], v["answer"]["by"], v["done"]), ([2, 3], "same", "app", False))
-        # one case per song: the merge items it is made of travel with it, each with its recordings
-        self.assertEqual([(m["key"], m["ids"]) for m in v["merge"]["items"]], [("merge:G2", [3, 2])])
-        self.assertEqual(got["missing:Brand New Hit"]["answer"]["choice"], "add")
-        self.assertEqual(c["open"], 6)
+        # Dil Ki Baat: same ISRC, the writer spelled a little differently is the same person; album and title agree
+        items = got()
+        self.assertEqual({k: v["status"] for k, v in items.items()},
+                         {"Dil Ki Baat": "exact", "Brand New Hit": "new", "Pyaar Ka Geet": "possible", "Pyaar Ka Geet - Lofi Flip": "new"})
+        self.assertEqual(items["Dil Ki Baat"]["row"], 4)
+        # The LNV has the song without an ISRC: a person says so; the two rows entered twice are both offered
+        self.assertEqual([c["row"] for c in items["Pyaar Ka Geet"]["candidates"]], [2, 3])
+        self.assertEqual(items["Pyaar Ka Geet"]["reason"], "isrc_blank")
+        self.assertEqual(self.client.get(steps_url).json()["counts"]["1"]["open"], 1)
+        # The client page: IPRS is optional, so the client waits in the review step
+        self.assertEqual(self.client.get(f"/api/clients/{cid}/").json()["journey"]["step"], 2)
+        self.assertEqual(decide({"key": "rec:INXY12300011", "choice": "same", "data": {"row": 2}}), {"saved": 1})
+        items = got()
+        self.assertEqual((items["Pyaar Ka Geet"]["final"], items["Pyaar Ka Geet"]["row"]), ("linked", 2))
+        self.assertEqual(self.client.get(f"/api/clients/{cid}/").json()["journey"]["step"], 4)
+        bad = self.client.post(f"/api/clients/{cid}/clean/decisions/", {"items": [{"key": "rec:X", "choice": "nope"}]}, content_type="application/json")
+        self.assertEqual(bad.status_code, 400)
 
-        # Confirm with the lofi unticked and only row 2: the lofi becomes a song of its own.
-        lofi = v["muso"][1]["id"]
-        self.assertEqual(decide({"key": v["merge"]["key"], "choice": "accepted", "data": {"excluded": [lofi]}},
-                                {"key": "link:" + v["answer"]["song"], "choice": "same", "data": {"rows": [2]}}), {"saved": 2})
-        one = self.client.get(f"{url}?step=1").json()
-        self.assertEqual(one["counts"]["1"]["songs"], 4)
-        v = next(x for x in one["step"]["cases"] if x["kind"] == "versions")
-        self.assertEqual(([r["in"] for r in v["muso"]], v["answer"]["rows"], v["done"]), ([True, False], [2], True))
-        # "Not the client's song" on the one only Muso has
-        hit = cases()["missing:Brand New Hit"]
-        decide({"key": "link:" + hit["answer"]["song"], "choice": "none"}, {"key": "missing:" + hit["answer"]["song"], "choice": "not_ours"})
-        one = self.client.get(f"{url}?step=1").json()
-        # the lofi on its own is a new recording of LNV row 2 (same title and writers): added, naming that original
-        self.assertEqual((one["counts"]["1"]["adding"], one["counts"]["1"]["not_ours"]), (1, 1))
-        lofi_case = next(x for x in one["step"]["cases"] if x["title"] == "Pyaar Ka Geet - Lofi Flip")
-        self.assertEqual((lofi_case["origin"]["row"], lofi_case["answer"]["choice"]), (2, "add"))
-        self.assertTrue(next(x for x in one["step"]["cases"] if x["title"] == "Brand New Hit")["done"])
-
-        # The LNV updated with the answers: the lofi (its own song now) and nothing else is added; the change log says so
+        # The output: the answer's blanks filled, the lofi named after its original, the new song added, all yellow
         res = self.client.get(f"/api/clients/{cid}/steps/lnv/")
         self.assertEqual(res.status_code, 200)
-        log = openpyxl.load_workbook(io.BytesIO(res.content))["MRM changes"]
-        self.assertNotIn("Brand New Hit", [r[1] for r in log.iter_rows(min_row=2, values_only=True)])
-        # the lofi's new row names its original, LNV row 2
-        self.assertIn(("Pyaar Ka Geet - Lofi Flip", "Added version", "Lofi of 'Pyaar Ka Geet' (row 2)"), [(r[1], r[2], r[3].split(";")[0]) for r in log.iter_rows(min_row=2, values_only=True)])
-        # A value the reviewer took from Muso over the LNV's own goes into that LNV cell
-        self.assertEqual(decide({"key": "pick:4:Title", "choice": "muso", "data": {"value": "Dil Ki Baat (Muso)"}}), {"saved": 1})
-        self.assertEqual(self.client.get(f"{url}?step=1").json()["step"]["picks"], {"pick:4:Title": "Dil Ki Baat (Muso)"})
-        book = openpyxl.load_workbook(io.BytesIO(self.client.get(f"/api/clients/{cid}/steps/lnv/").content))
-        self.assertEqual(book.worksheets[0].cell(4, 2).value, "Dil Ki Baat (Muso)")
-        self.assertIn((4, "Title changed"), [(r[0], r[2]) for r in book["MRM changes"].iter_rows(min_row=2, values_only=True)])
-        res = self.client.get(f"/api/clients/{cid}/steps/merged/")
-        self.assertEqual(res.status_code, 200)
-        wb = openpyxl.load_workbook(io.BytesIO(res.content))
-        self.assertEqual((wb.sheetnames, wb["Merged Songs"].max_row, wb["All Songs"].max_row), (["Merged Songs", "All Songs"], 5, 5))
-        # A new export names other rows: the merge answers go.
-        self._post(f"/api/clients/{cid}/clean/", f"{self.tmp}/muso.xlsx")
-        v = cases()["versions:Pyaar Ka Geet"]
-        self.assertEqual((v["merge"]["status"], [r["in"] for r in v["muso"]]), ("pending", [True, True]))
-        self.assertEqual(self.client.get(f"{url}?row=4").json()["records"][0]["fields"]["Title"], "Dil Ki Baat")
+        book = openpyxl.load_workbook(io.BytesIO(res.content))
+        ws = book.worksheets[0]
+        head = [c.value for c in ws[1]]
+        title, work, movie, isrc = (head.index(x) + 1 for x in ("Work*", "Original Work", "Original Movie / Album", "ISRC"))
+        self.assertEqual(head.index("Original Work"), head.index("Movie Name *") + 1)   # beside the film, where it is seen
+        yellow = lambda c: c.fill.fgColor.rgb == "FFFFFF00"
+        self.assertEqual(ws.cell(2, isrc).value, "INXY12300011")
+        self.assertTrue(yellow(ws.cell(2, isrc)))
+        self.assertEqual(ws.cell(2, work).value, None)   # the original itself: blank
+        rows = {ws.cell(r, title).value: r for r in range(2, ws.max_row + 1)}
+        lofi = rows["Pyaar Ka Geet - Lofi Flip"]
+        self.assertEqual((ws.cell(lofi, work).value, ws.cell(lofi, movie).value, ws.cell(lofi, isrc).value), ("Pyaar Ka Geet", "Film A", "INXY12300010"))
+        self.assertTrue(all(yellow(ws.cell(lofi, c)) for c in (title, work, movie, isrc)))
+        self.assertIsNone(ws.cell(rows["Brand New Hit"], work).value)
+        self.assertTrue(yellow(ws.cell(rows["Brand New Hit"], title)))
+        self.assertEqual(ws.cell(rows["Dil Ki Baat"], title).fill.fgColor.rgb, "00000000")   # not changed: not yellow
+        self.assertEqual(book.sheetnames[-2:], ["MRM changes", "Match report"])
+        report = {r[3]: r for r in book["Match report"].iter_rows(min_row=2, values_only=True)}
+        self.assertEqual(report["Dil Ki Baat"][0], "Exact match – In the LNV")
+        self.assertEqual(report["Pyaar Ka Geet"][1], "Reviewer")
+
+        # A wrong exact can be undone: the reviewer says it is another song, and it becomes a new row
+        decide({"key": "rec:INAB12300001", "choice": "new"})
+        self.assertEqual(got()["Dil Ki Baat"]["final"], "add")
+        decide({"key": "rec:INAB12300001", "choice": None})
+        self.assertEqual(got()["Dil Ki Baat"]["final"], "linked")
+        self.assertEqual(self.client.get(f"{steps_url}?row=4").json()["records"][0]["fields"]["Title"], "Dil Ki Baat")
+        # A new LNV: answers naming its rows go
+        self._post(f"/api/clients/{cid}/master/", f"{self.tmp}/lnv.xlsx")
+        self.assertEqual(got()["Pyaar Ka Geet"]["final"], "pending")
 
     @needs_samples
     def test_with_the_iprs_report(self):

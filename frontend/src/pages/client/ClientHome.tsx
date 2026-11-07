@@ -106,7 +106,7 @@ export default function ClientHome() {
     <div className="stack">
       <section>
         <h2 className="section-h">More tools</h2>
-        <p className="muted tools-lede">The everyday work is the four steps in the sidebar. Here are the files and the society workspaces behind it –
+        <p className="muted tools-lede">The everyday work is on the client's main page: upload, review, download. Here are the files and the society workspaces behind it –
           each society's report checked step by step, and societies beyond IPRS (PRS, ASCAP, SOCAN…).</p>
         <div className="soc-tiles">
           <div className={`soc-tile master ${m ? 'completed' : 'not_started'}`}>
