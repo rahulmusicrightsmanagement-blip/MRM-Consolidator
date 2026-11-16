@@ -11,6 +11,7 @@ WORK_FIELDS = {
     "MOVIENAME": "movie", "LABEL": "label", "RELEASEYEARYYYY": "release_year", "LANGUAGE": "language",
     "TYPEOFWORK": "type_of_work", "WORKSUBCATEGORY": "sub_category", "DURATIONHHMMSS": "duration",
     "VERSION": "version", "ORIGINALWORK": "original_work", "ORIGINALMOVIEALBUM": "original_movie",
+    "DATEOFRELEASEDDMMYYYY": "release_date", "WEBSITE1": "website", "SPOTIFYID": "spotify_id",
 }
 SLOT_KINDS = {"SINGERNAME": "singers", "COMPOSERNAME": "composers", "AUTHORNAME": "authors", "PUBLISHERNAME": "publishers"}
 BLOCK_FIELDS = {

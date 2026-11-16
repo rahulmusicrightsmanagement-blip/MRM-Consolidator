@@ -1,5 +1,8 @@
 # MRM changelog
 
+## 0.43.1 – 2026-11-16 (patch)
+- Merged main into version-2 (kept this branch's screens); the LNV's release date, website and Spotify ID columns are now read
+
 ## 0.43.0 – 2026-11-07 (minor)
 - Each song now shows how it goes into the LNV (every recording → its LNV row), and a 1-2-3 guide at the top says what to do next
 
