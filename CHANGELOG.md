@@ -1,8 +1,16 @@
 # MRM changelog
 
-<<<<<<< HEAD
-## 1.0.0 – 2026-11-05 (major)
-- New three-bucket Muso vs LNV comparison (exact, possible, not found) using the oldest release as the original; Original Work and Original Movie / Album columns next to Movie Name; every change in the output highlighted yellow; simpler Upload, Review, Download screens; version shown bottom right
+## 0.43.1 – 2026-11-16 (patch)
+- Merged main into version-2 (kept this branch's screens); the LNV's release date, website and Spotify ID columns are now read
+
+## 0.43.0 – 2026-11-07 (minor)
+- Each song now shows how it goes into the LNV (every recording → its LNV row), and a 1-2-3 guide at the top says what to do next
+
+## 0.42.0 – 2026-11-07 (minor)
+- Muso & LNV: one LNV row per recording – a song links only through its own recording (never to two singers' versions at once), singer/language versions (Aakanksha Version, Bhojpuri Version) are versions, two different version tags never match (Chill/Stutter, Lofi Mix/L3AD LoFi Mix), covers that took the film song's row get their own row naming it, one ISRC on a song and its lofi is a wrong ISRC not a duplicate, songs of versions only are in the LNV when their recording is
+
+## 0.41.0 – 2026-11-07 (minor)
+- Muso & LNV: smarter matching (Lalit/Lalitraj-type names, Jeet-Pritam, producers and engineers Muso lists as writers set aside, royalty administrators like Royalty Network and Muserk not counted as publishers, later online release year no longer a mismatch, film subtitles and (From "Film") titles match); fixed a song losing its own LNV row to a re-release; same-recording matches come pre-selected to confirm; songs saved as new that the LNV already has are flagged 'Check again'
 
 ## 0.40.1 – 2026-11-03 (patch)
 - Saved is now its own tab above the list: every saved answer (yours and the app's), what it puts into the LNV, filters, search, Open and Undo
@@ -123,10 +131,6 @@
 
 ## 0.16.3 – 2026-10-24 (patch)
 - Much faster matching for big catalogues (Laxmikant: ~7.5 min → ~23 s): master index for codes and titles, cached name clean-up; results unchanged
-=======
-## 2.0.1 – 2026-11-04 (major)
-- Project handed over to SK
->>>>>>> e3c1eaf30f81765596ee4ce38adbfb1350a39132
 
 ## 0.16.2 – 2026-10-24 (patch)
 - Removed unused files and old code; all spreadsheet types (xlsx, csv, ods …) kept out of git

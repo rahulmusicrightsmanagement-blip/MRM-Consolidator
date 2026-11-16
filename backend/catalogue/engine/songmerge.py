@@ -25,7 +25,7 @@ FUZZY_RATIO = 0.89
 KINDS = ("missing", "extra", "overlap", "different")
 MANUAL_TYPES = ["Original", "Re-release", "Remix", "Lofi", "Jhankar", "Slowed / Reverb", "Reprise",
                 "Unplugged / Acoustic", "Live", "Instrumental", "Cover", "Recreated", "Medley / Mashup",
-                "Male / Female Version", "Sad / Happy Version", "Other"]
+                "Male / Female Version", "Sad / Happy Version", "Singer / Language Version", "Other"]
 # Sheet columns holding comma-separated names: merged name by name
 LIST_COLS = {"main artist (all)", "singer", "lyricist", "composer", "producer", "recording engineer", "mixing engineer",
              "mastering engineer", "featured artist", "publisher", "record label (credited org)", "other credits",
