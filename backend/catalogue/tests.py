@@ -896,6 +896,62 @@ class DataCleanEngineTests(TestCase):
         groups = songs(merge, {f"merge:{k}": {"choice": "accepted"} for k in merge["items"]})
         return apply_decisions(match(self.master, self.dsp, CLIENT, aliases, links, groups), decisions or {})
 
+    def test_matching_tolerances_from_real_catalogues(self):
+        from .engine.dataclean import _same_album, _year, from_tag, person_key as pk, publisher_key, same_person
+        # a first name in full or short, the surname the same – never two different first names
+        self.assertTrue(same_person(pk("Lalit Pandit"), pk("Lalitraj Pandit")))
+        self.assertFalse(same_person(pk("Jatin Pandit"), pk("Lalitraj Pandit")))
+        self.assertFalse(same_person(pk("Sajid Khan"), pk("Wajid Khan")))
+        # royalty administrators are not the song's publisher; real publishers still are
+        self.assertEqual([publisher_key(x) for x in ("The Royalty Network Inc.", "MUSERK LLC", "MUSIC SERVICES", "SENTRIC MUSIC LIMITED")], ["", "", "", ""])
+        self.assertEqual(publisher_key("SUPER CASSETTES INDUSTRIES LTD"), "super")
+        # the DSP's year is when the song went online: later contradicts nothing, earlier is another recording
+        self.assertEqual((_year("2009", "1996"), _year("1990", "1996"), _year("1997", "1996"), _year("", "1996")), ("later", "differ", "same", "blank"))
+        # a film and its subtitle; numbers must agree
+        self.assertTrue(_same_album("Don", "Don - The Chase Begins Again"))
+        self.assertTrue(_same_album("1942 A Love Story", "1942: A Love Story"))
+        self.assertFalse(_same_album("Don", "Don 2"))
+        self.assertFalse(_same_album("Don", "Dil Chahta Hai"))
+        # the film a DSP single names in its title
+        self.assertEqual(from_tag('Main Yahaan Hoon (From "Veer-Zaara")'), "Veer-Zaara")
+        self.assertEqual(from_tag("Sharara - Extended Version (From “Mere Yaar Ki Shaadi Hai”)"), "Mere Yaar Ki Shaadi Hai")
+        self.assertEqual(from_tag("Kal Ho Naa Ho"), "")
+        self.assertEqual(from_tag('Main Phir Bhi Tumko Chaahunga - From "Half Girlfriend"'), "Half Girlfriend")
+
+    def test_one_recording_one_row(self):
+        """'Phir Bhi Tumko Chaahungi' (Mithoon): every recording of a song is told apart by the version its title names,
+        and gets its own LNV row – never the song linked to two singers' versions at once."""
+        from .engine.dataclean import ORIGINAL, _parts, same_tag, tag_fits, version_type
+        # another singer's or language's recording is a version; the film / album / soundtrack version is the song
+        self.assertEqual([version_type(t) for t in ("Phir Bhi Tumko Chaahungi - Aakanksha Version", "Phir Bhi Tumko Chaahunga (Nikhil Iyer Version)",
+                                                    "Udd Jaa Kaale Kaava - Bhojpuri Version", "Jogan Jogan - Badhaai Ho Badhaai / Soundtrack Version",
+                                                    "Pichle Saat Dinon Mein (Album Version)", "Krishna Aayega (JB)")],
+                         ["Singer / Language Version", "Singer / Language Version", "Singer / Language Version", ORIGINAL, ORIGINAL, "Jhankar"])
+        # the version named must be the same one; filler words and spelling do not count
+        self.assertFalse(same_tag("Phir Bhi Tumko Chaahungi - Aakanksha Version", "Phir Bhi Tumko Chaahunga (Nikhil Iyer Version)"))
+        self.assertFalse(same_tag("Phir Bhi Tumko Chaahunga - Lofi Mix", "Phir Bhi Tumko Chaahunga - L3AD LoFi Mix"))
+        self.assertFalse(same_tag("Maula Mere Maula - Chill", "Maula Mere Maula - Stutter"))
+        self.assertTrue(same_tag("Tum Hi Ho (Female)", "Tum Hi Ho - Female Version"))
+        self.assertTrue(same_tag("Pyaar Ka Geet - Lofi Flip", "Pyaar Ka Geet Lofi"))
+        self.assertTrue(same_tag("Phir Bhi Tumko Chaahungi – Aakanksha Version", "Phir Bhi Tumko Chaahungi (Akanksha Version)"))
+        # a version named in fewer words: on the same film only
+        self.assertTrue(tag_fits("Ik Junoon (Remix By Dj Shiva)", "Zindagi Na Milegi Dobara", "Ik Junoon (remix)", "Zindagi Na Milegi Dobara"))
+        self.assertFalse(tag_fits("Thodasa Pagla - Afro Mix", "Thodasa Pagla (Afro Mix)", "Thodasa Pagla (remix)", "Kool And Krazy Remixes 2"))
+
+        def row(n, title, album, isrc, year):
+            return {"row": n, "title": title, "album": album, "isrcs": [isrc], "year": year, "date": year, "duration": "", "label": "",
+                    "singers": [], "popularity": 0}
+        rows = [row(79, "Phir Bhi Tumko Chaahungi", "Half Girlfriend (Original Motion Picture Soundtrack)", "INZ031402335", "2017"),
+                row(38, 'Main Phir Bhi Tumko Chaahunga - From "Half Girlfriend"', 'Main Phir Bhi Tumko Chaahunga (From "Half Girlfriend")', "INZ031421093", "2026"),
+                row(763, "Phir Bhi Tumko Chaahungi – Aakanksha Version", "Phir Bhi Tumko Chaahungi – Aakanksha Version", "INZ031402398", "2017"),
+                row(720, "Phir Bhi Tumko Chaahungi - Jyotica Version", "Phir Bhi Tumko Chaahungi (Jyotica Version)", "INZ031402402", "2017"),
+                row(251, "Phir Bhi Tumko Chaahunga (Nikhil Iyer Version)", "Phir Bhi Tumko Chaahunga (Nikhil Iyer Version)", "INZ031419465", "2025")]
+        original, parts = _parts(rows, list(range(len(rows))))
+        # the female song is the original alone – the male song on the same film is a recording of its own, and so is
+        # each singer's version (they were one row's worth before)
+        self.assertEqual(original["isrcs"], ["INZ031402335"])
+        self.assertEqual(sorted(len(p["isrcs"]) for p in parts), [1, 1, 1, 1])
+
     def test_keys(self):
         from .engine.dataclean import person_key, same_person, title_key, version_type
         self.assertEqual(person_key("BAKSHI, ANAND"), person_key("Anand Bakshi"))
@@ -1229,9 +1285,11 @@ class StepsApiTests(TestCase):
         got = cases()
         self.assertEqual(sorted(got), ["check:Dil Ki Baat", "missing:Brand New Hit", "names:Malik Varma  ·  MALIK VERMA",
                                        "twice:Dil Ki Baat", "twice:Pyaar Ka Geet", "versions:Pyaar Ka Geet"])
-        # Dil Ki Baat: a possible match (same ISRC, the writer spelled differently) – shown, not linked, no app answer
+        # Dil Ki Baat: a possible match (same ISRC, the writer spelled differently) – shown, not linked; the same
+        # recording (ISRC, name, album), so the app proposes row 4 for the reviewer to confirm – nothing saved yet
         dil = got["check:Dil Ki Baat"]
-        self.assertEqual(([r["row"] for r in dil["lnv"]], dil["lnv"][0]["check"]["level"], dil["answer"]["choice"]), ([4, 5], "possible", None))
+        self.assertEqual(([r["row"] for r in dil["lnv"]], dil["lnv"][0]["check"]["level"], dil["answer"]["choice"]), ([4, 5], "possible", "same"))
+        self.assertEqual((dil["answer"]["by"], dil["answer"]["rows"], dil["done"]), ("app", [4], False))
         self.assertIn("Different writers", [w["text"] for w in dil["lnv"][0]["why"]])
         # "Same person", answered once for every client: Dil Ki Baat is LNV row 4 now
         name = got["names:Malik Varma  ·  MALIK VERMA"]

@@ -45,7 +45,7 @@ MEDLEY_RE = re.compile(r"medley|mash-?up|smashup|jukebox|non[\s-]?stop|commentry
 VERSION_TYPES = [
     ("Medley / Mashup", MEDLEY_RE),
     ("Lofi", re.compile(r"lo[\s-]?fi", re.I)),
-    ("Jhankar", re.compile(r"jh?ank+aa?r", re.I)),
+    ("Jhankar", re.compile(r"jh?ank+aa?r|\(jb\)", re.I)),
     ("Slowed / Reverb", re.compile(r"slowed|reverb|sped up", re.I)),
     ("Remix", re.compile(r"remix|rmx|\bmix\b|club|trap|house|phonk|afro|drill|edm|\bdj\b|rework", re.I)),
     ("Reprise", re.compile(r"reprise", re.I)),
@@ -55,7 +55,14 @@ VERSION_TYPES = [
     ("Recreated / Cover", re.compile(r"recreat|revisit|reloaded|cover|tribute|2\.0|3\.0", re.I)),
     ("Male / Female Version", re.compile(r"female|male", re.I)),
     ("Sad / Happy Version", re.compile(r"\bsad\b|\bhappy\b", re.I)),
+    # another singer's or language's recording: 'Aakanksha Version', 'Nikhil Iyer Version', 'Bengali Version' – not
+    # the film / album / original version, which is the song itself
+    ("Singer / Language Version", re.compile(r"(?<!original )(?<!film )(?<!album )(?<!movie )(?<!radio )(?<!single )(?<!soundtrack )"
+                                             r"(?<!full )(?<!studio )(?<!extended )(?<!short )\bversion\b", re.I)),
 ]
+# Words that never tell two versions apart: 'Lofi Mix' is 'Lofi', 'Female Version' is '(Female)'
+TAG_SKIP = {"film", "from", "movie", "original", "motion", "picture", "soundtrack", "ost", "the", "feat", "ft",
+            "version", "ver", "official", "song", "full", "audio", "video", "by", "and", "with", "mix", "flip", "beats", "album", "studio", "single"}
 ORIGINAL = "Original"
 # Common Hinglish spelling variants, per word
 WORD_FIX = {"hain": "hai", "nahin": "nahi", "mein": "me", "main": "me", "mai": "me", "hoon": "hu", "hun": "hu",
@@ -119,6 +126,35 @@ def title_key(title):
 
 
 @lru_cache(maxsize=65536)
+def version_tag(title):
+    """The words that make a title one version: 'Phir Bhi Tumko Chaahunga (Nikhil Iyer Version)' -> {nikhil, iyer};
+    the song name, the film it names and filler words left out."""
+    return frozenset(tag_words(title) - tag_words(clean_title(title)) - tag_words(from_tag(title)) - {phonetic(w) for w in TAG_SKIP})
+
+
+@lru_cache(maxsize=131072)
+def tag_words(text):
+    return frozenset(phonetic(w) for w in re.findall(r"[a-z0-9]+", _ascii(text or "")) if len(w) > 1)
+
+
+def tag_fits(a, album_a, b, movie_b, skip=frozenset()):
+    """same_tag, or on the same film / album one title names the version in fewer words: 'Ik Junoon (Remix By DJ
+    Shiva)' / 'Ik Junoon (remix)' of Zindagi Na Milegi Dobara – never across albums ('Lofi Mix' / 'L3AD LoFi Mix')."""
+    if same_tag(a, b, skip):
+        return True
+    ta, tb = version_tag(a) - skip, version_tag(b) - skip
+    return bool(ta and tb and (ta <= tb or tb <= ta)) and (_same_album(album_a, movie_b) or bool((t := from_tag(a)) and _same_album(t, movie_b)))
+
+
+def same_tag(a, b, skip=frozenset()):
+    """The two titles name the same version: 'Lofi Mix' / '(Lofi)', 'Aakanksha' / 'Akanksha' – never 'Lofi Mix' /
+    'L3AD LoFi Mix', 'Aakanksha Version' / 'Nikhil Iyer Version', 'Chill' / 'Stutter'. skip: words that are no tag
+    here (the film's name: 'Tum Hi Ho - Aashiqui 2')."""
+    ta, tb = version_tag(a) - skip, version_tag(b) - skip
+    return ta == tb or bool(ta and tb and fuzz.ratio(" ".join(sorted(ta)), " ".join(sorted(tb))) >= 88)
+
+
+@lru_cache(maxsize=65536)
 def version_type(title):
     t = str(title or "")
     for label, rx in VERSION_TYPES:
@@ -175,7 +211,14 @@ def same_person(a, b):
         return True
     x, y = set(a.split()), set(b.split())
     small, big = (x, y) if len(x) <= len(y) else (y, x)
-    return small <= big and (len(small) >= 2 or len(next(iter(small))) >= 5)
+    if small <= big and (len(small) >= 2 or len(next(iter(small))) >= 5):
+        return True
+    # a first name written in full or short, the surname the same: 'Lalit Pandit' / 'Lalitraj Pandit'
+    shared = small & big
+    if len(small) >= 2 and shared and any(len(w) >= 4 for w in shared):
+        rest, other = small - shared, big - shared
+        return all(any(len(w) >= 4 and len(o) >= 4 and (o.startswith(w) or w.startswith(o)) for o in other) for w in rest)
+    return False
 
 
 @lru_cache(maxsize=65536)
@@ -340,6 +383,8 @@ GROUPS = {
     "Ajay-Atul": ["Ajay Gogavale", "Atul Gogavale"],
     "Meet Bros": ["Manmeet Singh", "Harmeet Singh"],
     "Sonik-Omi": ["Master Sonik", "Om Prakash Sonik"],
+    "Jeet-Pritam": ["Jeet Gannguli", "Pritam Chakraborty"],
+    "Sachet-Parampara": ["Sachet Tandon", "Parampara Thakur"],
 }
 # One person under the name the DSPs use and the full name the LNV and IPRS use – known facts, not guesses
 KNOWN_SAME = {
@@ -356,6 +401,10 @@ PUB_ALIASES = {"tseries": "super", "hmv": "saregama", "gramophone": "saregama", 
                "venus": "ishtar", "musicindia": "universal", "polygram": "universal", "mgb": "universal"}
 LEGAL = {"the", "m", "s", "pvt", "private", "ltd", "limited", "plc", "inc", "llp", "llc", "co", "company", "corp"}
 NOT_PUBLISHERS = {"iprs", "prs", "ipi", "ascap", "bmi", "socan", "na", "unknown", "none", "self", "independent"}
+# Royalty administrators and distributors that DSP credits list beside (or instead of) the song's publisher: they
+# collect for the publisher abroad, so they neither prove nor contradict the LNV's publisher (key after PUB_GENERIC)
+ADMINISTRATORS = {"royalty", "muserk", "services", "sentric", "songtrust", "cdbaby", "tunecore", "distrokid", "believe",
+                  "inc", "audiam", "harry", "mlc"}
 
 
 @lru_cache(maxsize=8192)
@@ -365,7 +414,8 @@ def publisher_key(name):
         return ""
     own = [w for w in words if w not in PUB_GENERIC]
     key = own[0] if own else "".join(w for w in words if w not in LEGAL)   # 'Music India Ltd' -> 'musicindia'
-
+    if key in ADMINISTRATORS:
+        return ""
     return PUB_ALIASES.get(key, key)
 
 
@@ -393,7 +443,7 @@ def work_check(s, l):
         # does not make it another work, as long as every LNV writer is on the DSP side
         extra = [k for k in s["people"] if not any(same_person(k, y) for y in l["people"])]
         writers = "same" if extra and all(any(same_person(y, x) for x in s["people"]) for y in l["people"]) \
-            and all(any(same_person(k, x) for x in s.get("aside", ())) for k in extra) else "differ"
+            and all(k in s.get("crew", ()) or any(same_person(k, x) for x in s.get("aside", ())) for k in extra) else "differ"
     if not s["pubkeys"] or not l["pubkeys"]:
         publisher = "unchecked"
     else:
@@ -411,6 +461,7 @@ class People:
                 self.aliases.setdefault(person_key(other), self.aliases.get(person_key(name), person_key(name)))
         rules = rules or {}
         self.ignore = set(rules.get("ignore", ()))      # DSP writer names that are not writers ("Raju Singh")
+        self.crew = set()   # names the DSP sheet lists as producers / engineers, never as an LNV writer (match())
         self.pubs = dict(rules.get("pubs", {}))          # publisher keys that are one company ("big" -> "super")
         self.groups = {person_key(g): members for g, members in GROUPS.items()}
         self.client_keys = client_keys
@@ -520,8 +571,11 @@ def _parts(rows, idxs):
         title = rows[members[0]]["title"]
         kind = version_type(title)
         if kind == ORIGINAL:
-            album = album_full(rows[members[0]]["album"])
-            key = next((k for k in albums if k == album or _same_album(rows[albums[k][0]]["album"], rows[members[0]]["album"])), album)
+            # one album holds one recording of a title: 'Phir Bhi Tumko Chaahunga' (Arijit) and '… Chaahungi'
+            # (Shraddha) on 'Half Girlfriend' are two recordings, each with an LNV row of its own
+            album, tk = album_full(rows[members[0]]["album"]), title_key(title)
+            key = next((k for k in albums if k[1] == tk and (k[0] == album or _same_album(rows[albums[k][0]]["album"], rows[members[0]]["album"]))),
+                       (album, tk))
             albums.setdefault(key, []).extend(members)
         elif kind != MEDLEY:
             versions.setdefault(phonetic(title), (kind, []))[1].extend(members)
@@ -550,6 +604,13 @@ def version_id(part):
     return "version:" + (part["isrcs"][0] if part["isrcs"] else "T" + phonetic(part["title"]))
 
 
+def _title_in(title, tkeys):
+    """The song name is the LNV row's, or holds it whole: 'Main Phir Bhi Tumko Chaahunga' / 'Phir Bhi Tumko
+    Chaahunga' – never '… Chaahungi' / '… Chaahunga' (two recordings)."""
+    k = title_key(title)
+    return bool(k) and any(k == t or (min(len(k), len(t)) >= 8 and (t in k or k in t)) for t in tkeys)
+
+
 def _version_rows(s, cands, lnv, by_row, answers=None):
     """The LNV row each version of the song already is: the row holding one of its ISRCs (whatever its title – an
     ISRC is never put in the LNV twice), else a row of the same version (the same tag in its title) with the same
@@ -563,33 +624,60 @@ def _version_rows(s, cands, lnv, by_row, answers=None):
         part["refused"] = a.get("rows", []) if a.get("choice") == "none" else []
         part["confirmed"] = a.get("choice") == "same"
     ok = lambda part, c: c["row"] not in used and c["row"] not in part["refused"]
+    # the original's own ISRCs are the original's: a DSP row listing two ISRCs ('Life Is Crazy' on its film album and
+    # a compilation) must not hand the original's LNV row to the re-release
+    own = set((s.get("original") or {}).get("isrcs") or ())
     for part in s["parts"]:
-        for c in cands:
-            if ok(part, c) and set(part["isrcs"]) & lnv[by_row[c["row"]]]["isrcs"]:
-                part["lnv_row"] = c["row"]
-                used.add(c["row"])
-                break
+        # the LNV sometimes has one ISRC on two rows ('Phir Bhi Tumko Chaahunga' and its 'Lofi Mix'): the row whose
+        # title names this version is the one
+        fit = lambda c: (lnv[by_row[c["row"]]]["version"] == part["type"], same_tag(part["title"], lnv[by_row[c["row"]]]["title"]),
+                         fuzz.ratio(phonetic(part["title"]), phonetic(lnv[by_row[c["row"]]]["title"])))
+        pick = max((c for c in cands if ok(part, c) and (set(part["isrcs"]) - own) & lnv[by_row[c["row"]]]["isrcs"]), key=fit, default=None)
+        if pick:
+            part["lnv_row"] = pick["row"]
+            used.add(pick["row"])
     kinds = Counter(p["type"] for p in s["parts"])
-    home_album = (s.get("original") or {}).get("album")
+    o = s.get("original") or {}
+    home_album, home_title = o.get("album"), title_key(o.get("title") or "")
+    l_of = lambda c: lnv[by_row[c["row"]]]
     for part in s["parts"]:
         if part["lnv_row"]:
             continue
-        if part["type"] == REISSUE:   # never the original's own row: the same title on this re-release's album only
-            l_of = lambda c: lnv[by_row[c["row"]]]
+        if part["type"] == REISSUE:
+            # the same title on this re-release's album ('Main Phir Bhi Tumko Chaahunga (From "Half Girlfriend")': the
+            # film its title names) – never the original's own row: on the original's album only when the title is
+            # another one (the male song beside the female one)
+            album_ok = lambda c: _same_album(part["album"], l_of(c)["movie"]) or bool((t := from_tag(part["title"])) and _same_album(t, l_of(c)["movie"]))
+            home = lambda c: home_album and _same_album(home_album, l_of(c)["movie"]) and title_key(part["title"]) == home_title
             pick = next((c for c in cands if ok(part, c) and c["title"] and l_of(c)["version"] == ORIGINAL
-                         and _same_album(part["album"], l_of(c)["movie"]) and not (home_album and _same_album(home_album, l_of(c)["movie"]))), None)
+                         and _title_in(part["title"], l_of(c)["tkeys"]) and same_tag(part["title"], l_of(c)["title"])
+                         and album_ok(c) and not home(c)), None)
             if pick:
                 part["lnv_row"] = pick["row"]
                 used.add(pick["row"])
             continue
         alike = [c for c in cands if ok(part, c) and lnv[by_row[c["row"]]]["version"] == part["type"]]
-        same = [c for c in alike if (c["writers"] != "differ" or not c["odd"][0])
-                and fuzz.ratio(phonetic(part["title"]), phonetic(lnv[by_row[c["row"]]]["title"])) >= 90]
-        alike = [c for c in alike if c["writers"] != "differ"]
+        fits = lambda c: tag_fits(part["title"], part["album"], l_of(c)["title"], l_of(c)["movie"])
+        ok_writers = [c for c in alike if c["writers"] != "differ" or not c["odd"][0]]
+        # the same title and tag first; a tag named in fewer words on the same film only when it is the one such row
+        same = [c for c in ok_writers if same_tag(part["title"], l_of(c)["title"])
+                and fuzz.ratio(phonetic(part["title"]), phonetic(l_of(c)["title"])) >= 90]
+        loose = [c for c in ok_writers if fits(c) and not same_tag(part["title"], l_of(c)["title"])]
+        same = same or (loose if len(loose) == 1 else [])
+        # the only one of its kind on both sides – unless both titles name their version and the names differ
+        alike = [c for c in alike if c["writers"] != "differ"
+                 and (fits(c) or not version_tag(part["title"]) or not version_tag(l_of(c)["title"]))]
         pick = same[0] if same else alike[0] if len(alike) == 1 and kinds[part["type"]] == 1 else None
         if pick:
             part["lnv_row"] = pick["row"]
             used.add(pick["row"])
+    # an LNV row that is exactly one of these recordings (both stages, by that recording) is that recording's row
+    for part in s["parts"]:
+        if not part["lnv_row"]:
+            pick = next((c for c in cands if ok(part, c) and c["rec"].get("level") == "exact" and c["rec"].get("via") in part["sheet"]), None)
+            if pick:
+                part["lnv_row"] = pick["row"]
+                used.add(pick["row"])
     return used
 
 
@@ -608,6 +696,7 @@ def _recordings(rows, idxs, people):
                     "isrcs": {t for i in members for t in rows[i]["isrcs"]},
                     "people": people.work([x for i in members for x in rows[i]["lyricists"] + rows[i]["composers"]]),
                     "aside": {people.key(x) for i in members for x in rows[i]["singers"] if not is_junk_name(x)} | people.ignore,
+                    "crew": people.crew,
                     "pubkeys": {k for i in members for x in rows[i].get("publishers", []) if (k := people.pub(x))}})
     return out
 
@@ -650,6 +739,7 @@ def _dsp_songs(rows, people, groups, lyricist_keys=frozenset()):
             "people": people.work(lyricists + composers),
             # DSP-only names that do not make another work: this song's singers, and names the reviewer said are no writers
             "aside": {people.key(x) for i in idxs for x in rows[i]["singers"] if not is_junk_name(x)} | people.ignore,
+            "crew": people.crew,
             "publishers": list(OrderedDict.fromkeys(x for i in idxs for x in rows[i].get("publishers", []))),
             "pubkeys": {k for i in idxs for x in rows[i].get("publishers", []) if (k := people.pub(x))},
             "original": original, "parts": parts, "recs": _recordings(rows, idxs, people),
@@ -697,6 +787,13 @@ def _same_title(r, l, isrc=False):
         return False
     if tagged and not isrc and fuzz.ratio(phonetic(r["title"]), phonetic(l["title"])) < 85:
         return False
+    # without the ISRC, two titles that each name a version must name the same one: 'Maula Mere Maula - Chill' is not
+    # '… - Stutter'. A tag on one side only is no contradiction (the LNV writes notes: 'Vande Mataram(revised Sanskrit
+    # To Hindi)'); which recording keeps the row is settled after (_one_recording_a_row)
+    skip = tag_words(l.get("movie")) | tag_words(from_tag(r["title"]))
+    if not isrc and version_tag(r["title"]) - skip and version_tag(l["title"]) - skip \
+            and not tag_fits(r["title"], r.get("album"), l["title"], l.get("movie"), skip):
+        return False
     k = title_key(r["title"])
     near = 80 if isrc else 90   # one recording: 'Khush Rahena' / 'Khush Rehna'
     return bool(k) and (k in l["tkeys"] or any(len(k) >= 6 and fuzz.ratio(k, t) >= near for t in l["tkeys"])
@@ -723,14 +820,42 @@ def _same_album(a, b):
             if fa and fb and (fa == fb or (min(len(fa), len(fb)) >= 5 and (fa in fb or fb in fa)) or fuzz.ratio(fa, fb) >= 90):
                 return True
     ka, kb = album_key(a), album_key(b)
-    return len(ka) >= 5 and ka == kb
+    if len(ka) >= 5 and ka == kb:
+        return True
+    # a film and its subtitle: 'Don' / 'Don - The Chase Begins Again', '1942 A Love Story' / '1942: A Love Story' –
+    # the whole of one name is the head of the other, the numbers the same on both
+    heads = lambda x: {phonetic(h) for h in [re.split(r"\s+[-–:|]\s*|:\s*", re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", str(x or "")))[0]] if h.strip()}
+    whole = lambda x: album_full(x)
+    if len(da) == len(db):
+        return any(h and len(h) >= 3 and h in (whole(b),) for h in heads(a)) or any(h and len(h) >= 3 and h in (whole(a),) for h in heads(b))
+    return False
 
 
 def _year(a, b):
-    """same (a year apart counts: a release at the turn of the year) · blank (a side has none) · differ."""
+    """a: the DSP's year, b: the LNV's. same (a year apart counts: a release at the turn of the year) · later (the DSP
+    year is later: DSPs give the date a film's songs went online – 'Papa Kehte Hain' 1996 is 2009 on Muso – so a later
+    year contradicts nothing) · blank (a side has none) · differ (the DSP's is earlier: another recording)."""
     if not (a and b and a.isdigit() and b.isdigit()):
         return "blank"
-    return "same" if abs(int(a) - int(b)) <= 1 else "differ"
+    if abs(int(a) - int(b)) <= 1:
+        return "same"
+    return "later" if int(a) > int(b) else "differ"
+
+
+FROM_TAG = re.compile(r"""\(\s*from\s+(?:the\s+)?(?:film\s+|movie\s+|album\s+)?["“'‘]?([^"”'’)]+)["”'’]?\s*\)"""
+                      r"""|\s[-–—]\s*from\s+(?:the\s+)?(?:film\s+|movie\s+|album\s+)?["“'‘]([^"”'’]+)["”'’]""", re.I)
+
+
+def from_tag(title):
+    """The film a DSP title names: 'Kal Ho Naa Ho (From "Kal Ho Naa Ho")' -> 'Kal Ho Naa Ho'."""
+    m = FROM_TAG.search(str(title or ""))
+    return (m.group(1) or m.group(2)).strip() if m else ""
+
+
+def _album_of(r, l):
+    """The DSP recording's film / album is the LNV row's: by the album column, or by the film its title names (DSP
+    singles carry the film only in the title: 'Main Yahaan Hoon (From "Veer-Zaara")')."""
+    return _same_album(r["album"], l["movie"]) or bool((t := from_tag(r["title"])) and _same_album(t, l["movie"]))
 
 
 def _level(s, l, publishers=True):
@@ -746,7 +871,7 @@ def _level(s, l, publishers=True):
     for r in s["recs"]:
         isrc = bool(r["isrcs"] & l["isrcs"])
         checks = {"isrc": "same" if isrc else "blank" if not l["isrcs"] or not r["isrcs"] else "differ",
-                  "title": _same_title(r, l, isrc), "album": _same_album(r["album"], l["movie"]),
+                  "title": _same_title(r, l, isrc), "album": _album_of(r, l),
                   "year": _year(r.get("year"), l.get("year"))}
         writers, publisher = work_check(r, l)
         if writers == "differ" and _close_writers(r, l):
@@ -869,6 +994,22 @@ def _candidates(s, lnv, index):
     return cand
 
 
+CREW_COLUMNS = re.compile(r"producer|engineer|featured artist", re.I)   # not singer / main artist: composers sing
+
+
+def _crew(dsp):
+    """Name keys the DSP sheet lists as crew in any row (producer, engineers, featured artist)."""
+    cols = [i for i, h in enumerate(dsp.get("header") or []) if CREW_COLUMNS.search(str(h or ""))]
+    out = set()
+    for r in dsp["rows"]:
+        cells = r.get("cells") or ()
+        for i in cols:
+            if i < len(cells):
+                out.update(person_key(n) for n in split_names(cells[i]) if not is_junk_name(n))
+    out.discard("")
+    return out
+
+
 def match(master, dsp, client_name="", aliases=None, links=None, groups=None, rules=None):
     """Compare the LNV (parse_master result) with one DSP sheet (parse_dsp result).
     aliases: {name key: canonical key} from "same person" decisions.
@@ -880,6 +1021,15 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
     publishers = any(r.get("publishers") for r in dsp["rows"])   # a sheet without publishers cannot be checked on them
     lnv = _lnv_songs(master, people)
     by_row = {l["row"]: j for j, l in enumerate(lnv)}
+    # Muso repeats producers, engineers and artists under lyricist / composer ('Lijo George', a remix producer): a
+    # name the sheet itself lists in one of those columns, and that no LNV row credits as a writer, is set aside like a
+    # singer – it never makes another work, as long as every LNV writer is on the DSP side (work_check)
+    by_word = defaultdict(set)   # LNV writers by each word of their name: a crew name is checked against these only
+    for k in {k for l in lnv for k in l["people"]}:
+        for w in k.split() + [k.replace(" ", "")]:   # 'Anandbakshi' is 'Anand Bakshi'
+            by_word[w].add(k)
+    people.crew = {k for k in _crew(dsp)
+                      if not any(same_person(k, w) for x in k.split() + [k.replace(" ", "")] for w in by_word.get(x, ()))}
     # Anyone credited as a lyricist anywhere (Muso often repeats the lyricist under composers) is not a rival composer
     lyricist_keys = {people.key(x) for r in dsp["rows"] for x in r["lyricists"]} \
         | {people.key(p["name"]) for l in lnv for p in l["song"].get("authors", [])}
@@ -933,6 +1083,24 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
         # and checked under "already in the LNV"); and while an LNV row with the plain title is there, a remix /
         # lofi … row is not the song's own row either
         taken = _version_rows(s, cands, lnv, by_row, versions)
+        # A song of versions only ('Toh Phir Aao - Rain Version', 'Humdard LOFI'): its main version is the song's own
+        # recording – when the LNV has it, the song is in the LNV (not a new song with its one recording already there)
+        if not s.get("original") and s["parts"] and s["parts"][0]["lnv_row"]:
+            p0 = s["parts"][0]
+            c0 = next((c for c in cands if c["row"] == p0["lnv_row"]), None)
+            if c0 and c0["rec"].get("level") in ("exact", "possible") and not p0.get("refused") and not p0.get("confirmed"):
+                taken.discard(p0["lnv_row"])
+                s["original"], s["parts"] = {**p0, "lnv_row": None}, s["parts"][1:]
+        # The song's own LNV row is its original recording's: a row that fits only another recording of the song (a
+        # singer's version, a re-release) is that recording's row, never the song's ('Phir Bhi Tumko Chaahungi' is not
+        # its 'Nikhil Iyer Version'). Each such row is judged again against the original's recordings alone
+        s["cands"] = cands
+        orig = s.get("original")
+        if orig:
+            mine = [r for r in s["recs"] if r["via"] in orig["sheet"]]
+            for c in cands:
+                if c["rec"].get("level") and c["rec"].get("via") not in orig["sheet"]:
+                    c["rec"] = _level({**s, "recs": mine}, lnv[by_row[c["row"]]], publishers) if mine else {"level": None}
 
         def own(cs):
             mine = [c for c in cs if c["row"] not in taken]
@@ -942,6 +1110,13 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
         if decided:
             if decided["choice"] == "none":
                 s["decided"] = True
+                # answered "not in the LNV" – often in bulk, or under an older rule: an LNV row that now passes a stage
+                # would make the song a second row in the LNV. It is shown, and the answer is asked again
+                again = own([c for c in cands if c["rec"]["level"] in ("exact", "possible")
+                             and c["row"] not in decided.get("rows", [])])
+                if again:
+                    s["near"] = again[:3]
+                    s["recheck"] = [c["row"] for c in again if c["rec"]["level"] == "exact"] or [again[0]["row"]]
                 unmatched.append(si)
                 continue
             known = {c["row"]: c for c in cands}
@@ -961,6 +1136,13 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
         for c in strong:
             same_what = "title, album, writers" + (", publisher" if publishers else "")
             c["auto"] = f"Same {same_what} and ISRC" if c["rec"]["isrc"] == "same" else f"Same {same_what} – the LNV has no ISRC yet"
+        # one recording, one LNV row: several rows are kept only when the LNV has that one entry twice – they share
+        # its ISRC, or nothing tells them apart (_twins: no other version tag, writers or ISRC) – asked under "twice".
+        # Two recordings ('… - Aakanksha Version', '… (Nikhil Iyer Version)') are never both the song
+        if len(strong) > 1:
+            first = lnv[by_row[strong[0]["row"]]]
+            strong = [c for c in strong if c["rec"].get("isrc") == "same"] \
+                or [strong[0]] + [c for c in strong[1:] if _twins(first, lnv[by_row[c["row"]]])]
         if strong:
             for c in strong:
                 lnv_links[by_row[c["row"]]].append((si, c))
@@ -989,6 +1171,7 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
             s["origin"] = _origin(s, cands, lnv, by_row)
             unmatched.append(si)
 
+    _one_recording_a_row(songs, lnv, by_row, matched, check, unmatched, lnv_links)
     result = _report(lnv, songs, matched, check, unmatched, lnv_links, people, dsp, name_pairs)
     # One decision each settles every song it counts – the "biggest wins", most songs first
     result["wins"] = sorted(
@@ -998,6 +1181,89 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
            for k, e in pub_pairs.items() if e["n"] >= 2],
         key=lambda w: -w["songs"])
     return result
+
+
+def _claim_fit(info, l):
+    """How well one DSP recording fits an LNV row, best first: the row's own ISRC · the reviewer's word · the same
+    version (no other singer, mix or language named) · the same song name · the same film / album · the earliest
+    release (a cover comes later than the film's own recording)."""
+    album = album_full(info["album"])
+    return (bool(info["isrcs"] & l["isrcs"]), info["confirmed"], same_tag(info["title"], l["title"]),
+            phonetic(clean_title(info["title"])) in l["tkeys"] or title_key(info["title"]) in l["tkeys"],
+            bool(album) and (album == album_full(l["movie"]) or album_key(info["album"]) == l["film"])
+            or bool((t := from_tag(info["title"])) and _same_album(t, l["movie"])),
+            -int(info["year"]) if str(info["year"]).isdigit() else -9999)
+
+
+def _one_recording_a_row(songs, lnv, by_row, matched, check, unmatched, lnv_links):
+    """One LNV row is one recording (the user's rule: every other recording gets a row of its own naming the
+    original). Several DSP songs can each pass both stages on one row without an ISRC – 'Kal Ho Naa Ho' of the film
+    and four covers of it on other labels. The row stays with the recording that fits it best (_claim_fit) and with
+    every recording sharing its ISRCs; a song that loses its only row becomes a new recording of it, a version loses
+    its row (it gets one of its own). A link the reviewer confirmed is never taken away."""
+    claims = defaultdict(list)   # LNV row -> claims
+    for m in matched:
+        s = songs[m["song"]]
+        o = s.get("original") or {}
+        for c in m["links"]:
+            r = next((x for x in s["recs"] if x["via"] == (c.get("rec") or {}).get("via")), None) or (s["recs"] or [None])[0]
+            if not r:
+                continue
+            info = {"title": r["title"], "album": r["album"], "year": r["year"], "confirmed": bool(c.get("confirmed")),
+                    "isrcs": set(o.get("isrcs") or ()) | r["isrcs"]}
+            claims[c["row"]].append((info, ("own", m, c)))
+    for si, s in enumerate(songs):
+        for p in s.get("parts", []):
+            if p["lnv_row"]:
+                info = {"title": p["title"], "album": p["album"], "year": p["year"], "confirmed": bool(p.get("confirmed")),
+                        "isrcs": set(p["isrcs"])}
+                claims[p["lnv_row"]].append((info, ("part", si, p)))
+    gone = set()
+    for row, cs in claims.items():
+        if len(cs) < 2:
+            continue
+        l = lnv[by_row[row]]
+        best = max(cs, key=lambda x: _claim_fit(x[0], l))[0]
+        for info, (kind, a, b) in cs:
+            if info is best or info["confirmed"] or (info["isrcs"] & best["isrcs"]) or (info["isrcs"] & l["isrcs"]):
+                continue   # the same recording, or one the LNV row itself names by its ISRC
+            holder = f"'{best['title']}'" + (f" ({best['album']}, {best['year']})" if best["album"] else "")
+            if kind == "part":
+                b["lnv_row"] = None
+                lnv_links[by_row[row]] = [x for x in lnv_links[by_row[row]] if not (x[0] == a and x[1].get("part") is not None
+                                                                                    and songs[a]["parts"][x[1]["part"]] is b)]
+                continue
+            m, c = a, b
+            m["links"] = [x for x in m["links"] if x is not c]
+            lnv_links[by_row[row]] = [x for x in lnv_links[by_row[row]] if x[1] is not c]
+            if m["links"]:
+                continue
+            s = songs[m["song"]]
+            gone.add(id(m))
+            years = [int(x) for x in (info["year"], best["year"]) if str(x).isdigit()]
+            label = lambda xs: {x[:5] for x in xs}   # an ISRC's country and registrant: the label that made it
+            if not info["isrcs"] & l["isrcs"] and _claim_fit(info, l)[2:5] == (True, True, True) \
+                    and (len(years) < 2 or abs(years[0] - years[1]) <= 1) \
+                    and (not info["isrcs"] or not best["isrcs"] or label(info["isrcs"]) & label(best["isrcs"])):
+                # the same song name and version on the same film, under another ISRC: the very recording entered
+                # again, or another one – a person decides (the row is offered, unticked)
+                c["rec"] = {**c["rec"], "level": "possible", "taken": holder}
+                check.append({"song": m["song"], "candidates": [c]})
+                continue
+            # another recording (a cover, a singer's or a mix version): a row of its own naming the work's original
+            # row – this row when it is the plain song, else the LNV's original of the song
+            if l["version"] == ORIGINAL and not version_tag(l["title"]):
+                origin = {"row": row, "title": l["title"], "album": l["movie"], "language": l["song"].get("language") or "", "sure": True}
+            else:
+                origin = _origin(s, [x for x in s.get("cands", []) if x["row"] != row], lnv, by_row)
+            if origin:
+                origin["why"] = f"A new recording of LNV row {origin['row']} – LNV row {row} is already the recording {holder}"
+            s["origin"], s["near"] = origin, []
+            unmatched.append(m["song"])
+    if gone:
+        matched[:] = [m for m in matched if id(m) not in gone]
+    for j in [j for j, ls in lnv_links.items() if not ls]:
+        del lnv_links[j]
 
 
 # ---------------------------------------------------------------- the queues
@@ -1020,7 +1286,8 @@ def _song_brief(s):
             "link": s["link"], "client_writer": s["client_writer"], "other_composers": s["other_composers"][:5],
             "credit": s["credit"], "members": s["rows"], "duration": s["duration"], "label": s["label"],
             "publishers": s["publishers"][:4], "near": s.get("near", []),
-            "base": s["base"], "original": s["original"], "parts": s["parts"], "origin": s.get("origin")}
+            "base": s["base"], "original": s["original"], "parts": s["parts"], "origin": s.get("origin"),
+            "recheck": s.get("recheck", [])}
 
 
 def lnv_versions(result, master_songs):
@@ -1133,10 +1400,11 @@ def _duplicates(lnv, lnv_links, songs):
         for x in range(len(js)):
             for y in range(x + 1, len(js)):
                 a, b = js[x], js[y]
-                if alike(a, b):
+                if alike(a, b) and not _versions_differ(lnv[a], lnv[b]):
                     join(a, b, f"Same ISRC {t}", check=False)   # one recording: the same entry whatever else differs
-                elif title_similarity(lnv[a]["title"], lnv[b]["title"]) < 60:
-                    # Not a duplicate: a case of its own, so it never pulls other songs together
+                elif alike(a, b) or title_similarity(lnv[a]["title"], lnv[b]["title"]) < 60:
+                    # Not a duplicate – the song and its 'Lofi Mix', or two songs: the ISRC is on one of them by
+                    # mistake. A case of its own, so it never pulls other songs together
                     wrong_isrc.append((a, b, t))
     by_song = defaultdict(list)
     for j, ls in lnv_links.items():
@@ -1186,7 +1454,7 @@ def _duplicates(lnv, lnv_links, songs):
         a, b = sorted((a, b), key=lambda j: lnv[j]["row"])
         cases.append({
             "key": f"isrc:{t}:{lnv[a]['row']}-{lnv[b]['row']}", "kind": "wrong_isrc", "title": lnv[a]["title"], "keeper": None,
-            "reasons": [f"Same ISRC {t} on two different songs – it belongs to only one of them"],
+            "reasons": [f"Same ISRC {t} on two different {'versions' if lnv[a]['tkeys'] & lnv[b]['tkeys'] else 'songs'} – it belongs to only one of them"],
             "rows": [_lnv_brief(lnv[a]), _lnv_brief(lnv[b])],
         })
     cases.sort(key=lambda c: (c["kind"] != "wrong_isrc", -len(c["rows"]), c["title"].lower()))
@@ -1318,7 +1586,7 @@ def _report(lnv, songs, matched, check, unmatched, lnv_links, people, dsp, name_
     names = _names(lnv, songs, people, name_pairs)
     missing = [{**song(si), "key": "missing:" + songs[si]["key"], "song_key": songs[si]["key"],
                 "rejected": bool(songs[si].get("decided")),
-                **({"auto": {"choice": "add", "why": f"A new recording of LNV row {songs[si]['origin']['row']} – it gets a row of its own naming that original"}}
+                **({"auto": {"choice": "add", "why": songs[si]["origin"].get("why") or f"A new recording of LNV row {songs[si]['origin']['row']} – it gets a row of its own naming that original"}}
                    if songs[si]["credit"] in ("writer", "shared") and (songs[si].get("origin") or {}).get("sure") and not songs[si].get("decided")
                    else {"auto": {"choice": "add", "why": "The client is a credited writer, it is an original song, and no LNV row is close"}}
                    if songs[si]["credit"] in ("writer", "shared") and ORIGINAL in songs[si]["versions"]

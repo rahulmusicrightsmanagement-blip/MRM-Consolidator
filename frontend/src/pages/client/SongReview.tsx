@@ -180,6 +180,12 @@ export default function SongReview({ d, save }: {
     .sort((a, b) => b.at - a.at || a.c.title.localeCompare(b.c.title)),
   [d, savedAt, done])   // eslint-disable-line react-hooks/exhaustive-deps
   const inStatus = (c: ReviewCase) => status === 'all' || stateOf(c) === status
+  // the whole step, whatever the tabs show: what still needs an answer, and what only needs a confirm
+  const progress = useMemo(() => {
+    const t = { needs: 0, sure: 0 }
+    d.cases.forEach((c) => { if (!c.auto && !isDone(c)) t[ready(c, draftOf(c)) ? 'sure' : 'needs'] += 1 })
+    return t
+  }, [d, done])   // eslint-disable-line react-hooks/exhaustive-deps
 
   const counts = useMemo(() => {
     const k: Record<string, number> = {}
@@ -251,8 +257,15 @@ export default function SongReview({ d, save }: {
       {/* the two views of the step: the songs to review, and everything saved – what goes into the LNV */}
       <div className="rv-views">
         <button type="button" className={view === 'review' ? 'on' : ''} onClick={() => setView('review')}>Review songs<span>{n(d.cases.filter((c) => !c.auto && !isDone(c)).length)} open</span></button>
-        <button type="button" className={view === 'saved' ? 'on' : ''} onClick={() => setView('saved')} title="Every saved answer and what it puts into the LNV">
+        <button type="button" className={`rv-view-saved ${view === 'saved' ? 'on' : ''}`} onClick={() => setView('saved')} title="Every saved answer and what it puts into the LNV">
           <Check size={14} />Saved to the LNV<span key={saved.length} className="rv-bump">{n(saved.length)}</span></button>
+        <Steps steps={[
+          { label: progress.needs ? `Answer ${n(progress.needs)} song${progress.needs > 1 ? 's' : ''}` : 'Every doubt answered', left: progress.needs,
+            title: 'Songs the app could not decide: compare and pick an answer', go: () => matchBy('all') },
+          { label: progress.sure ? `Confirm ${n(progress.sure)} app answer${progress.sure > 1 ? 's' : ''}` : "App's answers confirmed", left: progress.sure,
+            title: 'The app has an answer (the green button): check it and press Enter, or Accept all', go: () => { setView('review'); setMatch('all'); filterBy('sure', 'all') } },
+          { label: 'Download the LNV', left: progress.needs + progress.sure, title: 'See every saved answer and download the LNV with the changes', go: () => setView('saved') },
+        ]} />
       </div>
 
       {view === 'review' && d.wins.length > 0 && <Wins wins={d.wins} source={d.source} save={save} />}
@@ -296,7 +309,7 @@ export default function SongReview({ d, save }: {
                     <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${sel?.id === x.id ? 'on' : ''}`} onClick={() => setSelectedId(x.id)}>
                       <span className="sm-item-text">
                         <b>{x.title}</b>
-                        <small>{x.kind === 'versions' ? '' : `${KIND[x.kind].label}${x.muso.length > 1 ? ' · ' : ''}`}{x.muso.length > 1 ? `${x.muso.length} versions` : ''}{v !== 'Needs you' && <> · <span className="rv-verdict">{v}</span></>}</small>
+                        <small>{x.answer.recheck && !isDone(x) && <span className="rv-recheck">Check again · </span>}{x.kind === 'versions' ? '' : `${KIND[x.kind].label}${x.muso.length > 1 ? ' · ' : ''}`}{x.muso.length > 1 ? `${x.muso.length} versions` : ''}{v !== 'Needs you' && <> · <span className="rv-verdict">{v}</span></>}</small>
                       </span>
                       {isDone(x) && <Check size={15} strokeWidth={2.5} className="rv-done" />}
                     </button>
@@ -315,6 +328,25 @@ export default function SongReview({ d, save }: {
         <p>They all move to Done. You can still open any one of them there and change it.</p>
       </ConfirmDialog>
     </section>
+  )
+}
+
+/** The step's three moves in order – answer the doubts, confirm the app's answers, download – the current one marked. */
+function Steps({ steps }: { steps: { label: string; left: number; title: string; go: () => void }[] }) {
+  const now = steps.findIndex((s) => s.left > 0)
+  return (
+    <ol className="rv-steps" aria-label="What to do next">
+      {steps.map((s, i) => {
+        const state = i === steps.length - 1 ? (now === -1 ? 'now' : '') : s.left ? (i === now ? 'now' : '') : 'ok'
+        return (
+          <li key={i} className={state}>
+            <button type="button" onClick={s.go} title={s.title}>
+              <i>{state === 'ok' ? <Check size={11} strokeWidth={3} /> : i + 1}</i>{s.label}
+            </button>
+          </li>
+        )
+      })}
+    </ol>
   )
 }
 
@@ -412,7 +444,7 @@ function Marks({ r, ref }: { r: CaseRecord; ref?: CaseRecord | null }) {
   const ch = r.check
   if (ch && ch.stage1 !== undefined && ch.stage1 !== null) {
     // the user's rule: stage 1 the recording, stage 2 the work; both = exact, one = possible
-    const failed = (Array.isArray(r.why) ? r.why : []).filter((w) => !w.good || w.text.startsWith('Writers: one'))
+    const failed = (Array.isArray(r.why) ? r.why : []).filter((w) => !w.good || w.text.startsWith('Writers: one') || w.text.startsWith('Later year'))
     const level = ch.level === 'exact' ? 'Exact match' : ch.level === 'possible' ? 'Possible match' : ch.level === 'isrc_only' ? 'Only the ISRC is the same' : ''
     return (
       <div className="rvc-marks">
@@ -511,6 +543,64 @@ export const WideBtn = ({ wide, toggle }: { wide: boolean; toggle: () => void })
   </button>
 )
 
+/** Where one DSP recording lands in the LNV with the answer on screen: linked to the song's row, a version row the
+ *  LNV already has, a new row, kept apart as its own song, or not added (or waiting for the answer). */
+type Land = { i: number; r: CaseRecord; tone: 'link' | 'have' | 'new' | 'off' | 'wait'; row?: number; to: string; note: string; again?: boolean }
+const LAND_LABEL = { link: ['linked', 'linked'], new: ['new row', 'new rows'], have: ['already in the LNV', 'already in the LNV'],
+  wait: ['waiting for you', 'waiting for you'], off: ['not added here', 'not added here'] } as const
+const LAND_ORDER = Object.keys(LAND_LABEL) as Land['tone'][]
+
+function landsOf(c: ReviewCase, d: Draft, rows: number[], near: boolean, isIn: (r: CaseRecord) => boolean, fills: number, picks: number, source: string): Land[] {
+  const ours = d.choice === 'same' && rows.length ? `LNV row ${rows.join(' + ')}` : d.choice === 'add' ? 'the new row' : ''
+  const changes = [fills && `${fills} blank${fills > 1 ? 's' : ''} filled from ${source}`, picks && `${picks} value${picks > 1 ? 's' : ''} changed to ${source}'s`].filter(Boolean).join(' · ')
+  // what each answer would do, for a song still waiting for one
+  const options = rows.length ? `Same song: joins LNV row ${rows.join(' + ')} · New song: a new row`
+    : c.lnv.length && !near ? 'Same song: joins the LNV row you tick · New song: a new row' : "Add: a new row · Not the client's: nothing added"
+  let first = true   // the song's first recording makes its new row; the others are the same song released again
+  return c.muso.map((r, i): Land => {
+    if (!isIn(r)) return { i, r, tone: 'off', to: 'Its own song', note: 'kept separate – it is answered on its own' }
+    if (d.choice === 'not_ours') return { i, r, tone: 'off', to: 'Not added', note: "not the client's song" }
+    if (r.part === 'version') {
+      if (r.lnv_row) return { i, r, tone: 'have', row: r.lnv_row, to: `LNV row ${r.lnv_row}`, note: 'this version is already there – nothing added' }
+      return ours ? { i, r, tone: 'new', to: 'New row', note: `a ${r.version ?? 'version'} row naming ${ours} as its original` }
+        : { i, r, tone: 'wait', to: 'New row', note: 'once you answer: a row of its own naming the original' }
+    }
+    if (d.choice === 'same' && rows.length) return { i, r, tone: 'link', row: rows[0], to: `LNV row ${rows.join(' + ')}`, note: changes || 'the row stays as it is' }
+    if (d.choice === 'add') {
+      if (!first) return { i, r, tone: 'new', again: true, to: 'Same new row', note: 'the same song released again – no row of its own' }
+      first = false
+      return { i, r, tone: 'new', to: 'New row', note: c.origin ? `names LNV row ${c.origin.row} as its original` : 'a new song in the LNV' }
+    }
+    return { i, r, tone: 'wait', to: '?', note: options }
+  })
+}
+
+/** The merge, before it is saved: each DSP recording of the song, an arrow, and the LNV row it lands on. */
+function MergePlan({ lands, source, openVersion, openRow }: { lands: Land[]; source: string; openVersion: (i: number) => void; openRow: (row: number) => void }) {
+  const [all, setAll] = useState(false)
+  const tally = LAND_ORDER.map((t) => [t, lands.filter((x) => x.tone === t && !x.again).length] as const).filter(([, x]) => x)
+  // grouped by where they land: the song's row first, then new rows, the rows the LNV has, what waits, what stays out
+  const sorted = [...lands].sort((a, b) => LAND_ORDER.indexOf(a.tone) - LAND_ORDER.indexOf(b.tone) || (a.row ?? 0) - (b.row ?? 0) || a.i - b.i)
+  const shown = all ? sorted : sorted.slice(0, 8)
+  return (
+    <Part id="plan" title="How it goes into the LNV" note={tally.map(([t, x]) => `${x} ${LAND_LABEL[t][x > 1 ? 1 : 0]}`).join(' · ')}>
+      <table className="rv-plan">
+        <thead><tr><th>{source} recording</th><th /><th>In the LNV</th></tr></thead>
+        <tbody>{shown.map((x) => (
+          <tr key={x.r.id ?? x.i} className={x.tone}>
+            <td><button type="button" className="rv-ver-open" onClick={() => openVersion(x.i)}>{value(x.r.fields.Title)}</button>
+              <small className="muted"> {[x.i === 0 ? 'Main' : x.r.version, value(x.r.fields.Year).slice(0, 4)].filter(Boolean).join(' · ')}</small></td>
+            <td className="rv-plan-arrow"><ArrowRight size={14} /></td>
+            <td><span className={`rv-land ${x.tone}`}>{x.row ? <button type="button" onClick={() => openRow(x.row!)} title="See this LNV row">{x.to}</button> : x.to}</span>
+              <small className="muted">{x.note}</small></td>
+          </tr>
+        ))}</tbody>
+      </table>
+      {lands.length > 8 && !all && <button type="button" className="cs-more" onClick={() => setAll(true)}>Show all {lands.length}</button>}
+    </Part>
+  )
+}
+
 function CaseView({ c, source, done, pos, total, prev, next, possible, answer, last, undoLast, wideBtn, save, picks, savedCount, showSaved }: {
   c: ReviewCase; source: string; done: boolean; pos: number; total: number; prev: () => void; next: () => void
   possible: boolean; answer: (d: Draft | null) => void; last: { c: ReviewCase; text: string } | null; undoLast: () => void; wideBtn: ReactNode
@@ -554,9 +644,6 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   // where each version lands in the LNV: the original on the song's row, every other version on a row of its own
   const isIn = (r: CaseRecord) => !merging || draft.in.includes(r.id!)
   const placing = draft.choice === 'same' || draft.choice === 'add'
-  const goes = (r: CaseRecord) => !placing || !isIn(r) || !r.part ? ''
-    : r.part === 'version' ? (r.lnv_row ? `Row ${r.lnv_row} already` : 'New row')
-      : draft.choice === 'add' ? 'New row' : `Row ${sameRows.join(' + ')}`
   const newVersions = placing ? c.muso.filter((r) => isIn(r) && r.part === 'version' && !r.lnv_row).length : 0
   const versionsLine = newVersions ? ` ${newVersions} version${newVersions > 1 ? 's get rows' : ' gets a row'} of ${newVersions > 1 ? 'their' : 'its'} own, naming the original.` : ''
 
@@ -612,7 +699,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
           <button type="button" className="sm-nav" disabled={pos >= total} onClick={next} title="Next (↓)"><ArrowRight size={15} /></button>
           {wideBtn}
         </div>
-        {c.kind !== 'versions' && <p className={`rv-why ${c.tone ?? ''}`}>{c.why}</p>}
+        {(c.kind !== 'versions' || c.answer.recheck) && <p className={`rv-why ${c.answer.recheck ? 'warn' : c.tone ?? ''}`}>{c.why}</p>}
       </div>
 
       <div className="rv-scroll">
@@ -628,6 +715,11 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
             note={`no same ISRC or credits; open only if you think ${source}'s data is wrong`}>
             <Compare cols={[...musoCol, ...closest]} />
           </Part>
+        )}
+
+        {!names && !twice && c.muso.length > 0 && (
+          <MergePlan lands={landsOf(c, draft, sameRows, near, isIn, kept, Object.keys(draft.picks).length, source)} source={source}
+            openVersion={setOpened} openRow={setOpenedRow} />
         )}
 
         {updates.length > 0 && (
@@ -698,7 +790,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
             title={`${c.muso.length} ${source} versions`} note={merging && inCount < c.muso.length ? `${inCount} counted as this song` : 'Click one to see everything about it'}>
             <div className="rv-table-wrap">
               <table className="rv-versions rv-clean">
-                <thead><tr>{merging && <th title="Same song" />}<th>Title</th><th>Album</th><th>Singer</th>{c.kind === 'isrc' && <th>ISRC</th>}<th>Year</th>{placing && <th>In the LNV</th>}</tr></thead>
+                <thead><tr>{merging && <th title="Same song" />}<th>Title</th><th>Album</th><th>Singer</th>{c.kind === 'isrc' && <th>ISRC</th>}<th>Year</th></tr></thead>
                 <tbody>{versions.map((r, i) => {
                   const on = !merging || draft.in.includes(r.id!)
                   const diff = creditsDiff(r, main)
@@ -713,7 +805,6 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
                       <td>{singers.slice(0, 2).join(', ')}{singers.length > 2 && <span className="muted"> +{singers.length - 2}</span>}</td>
                       {c.kind === 'isrc' && <td className="mono small">{list(r.fields.ISRC).join(', ')}</td>}
                       <td className="muted nowrap">{value(r.fields.Year).slice(0, 4)}</td>
-                      {placing && <td className={`nowrap rv-goes ${r.part === 'version' && !r.lnv_row ? 'new' : ''}`}>{goes(r)}</td>}
                     </tr>
                   )
                 })}</tbody>

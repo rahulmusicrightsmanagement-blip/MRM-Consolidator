@@ -532,6 +532,8 @@ export interface CaseAnswer {
   /** LNV-twice cases: the decision key; choice duplicate/owner (keep) · different/neither */
   key?: string
   choice: string | null; rows?: number[]; keep?: number | null; by: 'app' | 'you' | null; why?: string
+  /** saved earlier as a new song, but an LNV row now passes the same-song rule: asked again so it is not added twice */
+  recheck?: boolean
 }
 export interface ReviewCase {
   id: string; kind: CaseKind; title: string; why: string; tone?: string | null; isrc?: boolean; popularity?: number

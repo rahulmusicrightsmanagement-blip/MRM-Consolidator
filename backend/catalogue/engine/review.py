@@ -65,6 +65,8 @@ def _marks(r):
     add("Same album" if r.get("album") else "Other album", bool(r.get("album")))
     if r.get("year") in ("same", "differ"):
         add("Same year" if r["year"] == "same" else "Other year", r["year"] == "same")
+    elif r.get("year") == "later":   # DSPs date a film's songs by when they went online: not another recording
+        add("Later year – the online release date", True)
     w = r.get("writers")
     if w:
         add({"same": "Same writers", "close": "Writers: one name extra", "differ": "Different writers",
@@ -72,6 +74,8 @@ def _marks(r):
     pub = r.get("publisher")
     if pub:
         add({"same": "Same publisher", "differ": "Other publisher", "unchecked": "Publisher not checked"}[pub], pub != "differ")
+    if r.get("taken"):   # one LNV row is one recording: another recording already has this row
+        add(f"Row already linked to {r['taken']}", False)
     return why
 
 
@@ -101,6 +105,18 @@ def _lnv_part(kind, item, rec):
         recs = [_candidate(rec, c) for c in item["candidates"]]
         if d and d["choice"] == "same":
             return recs, {"song": song, "choice": "same", "rows": d["data"].get("rows", []), "by": "you"}
+        # One LNV row is the very recording – the same ISRC, song name and film / album – and only the credits differ:
+        # the app proposes it (not saved until the reviewer confirms; ISRCs are unique to a recording, so a shared one
+        # with the same name and album is the strongest evidence there is)
+        sure = [c for c in item["candidates"] if (c.get("rec") or {}).get("isrc") == "same"
+                and c["rec"].get("title") and c["rec"].get("album")]
+        if len(sure) == 1:
+            r = sure[0]["rec"]
+            off = [w for w, bad in (("writers", r.get("writers") == "differ"), ("publisher", r.get("publisher") == "differ"),
+                                     ("year", r.get("year") == "differ")) if bad]
+            return recs, {"song": song, "choice": "same", "rows": [sure[0]["row"]], "by": "app",
+                          "why": "The same recording – same ISRC, song name and film / album"
+                          + (f"; different {' and '.join(off)} – the LNV keeps its own values unless you choose otherwise" if off else "")}
         return recs, {"song": song, "choice": None, "rows": [], "by": None}
     d = item.get("decision") or {}
     answer = {"song": song, "choice": d.get("choice"), "rows": [], "by": None if not d else "app" if d.get("auto") else "you"}
@@ -109,8 +125,26 @@ def _lnv_part(kind, item, rec):
     elif not d and item["credit"] in ("performer", "medley"):
         answer.update(choice="not_ours", by="app", why="The client only sings or performs it" if item["credit"] == "performer"
                       else "A medley of several songs")
-    # the closest LNV rows: shown, never linked – they fail the same-song rule
+    if item.get("recheck") and d.get("choice") == "add" and not d.get("auto"):
+        # answered "add as a new song" (often in bulk, or under an older rule), and an LNV row now passes the rule:
+        # adding it would put the song in the LNV twice – asked again, the LNV row proposed when it is an exact match
+        exact = [c["row"] for c in item.get("near") or [] if (c.get("rec") or {}).get("level") == "exact"]
+        rows = ", ".join(str(r) for r in item["recheck"])
+        answer = {"song": song, "choice": "same" if exact else None, "rows": exact, "by": "app" if exact else None, "recheck": True,
+                  "why": f"Saved earlier as a new song, but LNV row {rows} {'is' if len(item['recheck']) == 1 else 'are'} "
+                         f"{'the same song' if exact else 'possibly the same song'} – adding it would put it in the LNV twice"}
+    # the closest LNV rows: shown, never linked unless the reviewer ticks one – they fail the same-song rule (or, asked
+    # again, the rows that now pass it)
     return [_candidate(rec, c) for c in item.get("near") or []], answer
+
+
+def _taken_why(item, source):
+    """A song that fits an LNV row another recording already has (one row, one recording)."""
+    c = next((c for c in item.get("candidates", []) if (c.get("rec") or {}).get("taken")), None)
+    if not c:
+        return ""
+    return (f"LNV row {c['row']} is already linked to the recording {c['rec']['taken']}. This {source} recording has the same "
+            f"song name and film / album under another ISRC – tick the row if it is the same recording, or add it as a new row")
 
 
 def _wins(clean, decisions):
@@ -255,7 +289,7 @@ def build(dsp, analysis, decisions, clean, master):
         cases.append({
             "id": items[0][0], "kind": "versions" if any(it["kind"] == "suggestion" for it in groups) else "isrc",
             "title": song["title"],
-            "why": "Similar title, the same lyricist and composer" if not conflict
+            "why": answer["why"] if answer.get("recheck") else "Similar title, the same lyricist and composer" if not conflict
             else f"Same ISRC {', '.join(conflict['isrcs'][:2])} – " + KIND_HELP[conflict["kind"]],
             "tone": "warn" if any(it["kind"] in ("overlap", "different") for it in groups) else None,
             "merge": {"key": merges[0]["key"], "items": merges,
@@ -281,7 +315,11 @@ def build(dsp, analysis, decisions, clean, master):
         case_kind = "check" if kind in ("check", "matched") else "left_out" if left_out else "missing"
         cases.append({
             "id": item["key"], "kind": case_kind, "title": song_of(kind, item)["title"],
-            "why": {"check": "Exact match – stage 1 (the recording) and stage 2 (the work) both hold: the app linked it" if auto
+            # the app's own reason when it proposes an answer (the same recording; or saved earlier as new, asked again)
+            "why": answer["why"] if answer.get("recheck") or (kind == "check" and answer.get("by") == "app")
+            else _taken_why(item, source) if kind == "check" and _taken_why(item, source)
+            else (song_of(kind, item).get("origin") or {}).get("why") if kind == "missing" and (song_of(kind, item).get("origin") or {}).get("why")
+            else {"check": "Exact match – stage 1 (the recording) and stage 2 (the work) both hold: the app linked it" if auto
                     else "Possible match – only one stage holds (1 the recording: title, album, ISRC, year · 2 the work: title, album, writers, publisher): check and decide",
                     "missing": (f"A new recording of LNV row {song_of(kind, item)['origin']['row']} – it gets a row of its own naming that original"
                                 if (song_of(kind, item).get("origin") or {}).get("sure") else
