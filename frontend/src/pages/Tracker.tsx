@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, CalendarDays, CheckCircle2, ChevronRight, RefreshCw, Trash2, UserPlus, Users } from 'lucide-react'
 import type { CSSProperties } from 'react'
 import { AppShell } from '../components/AppShell'
-import { Button, ConfirmDialog, DataTable, Empty } from '../components/ui'
+import { Button, ConfirmDialog, DataTable, Empty, Guide } from '../components/ui'
 import type { Filter } from '../components/ui'
 import { api } from '../lib/api'
 import { fmtDate, pct, today } from '../lib/client'
@@ -156,6 +156,12 @@ export default function Tracker() {
             {stats.overdue > 0 && <> · <span className="t-bad">{stats.overdue} overdue</span></>}</>}</p></div>
         <div className="page-actions"><Button variant="primary" icon={<UserPlus size={15} />} onClick={() => navigate('/clients/new')}>Add client</Button></div>
       </header>
+
+      <Guide id="clients" title="Getting started" steps={[
+        <><b>Add client</b> (top right): the client's name, then drop their three files – the LNV, the Muso export and the IPRS report.</>,
+        <>Open a client: its <b>four steps</b> are in the sidebar on the left – Files, Muso & LNV, LNV vs IPRS, Final LNV.</>,
+        <>Work through the steps in order; the client's row here shows the step it is at and how many songs still need you.</>,
+      ]} />
 
       <section className="card flush tracker">
         <div className="tracker-tabs" role="tablist" aria-label="Stage">

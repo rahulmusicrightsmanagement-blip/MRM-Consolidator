@@ -1131,6 +1131,57 @@ class DataCleanEngineTests(TestCase):
         plan = dataclean.lnv_versions(r, master["songs"])
         self.assertEqual(([v["title"] for v in plan["rows"]], plan["named"]), (["Pyaar Ka Geet - Lofi Flip"], []))
 
+    def test_song_family_key(self):
+        """Step 2 shows every song one name holds on one screen: remixes, lofis, parts and film tags share the key."""
+        from .engine.review import _family
+        base = _family("Maula Mere Maula")
+        for t in ("Maula Mere Maula - Stutter", "Maula Mere Maula, Pt. 3", "Maula Mere Maula Lofi Sad Mix",
+                  'Maula Mere Maula (From "Anwar") - Remix', "Maula Mere Maula - LoFi"):
+            self.assertEqual(_family(t), base, t)
+        self.assertNotEqual(_family("Tum Hi Ho"), base)
+        self.assertIsNone(_family("Bollywood Medley"))
+
+    def test_map_onto_exact_song_and_titles(self):
+        """A recording mapped onto an exactly matched song leaves its own song and becomes that song's version (a row
+        of its own naming the song's LNV row); the titles the reviewer chose land where each recording goes."""
+        from openpyxl import load_workbook
+        from .engine import dataclean, export
+        from .engine.songmerge import analyse, moved_rows, moves, songs
+        merge = analyse(self.dsp["rows"])
+        # sheet rows: 2 Lofi Flip · 3 Pyaar Ka Geet · 4 Dil Ki Baat · 5 Brand New Hit
+        decisions = {f"merge:{k}": {"choice": "accepted"} for k in merge["items"]}
+        decisions["map:5"] = {"choice": "join", "data": {"to": 3, "row": 2, "title": "Pyaar Ka Geet", "from": "Brand New Hit"}}
+        decisions["map:4"] = {"choice": "join", "data": {"to": 5}}   # onto a recording that is itself mapped: ignored
+        self.assertEqual(list(moves(decisions)), [5])
+        r = dataclean.apply_decisions(dataclean.match(self.master, self.dsp, CLIENT, groups=songs(merge, decisions),
+                                                      moved=moved_rows(merge, decisions)), decisions)
+        self.assertNotIn("Brand New Hit", [m["title"] for m in r["missing"]])
+        song = next(m for m in r["matched"] if m["song"]["title"] == "Pyaar Ka Geet")
+        self.assertEqual(song["song"]["key"], "INXY12300011")   # the song keeps its main recording, and its answers
+        self.assertIn(2, [l["row"] for l in song["links"]])
+        plan = dataclean.lnv_versions(r, self.master["songs"])
+        self.assertEqual(sorted((v["title"], v["original"]["row"]) for v in plan["rows"]),
+                         [("Brand New Hit", 2), ("Pyaar Ka Geet - Lofi Flip", 2)])
+
+        # titles: the main version takes a typed title on its LNV row; the mapped recording's row takes the main's
+        decisions["title:3"] = {"choice": "custom", "data": {"value": "Pyaar Ka Geet (Film A)"}}
+        decisions["title:5"] = {"choice": "main", "data": {"value": "Pyaar Ka Geet (Film A)"}}
+        decisions["title:4"] = {"choice": "custom", "data": {"value": "  "}}   # blank: no title
+        titles = dataclean.titles_of(decisions)
+        self.assertEqual(sorted(titles), [3, 5])
+        picks, plan, adds = dataclean.apply_titles(r, plan, [], titles)
+        self.assertIn({"row": 2, "field": "Title", "value": "Pyaar Ka Geet (Film A)", "why": "a title typed by the reviewer, chosen by the reviewer"}, picks)
+        self.assertEqual(sorted((v["title"], v["original"]["title"]) for v in plan["rows"]),
+                         [("Pyaar Ka Geet (Film A)", "Pyaar Ka Geet (Film A)"), ("Pyaar Ka Geet - Lofi Flip", "Pyaar Ka Geet (Film A)")])
+        out = f"{self.tmp}/titles.xlsx"
+        with open(out, "wb") as f:
+            f.write(export.final_report(f"{self.tmp}/lnv.xlsx", dsp={"fills": [], "adds": adds, "repeats": [], "source": "Muso",
+                                                                       "versions": plan, "picks": picks}))
+        rows = [list(x) for x in load_workbook(out).active.iter_rows(values_only=True)]
+        self.assertEqual(rows[1][1], "Pyaar Ka Geet (Film A)")
+        # every LNV row the song is linked to, and the mapped recording's own row
+        self.assertEqual(sum(1 for x in rows if x[1] == "Pyaar Ka Geet (Film A)"), len(song["links"]) + 1)
+
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
 class DataCleanApiTests(TestCase):
@@ -1330,14 +1381,23 @@ class StepsApiTests(TestCase):
         self.assertEqual(res.status_code, 200)
         log = openpyxl.load_workbook(io.BytesIO(res.content))["MRM changes"]
         self.assertNotIn("Brand New Hit", [r[1] for r in log.iter_rows(min_row=2, values_only=True)])
-        # the lofi's new row names its original, LNV row 2
-        self.assertIn(("Pyaar Ka Geet - Lofi Flip", "Added version", "Lofi of 'Pyaar Ka Geet' (row 2)"), [(r[1], r[2], r[3].split(";")[0]) for r in log.iter_rows(min_row=2, values_only=True)])
+        # the rows A–Z, each song's rows together under its main version (the oldest Muso recording with no tag), with
+        # the main version's row and title, and the row each one had in the uploaded LNV
+        sheet = openpyxl.load_workbook(io.BytesIO(res.content)).worksheets[0]
+        head = [c.value for c in sheet[1]]
+        got = [(r[1], r[head.index("Main version row")], r[head.index("Main version title")], r[head.index("Row in the uploaded LNV")])
+               for r in sheet.iter_rows(min_row=2, values_only=True) if r[1]]
+        self.assertEqual(got, [("Dil Ki Baat", 2, "Dil Ki Baat", 4), ("Neend Na Aaye", 3, "Neend Na Aaye", 6),
+                               ("Pyaar Ka Geet", 4, "Pyaar Ka Geet", 2), ("Pyaar Ka Geet - Lofi Flip", 4, "Pyaar Ka Geet", None),
+                               ("Pyar Ka Geet", 4, "Pyaar Ka Geet", 3), ("Some Other Song", 7, "Some Other Song", 5)])
+        # the lofi's new row names its original, uploaded LNV row 2 – row 4 once sorted; the list's rows are the new ones
+        self.assertIn(("Pyaar Ka Geet - Lofi Flip", "Added version", "Lofi of 'Pyaar Ka Geet' (row 4)"), [(r[1], r[2], r[3].split(";")[0]) for r in log.iter_rows(min_row=2, values_only=True)])
         # A value the reviewer took from Muso over the LNV's own goes into that LNV cell
         self.assertEqual(decide({"key": "pick:4:Title", "choice": "muso", "data": {"value": "Dil Ki Baat (Muso)"}}), {"saved": 1})
         self.assertEqual(self.client.get(f"{url}?step=1").json()["step"]["picks"], {"pick:4:Title": "Dil Ki Baat (Muso)"})
         book = openpyxl.load_workbook(io.BytesIO(self.client.get(f"/api/clients/{cid}/steps/lnv/").content))
-        self.assertEqual(book.worksheets[0].cell(4, 2).value, "Dil Ki Baat (Muso)")
-        self.assertIn((4, "Title changed"), [(r[0], r[2]) for r in book["MRM changes"].iter_rows(min_row=2, values_only=True)])
+        self.assertEqual(book.worksheets[0].cell(2, 2).value, "Dil Ki Baat (Muso)")   # uploaded row 4, first A–Z
+        self.assertIn((2, "Title changed"), [(r[0], r[2]) for r in book["MRM changes"].iter_rows(min_row=2, values_only=True)])
         res = self.client.get(f"/api/clients/{cid}/steps/merged/")
         self.assertEqual(res.status_code, 200)
         wb = openpyxl.load_workbook(io.BytesIO(res.content))
@@ -1363,3 +1423,26 @@ class StepsApiTests(TestCase):
         self.assertEqual(sum(body["counts"]["3"][k] for k in ("matched", "amend", "register")), 67)
         self.assertTrue(all(a["records"][0]["src"] == "LNV" and a["records"][1]["src"] == "IPRS" for a in three["amend"]))
         self.assertIsNone(body["counts"]["1"])   # no Muso export yet
+
+    def test_map_and_title_through_the_api(self):
+        """Step 2's map and title answers: saved, shown on the step (the mapped recording under the song it joined,
+        the title by recording id) and written into the final LNV."""
+        cid = self.client.post("/api/clients/", {"name": CLIENT}, content_type="application/json").json()["id"]
+        self._post(f"/api/clients/{cid}/master/", f"{self.tmp}/lnv.xlsx")
+        self._post(f"/api/clients/{cid}/clean/", f"{self.tmp}/muso.xlsx")
+        save = lambda items: self.client.post(f"/api/clients/{cid}/clean/decisions/", {"items": items, "quiet": True}, content_type="application/json")
+        self.assertEqual(save([{"key": "map:5", "choice": "move"}]).status_code, 400)
+        self.assertEqual(save([{"key": "map:5", "choice": "join", "data": {"to": 3, "row": 2, "title": "Pyaar Ka Geet", "from": "Brand New Hit"}},
+                               {"key": "title:5", "choice": "custom", "data": {"value": "Brand New Hit (Remake)"}}]).status_code, 200)
+        step = self.client.get(f"/api/clients/{cid}/steps/?step=1").json()["step"]
+        self.assertEqual(step["titles"]["5"], {"mode": "custom", "value": "Brand New Hit (Remake)"})
+        home = next(c for c in step["cases"] if c["title"] == "Pyaar Ka Geet")
+        mapped = next(r for r in home["muso"] if r["id"] == 5)
+        self.assertEqual(mapped["moved"], {"from": "Brand New Hit", "row": 2, "title": "Pyaar Ka Geet"})
+        self.assertNotIn("Brand New Hit", [c["title"] for c in step["cases"]])
+        res = self.client.get(f"/api/clients/{cid}/steps/lnv/")
+        self.assertEqual(res.status_code, 200, res.content[:300])
+        rows = [list(x) for x in openpyxl.load_workbook(io.BytesIO(res.content)).active.iter_rows(values_only=True)]
+        head = rows[0]
+        added = next(x for x in rows if x[1] == "Brand New Hit (Remake)")
+        self.assertEqual(added[head.index("Original Work")], "Pyaar Ka Geet")

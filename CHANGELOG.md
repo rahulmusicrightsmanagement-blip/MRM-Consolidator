@@ -1,5 +1,41 @@
 # MRM changelog
 
+## 1.2.0 – 2026-11-18 (minor)
+- The downloaded LNV comes in alphabetical order with each song's rows together under its main version, plus columns for the main version's row, its title, and each row's number in the uploaded LNV
+
+## 1.1.8 – 2026-11-18 (patch)
+- Exact and possible matches listed in LNV row order, lowest row first
+
+## 1.1.7 – 2026-11-18 (patch)
+- No more duplicate cards: one card per LNV row with every Muso recording matched to it (their differing values offered side by side), LNV rows with the very same data shown together as LNV rows 468, 475, and a note when a possible match's row is already an exact match
+
+## 1.1.6 – 2026-11-18 (patch)
+- New favicon: the music note on the app's green with a mint tick, plus PNG and home-screen icons
+
+## 1.1.5 – 2026-11-18 (patch)
+- The exact matches scroll across by holding the mouse and dragging, with the left and right arrow keys, or with the arrow buttons
+
+## 1.1.4 – 2026-11-18 (patch)
+- The version is shown at the bottom left of the sidebar, above the profile name
+
+## 1.1.3 – 2026-11-18 (patch)
+- One line above the song list says how the numbers add up: Muso songs, matched under song names, not in the LNV, still to answer, to check, other questions
+
+## 1.1.2 – 2026-11-18 (patch)
+- The Yes, exact match and Yes, same song ticks moved to the bottom of each match, all in one line, with Not a match under them; Muso-or-LNV choices line up the same way
+
+## 1.1.1 – 2026-11-18 (patch)
+- The main version no longer stays frozen on top of a song – it scrolls with the page
+
+## 1.1.0 – 2026-11-18 (minor)
+- Step 2 regrouped by song name: Songs and Not in the LNV lists; each song shows its main version frozen on top, exact matches side by side with a tick and a title each, possible matches one below another with Muso-or-LNV value picks; changes save by themselves or with Save; Not a match sends a song to a new row or maps it; sort and filter the list
+
+## 1.0.1 – 2026-11-18 (patch)
+- Search in the Exact / Possible / Not in the LNV tab looks only in that tab
+
+## 1.0.0 – 2026-11-18 (major)
+- New look for newcomers: larger text everywhere, a how-it-works guide on each screen, details in a big popup (80% of the screen, page blurred, ← → between versions and LNV rows); step 2 reads top down – main version, the LNV rows that may be it with their row numbers, the other Muso versions – and a Titles part to choose each recording's LNV title (same as main, Muso, LNV, typed) or map it, alone or with all its versions, to a song the app matched exactly
+
 ## 0.43.1 – 2026-11-16 (patch)
 - Merged main into version-2 (kept this branch's screens); the LNV's release date, website and Spotify ID columns are now read
 

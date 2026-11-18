@@ -7,7 +7,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .dataclean import person_key, phonetic, same_people, title_key
+from .dataclean import VERSION_RE, person_key, phonetic, same_people, title_key
 from .iprs import SHARE_KEYS
 from .master import read_layout
 from .xlsx_patch import PatchSheet
@@ -271,7 +271,7 @@ def _picks(ws, layout, dsp):
             new = values[0][:4] if field == "Year" else values[0]
             cell = ws.cell(row, col + 1)
             cell.value, cell.fill = new, FILLED_FILL
-        changes.append([row, title, f"{field} changed", f"{old or '(blank)'} → {new} – the {dsp['source']} value, chosen by the reviewer"])
+        changes.append([row, title, f"{field} changed", f"{old or '(blank)'} → {new} – " + (p.get("why") or f"the {dsp['source']} value, chosen by the reviewer")])
     return changes
 
 
@@ -525,13 +525,15 @@ def _write_fill_row(ws, iprs_blocks, row, f):
     return changes
 
 
-def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=None):
+def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=None, arrange=None):
     """The final LNV: the client's own LNV file with everything applied – the IPRS columns filled from the IPRS
     report and the values the reviewer chose to take from IPRS (yellow), step 1's answers from the DSP export (blank
     fields filled, yellow; repeats marked, orange), and the songs the LNV was missing appended (green): the DSP's new
     songs and the IPRS-only works, a song that is both added once. A DSP song's versions the LNV lacks (remix, lofi …)
     get rows of their own (VERSION "MOD") naming their original in two columns, Original Work and Original Movie /
-    Album, added after the LNV's last column. Every change is listed in "MRM changes"."""
+    Album, added after the LNV's last column. Every change is listed in "MRM changes".
+    arrange (review.families, the step 2 download): the rows in alphabetical order, each song's rows together under its
+    main version, with three columns more – the main version's row, its title, and the row in the uploaded LNV."""
     ws = PatchSheet(master_path)   # only the changed cells are written: a whole LNV takes openpyxl about a minute
     layout = read_layout([c.value for c in ws[1]])
     iprs_blocks = [b for b in layout["blocks"] if b["society"] == "IPRS"]
@@ -547,6 +549,7 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
         changes += _dsp_changes(ws, layout, dsp)
 
     last = max([s for s in range(1, ws.max_row + 1) if any(ws.cell(s, c).value not in (None, "") for c in (1, 2))] + [1])
+    uploaded = last   # the uploaded LNV's last row: the rows after it are new
     sn = last - 1
     added_works = [works[r["iprs_works"][0]] for r in (final or {}).get("added", [])]
     iprs_rows = {}
@@ -606,7 +609,100 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
         changes.append([last, v["title"], "Added version", f"{_version_of({**v, 'original': o})}; not in the LNV; from {dsp['source']}"
                         + (f" (ISRC {v['isrcs'][0]})" if v.get("isrcs") else "")])
 
+    if arrange is not None:
+        changes = _arrange(ws, layout, last, uploaded, arrange, changes)
     return ws.save(changes, ["LNV row", "Title", "Change", "Detail"], (10, 45, 22, 90))
+
+
+ARRANGE_COLUMNS = ("Main version row", "Main version title", "Row in the uploaded LNV")
+_ISRC = re.compile(r"[A-Z]{2}[A-Z0-9]{3}\d{7}")
+_sort_text = lambda t: re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", (t or "").lower())).strip()
+
+
+def _arrange(ws, layout, last, uploaded, fam, changes):
+    """The LNV in alphabetical order with each song's rows together: the songs A–Z by their main version's title,
+    the main version's row first, then the song's other rows A–Z. A song is one song name as step 2 groups it
+    (review._family, a name only versions carry joined to the shorter one); its main version is the oldest DSP
+    recording with no tag (review.families) – its row found by ISRC, else the row it is linked to – or, when the LNV
+    has no row of it, the LNV's own oldest plain row of that name. Three columns after the last: the main version's row
+    (in this sorted file), its title, and the row each one had in the uploaded LNV (blank for a new row). The change
+    list's row numbers follow the new order."""
+    from .review import _family, plainness
+    fields = layout["fields"]
+    get = lambda r, f: clean_text(ws.cell(r, fields[f] + 1).value) if f in fields else ""
+    joins, mains = fam.get("joins") or {}, fam.get("mains") or {}
+
+    def key_of(title):
+        k = _family(title) if title else None
+        while k in joins:
+            k = joins[k]
+        return k
+    rows = []
+    for r in range(2, last + 1):
+        title = get(r, "title")
+        rows.append({"row": r, "title": title, "key": key_of(title), "isrcs": set(_ISRC.findall(get(r, "isrc").upper())),
+                     "year": (get(r, "release_year") or "")[:4]})
+    # a name only the LNV's versions carry joins the shorter name it starts with ('Maula Mere Maula Anwar Flip'), as
+    # step 2 does for the DSP's
+    names = sorted({x["key"] for x in rows if x["key"]}, key=len)
+    for k in reversed(names):
+        xs = [x for x in rows if x["key"] == k]
+        base = next((b for b in reversed(names) if 8 <= len(b) < len(k) and k.startswith(b)), None)
+        if base and k not in mains and xs and all(VERSION_RE.search(x["title"]) for x in xs):
+            for x in xs:
+                x["key"] = base
+    by_isrc = {}
+    for x in rows:
+        for i in x["isrcs"]:
+            by_isrc.setdefault(i, []).append(x)
+    groups = {}
+    for x in rows:
+        if x["title"]:
+            groups.setdefault(x["key"] or "row:" + str(x["row"]), []).append(x)
+
+    main_of = {}
+    for k, xs in groups.items():
+        m = mains.get(k)
+        here = {x["row"] for x in xs}
+        found = None
+        if m:
+            hits = [y for i in m["isrcs"] for y in by_isrc.get(i, [])]
+            hits.sort(key=lambda y: (y["row"] not in here, y["row"] not in m["rows"], y["row"]))
+            found = hits[0] if hits else next((y for y in rows if y["row"] in m["rows"]), None)
+        if not found:   # no row of the DSP's main version: the LNV's oldest plain row of the name
+            found = min(xs, key=lambda y: (plainness(y["title"]), y["year"] or "9999", y["row"]))
+        main_of[k] = found
+
+    def name(k):
+        m = main_of[k]
+        return _sort_text(m["title"] if m["key"] == k or k.startswith("row:") else min(x["title"] for x in groups[k]))
+    order = []
+    for k in sorted(groups, key=lambda k: (name(k), k)):
+        m = main_of[k]
+        order += sorted(groups[k], key=lambda y: (y is not m, _sort_text(y["title"]), y["row"]))
+    order += [x for x in rows if not x["title"]]   # rows with no title stay together at the end
+    new_of = {x["row"]: n for n, x in enumerate(order, start=2)}
+    ws.order = [x["row"] for x in order]
+
+    # the three columns, after the LNV's last one
+    col = max([c for c, h in enumerate(ws[1]) if clean_text(h.value)] + [fields.get(f, -1) for f in ORIGINAL_COLUMNS] + [-1])
+    for i, header in enumerate(ARRANGE_COLUMNS, start=1):
+        _put(ws, 1, col + i, header, ADDED_FILL)
+    for k, xs in groups.items():
+        m = main_of[k]
+        for x in xs:
+            ws.cell(x["row"], col + 2).value = new_of[m["row"]]
+            ws.cell(x["row"], col + 3).value = m["title"]
+    for x in rows:
+        if x["row"] <= uploaded and x["title"]:
+            ws.cell(x["row"], col + 4).value = x["row"]
+
+    renum = lambda text: re.sub(r"\b(rows?) (\d+)", lambda m: f"{m.group(1)} {new_of.get(int(m.group(2)), m.group(2))}", text)
+    out = [[new_of.get(c[0], c[0]) if isinstance(c[0], int) else c[0], c[1], c[2], renum(c[3]) if isinstance(c[3], str) else c[3]] for c in changes]
+    out.insert(0, [None, "", "Sorted A–Z", "Rows in alphabetical order, each song's rows together, its main version first. "
+                   "'Main version row' and 'Main version title' name each song's main version; 'Row in the uploaded LNV' is the row "
+                   "each one had before. Row numbers in this list are the new ones."])
+    return out
 
 
 def step_workbook(step, result, actions=None):
