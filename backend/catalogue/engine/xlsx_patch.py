@@ -62,6 +62,8 @@ class PatchSheet:
         with Book(path) as book:
             self.rows = book.rows(book.sheetnames[0])
         self.values, self.fills = {}, {}
+        # the rows in a new order (old row numbers, from row 2): None keeps them where they are
+        self.order = None
 
     def cell(self, row, col):
         return _Cell(self, row, col)
@@ -198,9 +200,39 @@ class PatchSheet:
         out.extend(self._row(r, "", edits[r], style_of) for r in pending)
         out.append(xml[end:])
         sheet = "".join(out)
+        if self.order:
+            sheet = self._reorder(sheet)
         last_row = max([len(self.rows)] + list(edits))
         return re.sub(r'(<dimension ref="[A-Z]+\d+:)([A-Z]+)(\d+)"',
                       lambda d: f'{d.group(1)}{d.group(2)}{max(int(d.group(3)), last_row)}"', sheet, count=1)
+
+    def _reorder(self, xml):
+        """The rows from row 2 put in self.order, each renumbered with its cells. A formula in a moved row that points
+        into this sheet would point at another row now: it keeps its value only (one into another file stays). A merge
+        within one row moves with it; one across rows is dropped."""
+        start = xml.index("<sheetData")
+        head_end = xml.index(">", start) + 1
+        end = xml.index("</sheetData>", head_end)
+        rows = {}
+        for m in ROW_RE.finditer(xml, head_end, end):
+            rows[int(re.search(r'\br="(\d+)"', m.group(0)[:200]).group(1))] = m.group(0)
+        new_of = {old: n for n, old in enumerate(self.order, start=2)}
+
+        def renumber(x, n):
+            x = re.sub(r'^(<row\b[^>]*?\br=")\d+"', lambda m: f'{m.group(1)}{n}"', x, count=1)
+            x = re.sub(r'(<c\b[^>]*?\br="[A-Z]+)\d+"', lambda m: f'{m.group(1)}{n}"', x)
+            return re.sub(r"<f\b[^>]*?(?:/>|>([^<]*)</f>)", lambda m: m.group(0) if m.group(1) and "!" in m.group(1) else "", x)
+        placed = sorted(((new_of.get(r, r), renumber(x, new_of[r]) if r in new_of and new_of[r] != r else x) for r, x in rows.items()), key=lambda t: t[0])
+        xml = xml[:head_end] + "".join(x for _, x in placed) + xml[end:]
+
+        def merge(m):
+            a, b = (int(x) for x in re.findall(r"\d+", m.group(1)))
+            if a != b:   # across rows: it cannot follow rows that part
+                return "" if a in new_of or b in new_of else m.group(0)
+            return m.group(0).replace(m.group(1), re.sub(r"(?<=[A-Z])\d+", str(new_of.get(a, a)), m.group(1)))
+        xml = re.sub(r'<mergeCell ref="([A-Z]+\d+:[A-Z]+\d+)"\s*/>', merge, xml)
+        xml = re.sub(r'<mergeCells count="\d+"', lambda m: f'<mergeCells count="{len(re.findall("<mergeCell ", xml))}"', xml, count=1)
+        return re.sub(r'<mergeCells count="0"\s*(?:/>|>\s*</mergeCells>)', "", xml)
 
     def _row(self, r, old, edits, style_of):
         """One <row>: its old cells, the edited ones rewritten, new ones added in column order."""

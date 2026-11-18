@@ -1,1 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#1f4e46"/><path d="M12 22.5a3 3 0 1 1-2-2.83V9.5l11-2.5v12.5a3 3 0 1 1-2-2.83V10.6l-7 1.6z" fill="#fff"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- MRM-Consolidator: the music note on the app's green, with a mint tick – songs checked and brought together -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#23946f"/>
+      <stop offset="1" stop-color="#0c4637"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#bg)"/>
+  <path d="M11 21.3a3.2 3.2 0 1 1-2.1-3V8.2l11.6-2.6v12.6a3.2 3.2 0 1 1-2.1-3V9.3l-7.4 1.7z" fill="#fff"/>
+  <circle cx="24.6" cy="24.6" r="6.2" fill="#5fd3b0" stroke="#0c4637" stroke-width="1.6"/>
+  <path d="M21.9 24.7l1.9 1.9 3.5-3.7" fill="none" stroke="#06261d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

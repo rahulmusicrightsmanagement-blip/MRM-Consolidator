@@ -68,6 +68,8 @@ export function AppShell({ children, trail, side }: { children: ReactNode; trail
         </nav>
         {side}
         <div className="side-foot">
+          {/* the app's version, just above the signed-in user */}
+          <div className="side-ver" title={`MRM-Consolidator v${VERSION}`}><span className="lbl">MRM-Consolidator</span><b>v{VERSION}</b></div>
           <UserMenu theme={theme} onTheme={() => setTheme(NEXT[theme])} />
         </div>
       </aside>

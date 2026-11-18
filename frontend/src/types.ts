@@ -451,7 +451,7 @@ export interface User {
 
 /* ---------- data clean (step 1: today's LNV against one DSP sheet) ---------- */
 
-export type CleanChoice = 'ignore' | 'keep' | 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none' | 'accepted' | 'rejected' | 'pending' | 'set' | 'muso'
+export type CleanChoice = 'ignore' | 'keep' | 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none' | 'accepted' | 'rejected' | 'pending' | 'set' | 'muso' | 'join' | 'main' | 'lnv' | 'custom'
 export interface CleanDecisionT { choice: CleanChoice; data?: { keep?: number | string; row?: number; rows?: number[] }; auto?: boolean; why?: string }
 export type CreditKind = 'writer' | 'shared' | 'medley' | 'performer'
 
@@ -512,6 +512,8 @@ export interface CaseRecord extends SongRecord {
   id?: number; sheet_rows?: number[]; in?: boolean
   /** Where this DSP recording goes in the LNV: the song's own row (original), or a version's row – lnv_row when the LNV has it */
   part?: 'original' | 'version'; lnv_row?: number | null
+  /** Mapped by the reviewer onto this (exactly matched) song: the song it came from, and the LNV row it joined */
+  moved?: { from?: string; row?: number; title?: string } | null
   /** The same-song rule on this LNV row: writers same · differ · blank; publisher same · differ · unchecked */
   check?: {
     writers: 'same' | 'close' | 'differ' | 'blank'; publisher: 'same' | 'differ' | 'unchecked'
@@ -537,6 +539,8 @@ export interface CaseAnswer {
 }
 export interface ReviewCase {
   id: string; kind: CaseKind; title: string; why: string; tone?: string | null; isrc?: boolean; popularity?: number
+  /** One song name's songs share it – its original, remixes, lofis, parts (the screen shows them together); none for a medley */
+  family?: string | null
   /** step 1's merge items this song is made of: each one's recordings (ids) and answer */
   merge: { key: string; status: 'pending' | 'accepted' | 'rejected'; by: 'app' | 'you'; items: { key: string; ids: number[]; status: string }[] } | null
   muso: CaseRecord[]; lnv: CaseRecord[]; answer: CaseAnswer; done: boolean
@@ -555,6 +559,7 @@ export interface ReviewCase {
    *  sure – the same writers, else only a shared writer */
   origin?: (CaseRecord & { sure: boolean }) | null
 }
+export type TitleMode = 'main' | 'muso' | 'lnv' | 'custom'
 export interface Step1 {
   source: string
   counts: {
@@ -567,6 +572,8 @@ export interface Step1 {
   }
   /** "pick:<row>:<field>" -> the DSP value the reviewer chose over the LNV's */
   picks: Record<string, string | string[]>
+  /** recording id -> the title the reviewer chose for it in the LNV: main · muso · lnv · custom */
+  titles: Record<string, { mode: TitleMode; value: string }>
   cases: ReviewCase[]
   lnv_only: { row: number; title: string; film: string; year: string; writers: string[] }[]
   /** One answer that settles many songs: a name under two spellings, a DSP name that is no writer, one company under two names */

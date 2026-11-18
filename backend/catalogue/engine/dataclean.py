@@ -701,13 +701,19 @@ def _recordings(rows, idxs, people):
     return out
 
 
-def _dsp_songs(rows, people, groups, lyricist_keys=frozenset()):
-    """DSP songs from step 1's merge (songmerge.songs: lists of row indexes)."""
+def _dsp_songs(rows, people, groups, lyricist_keys=frozenset(), moved=frozenset()):
+    """DSP songs from step 1's merge (songmerge.songs: lists of row indexes). moved: rows of recordings the reviewer
+    mapped onto a song – they join it as its versions and never become its main recording (the song keeps its key)."""
     songs = []
     for idxs in groups:
         idxs = _primary_order(rows, idxs)
+        if moved:
+            idxs = [i for i in idxs if i not in moved] + [i for i in idxs if i in moved]
         p = rows[idxs[0]]
         original, parts = _parts(rows, idxs)
+        if original and moved and set(original["rows"]) <= moved and any(not set(x["rows"]) <= moved for x in parts):
+            # a plain recording mapped onto a song of versions only stays a recording of its own (a re-release)
+            original, parts = None, parts + [{**original, "type": REISSUE}]
         isrcs = list(OrderedDict.fromkeys(t for i in idxs for t in rows[i]["isrcs"]))
         lyricists = list(OrderedDict((person_key(x), x) for i in idxs for x in rows[i]["lyricists"]).values())
         composers = list(OrderedDict((person_key(x), x) for i in idxs for x in rows[i]["composers"]).values())
@@ -1010,7 +1016,7 @@ def _crew(dsp):
     return out
 
 
-def match(master, dsp, client_name="", aliases=None, links=None, groups=None, rules=None):
+def match(master, dsp, client_name="", aliases=None, links=None, groups=None, rules=None, moved=frozenset()):
     """Compare the LNV (parse_master result) with one DSP sheet (parse_dsp result).
     aliases: {name key: canonical key} from "same person" decisions.
     links: {DSP song key: {"choice": "same" | "none", "rows": [LNV rows]}} from link decisions.
@@ -1036,7 +1042,7 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
     if groups is None:
         from .songmerge import analyse, songs as merged
         groups = merged(analyse(dsp["rows"]), {})
-    songs = _dsp_songs(dsp["rows"], people, groups, lyricist_keys)
+    songs = _dsp_songs(dsp["rows"], people, groups, lyricist_keys, moved)
     name_pairs = defaultdict(lambda: {"n": 0, "songs": []})   # one name each side keeps a link apart: worth asking
     # The other single causes worth one decision: one extra DSP writer, or one publisher under two names
     extra_writers = defaultdict(lambda: {"n": 0, "songs": []})
@@ -1331,6 +1337,63 @@ def lnv_versions(result, master_songs):
             seen.update(p["isrcs"])
             rows.append({**p, "lyricists": song["lyricists"], "composers": song["composers"], "original": original})
     return {"rows": rows, "named": named}
+
+
+TITLE_MODES = {"main": "the main version's title", "muso": "the DSP title", "lnv": "the LNV title", "custom": "a title typed by the reviewer"}
+
+
+def titles_of(decisions):
+    """The reviewer's titles: {recording id (its first sheet row): {"mode", "value"}} from "title:<id>" decisions."""
+    out = {}
+    for key, d in decisions.items():
+        value = str((d.get("data") or {}).get("value") or "").strip()
+        if key.startswith("title:") and key[6:].isdigit() and d.get("choice") in TITLE_MODES and value:
+            out[int(key[6:])] = {"mode": d["choice"], "value": value[:300]}
+    return out
+
+
+def apply_titles(result, versions, adds, titles):
+    """Each title the reviewer chose, written where its recording lands in the LNV: the LNV row the song or version is
+    linked to (a change on that row, like a value taken from the DSP), the row of its own a version gets, the row an
+    added song gets. A recording is known by its first sheet row, so a title follows its recording wherever the
+    answers put it. Returns (picks for LNV rows, versions, adds) – versions and their originals renamed too."""
+    if not titles:
+        return [], versions, adds
+    of = lambda sheet: next((titles[x] for x in sheet or () if x in titles), None)
+    why = lambda t: f"{TITLE_MODES[t['mode']]}, chosen by the reviewer"
+    choice = lambda item: (item.get("decision") or {}).get("choice")
+    homes = [(m["song"], [l["row"] for l in m["links"]]) for m in result["matched"]]
+    homes += [(c["song"], (c["decision"].get("data") or {}).get("rows", [])) for c in result["check"] if choice(c) == "same"]
+    picks, by_row = [], {}
+    for song, rows in homes:
+        o = song.get("original")
+        t = o and of(o.get("sheet"))
+        for r in rows if t else ():
+            picks.append({"row": r, "field": "Title", "value": t["value"], "why": why(t)})
+            by_row[r] = t["value"]
+        for p in song.get("parts", []):
+            t = p["lnv_row"] and of(p.get("sheet"))
+            if t:
+                picks.append({"row": p["lnv_row"], "field": "Title", "value": t["value"], "why": why(t)})
+                by_row[p["lnv_row"]] = t["value"]
+    by_add = {}
+    out_adds = []
+    for m in adds:
+        o = m.get("original")
+        t = o and of(o.get("sheet"))
+        if t:
+            by_add[m["key"]] = t["value"]
+            m = {**m, "original": {**o, "title": t["value"]}}
+        out_adds.append(m)
+
+    def named(o):
+        title = by_row.get(o.get("row")) if o.get("row") else by_add.get(o.get("add")) if o.get("add") else None
+        return {**o, "title": title} if title else o
+    rows = []
+    for v in versions.get("rows", []):
+        t = of(v.get("sheet"))
+        rows.append({**v, "title": t["value"] if t else v["title"], "original": named(v["original"])})
+    return picks, {"rows": rows, "named": [{**v, "original": named(v["original"])} for v in versions.get("named", [])]}, out_adds
 
 
 def _filled(l):

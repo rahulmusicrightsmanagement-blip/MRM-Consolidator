@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import {
   AlertTriangle, ArrowDown, ArrowUp, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDashed, CircleHelp,
-  Download as DownloadIcon, FileSpreadsheet, Info, Search, Trash2, UploadCloud, X, XCircle,
+  Download as DownloadIcon, FileSpreadsheet, Info, Lightbulb, Search, Trash2, UploadCloud, X, XCircle,
 } from 'lucide-react'
 
 /* ---------- layout ---------- */
@@ -176,29 +177,57 @@ export function FileDrop({ title, hint, accept, fileName, busy, onFile, compact 
 
 /* ---------- drawer ---------- */
 
-export function Drawer({ open, onClose, title, subtitle, children, width = 720 }: {
-  open: boolean; onClose: () => void; title: ReactNode; subtitle?: ReactNode; children: ReactNode; width?: number
+/** The details popup: 80% of the screen, centred over the page, which is dimmed and blurred behind it. Esc or a click
+ *  outside closes it; the popup takes the keyboard focus, so arrow keys its opener listens for work at once. */
+export function Drawer({ open, onClose, title, subtitle, children, actions }: {
+  open: boolean; onClose: () => void; title: ReactNode; subtitle?: ReactNode; children: ReactNode; width?: number; actions?: ReactNode
 }) {
+  const ref = useRef<HTMLElement>(null)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeRef.current() }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
+    const before = document.activeElement as HTMLElement | null
+    ref.current?.focus({ preventScroll: true })
+    const overflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = overflow; before?.focus?.({ preventScroll: true }) }
+  }, [open])
   if (!open) return null
-  return (
-    <div className="drawer-backdrop" onClick={onClose}>
-      <aside className="drawer" style={{ width }} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+  // in <body>: above the sidebar and every sticky bar, so the whole page is dimmed and blurred
+  return createPortal(
+    <div className="drawer-backdrop pop-backdrop" onClick={onClose}>
+      <aside ref={ref} tabIndex={-1} className="drawer pop" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <header className="drawer-head">
-          <div>
+          <div className="grow">
             <h2>{title}</h2>
             {subtitle && <div className="drawer-sub">{subtitle}</div>}
           </div>
-          <Button variant="ghost" onClick={onClose} aria-label="Close" icon={<X size={18} />} />
+          {actions}
+          <Button variant="ghost" onClick={onClose} aria-label="Close (Esc)" title="Close (Esc)" icon={<X size={20} />} />
         </header>
         <div className="drawer-body">{children}</div>
       </aside>
-    </div>
+    </div>,
+    document.body,
+  )
+}
+
+/** A short "how this screen works" card for people new to the app: numbered steps in plain words. Hiding it is
+ *  remembered in this browser; a small link brings it back. */
+export function Guide({ id, title, steps, children }: { id: string; title: ReactNode; steps: ReactNode[]; children?: ReactNode }) {
+  const key = `mrm-guide-${id}`
+  const [open, setOpen] = useState(() => { try { return localStorage.getItem(key) !== '0' } catch { return true } })
+  const set = (v: boolean) => { setOpen(v); try { localStorage.setItem(key, v ? '1' : '0') } catch { /* private mode */ } }
+  if (!open) return <button type="button" className="guide-show" onClick={() => set(true)}><Lightbulb size={15} />How this screen works</button>
+  return (
+    <section className="guide" aria-label="How this screen works">
+      <header><Lightbulb size={18} /><b>{title}</b><span className="grow" /><button type="button" className="guide-hide" onClick={() => set(false)}>Got it – hide</button></header>
+      <ol>{steps.map((s, i) => <li key={i}><span className="guide-n">{i + 1}</span><span>{s}</span></li>)}</ol>
+      {children}
+    </section>
   )
 }
 

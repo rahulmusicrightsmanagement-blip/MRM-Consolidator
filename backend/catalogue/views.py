@@ -584,7 +584,9 @@ ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:")
 CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}, "name": {"same", "different"},
                  "junk": {"fix", "ok"}, "missing": {"add", "not_ours"}, "fill": {"accept", "reject"}, "link": {"same", "none"},
                  "merge": {"accepted", "rejected", "pending"}, "type": {"set"}, "version": {"same", "none"},
-                 "writer": {"ignore", "keep"}, "pub": {"same", "different"}, "pick": {"muso"}}
+                 "writer": {"ignore", "keep"}, "pub": {"same", "different"}, "pick": {"muso"},
+                 # a recording mapped onto an exactly matched song · the title that goes into the LNV for a recording
+                 "map": {"join"}, "title": set(dataclean.TITLE_MODES)}
 # Answers about people and companies, not about one client's songs: kept once, for every client
 GLOBAL_DECISIONS = ("name:", "writer:", "pub:")
 
@@ -635,7 +637,7 @@ def _clean_result(client, decisions):
     if not master or not dsp:
         return master, dsp, None
     aliases, links = dataclean.learned(decisions)
-    merges = {k: d for k, d in decisions.items() if k.startswith("merge:")}
+    merges = {k: d for k, d in decisions.items() if k.startswith(("merge:", "map:"))}
     rules = dataclean.rules_of(decisions)
     stamp = (master.id, master.file.name, dsp.id, dsp.sheet, client.name, json.dumps([aliases, links, merges, rules], sort_keys=True), ENGINE_VERSION)
     key = f"clean-{client.id}-{hashlib.sha1(repr(stamp).encode()).hexdigest()}"
@@ -644,7 +646,8 @@ def _clean_result(client, decisions):
         parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
         sheet, merge = _dsp_sheet(dsp)
         with measure("processing"):
-            return dataclean.match(parsed, sheet, client.name, aliases, links, songmerge.songs(merge, decisions), rules)
+            return dataclean.match(parsed, sheet, client.name, aliases, links, songmerge.songs(merge, decisions), rules,
+                                   songmerge.moved_rows(merge, decisions))
     result = dataclean.apply_decisions(_cached(key, build), decisions)
     summary = {**dataclean.summary_counts(result), **({"flow": dsp.summary["flow"]} if (dsp.summary or {}).get("flow") else {})}
     if summary != dsp.summary:
@@ -839,15 +842,22 @@ def lnv_update_export(request, client_id):
             "source": dsp.source}
     run = _iprs_run(client)
     result = compute(run) if run else None
+    arrange = {}   # the rows A–Z, each song's together under its main version (step 2's song names)
     try:
         if dsp_part:   # each version of a song the LNV lacks gets a row of its own
             parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
+            sheet, merge = _dsp_sheet(dsp)
+            arrange = review.families(review.build(sheet, merge, decisions, clean, parsed)["cases"])
             dsp_part["versions"] = dataclean.lnv_versions(clean, parsed["songs"])
+            # the titles the reviewer chose, where each recording lands (after the older Title picks: they win)
+            titled, dsp_part["versions"], dsp_part["adds"] = dataclean.apply_titles(
+                clean, dsp_part["versions"], dsp_part["adds"], dataclean.titles_of(decisions))
+            dsp_part["picks"] += titled
         if result and result.get("final"):
             content = export.final_report(master.file.path, result["iprs"], result["final"], _master_edits(client),
-                                          fill_plan(run, result), dsp_part)
+                                          fill_plan(run, result), dsp_part, arrange=arrange)
         else:
-            content = export.final_report(master.file.path, dsp=dsp_part)
+            content = export.final_report(master.file.path, dsp=dsp_part, arrange=arrange)
     except (FileNotFoundError, DriveError) as e:
         return JsonResponse({"error": f"The LNV could not be opened: {e}"}, status=502)
     return _xlsx(content, f"{client.name.replace(' ', '_')}_LNV_final_{date.today()}")

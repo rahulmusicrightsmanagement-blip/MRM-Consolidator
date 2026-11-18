@@ -189,9 +189,24 @@ def analyse(rows):
 SUGGESTED = {"suggestion", "missing", "extra"}
 
 
-def decision(decisions, item_id):
+def moves(decisions):
+    """Recordings the reviewer mapped onto an exactly matched song ("map:<recording id>" = join, data.to: that song's
+    main recording id): {recording id: data}. A recording mapped onto one that is itself mapped stays where it is."""
+    out = {}
+    for key, d in decisions.items():
+        if key.startswith("map:") and d.get("choice") == "join" and key[4:].isdigit():
+            to = (d.get("data") or {}).get("to")
+            if isinstance(to, int) or (isinstance(to, str) and to.isdigit()):
+                out[int(key[4:])] = {**(d.get("data") or {}), "to": int(to)}
+    return {k: v for k, v in out.items() if v["to"] not in out and v["to"] != k}
+
+
+def decision(decisions, item_id, moved=None):
+    """A merge item's answer: its status and the recordings left out of it – those the reviewer unticked, and those
+    mapped onto another song (moved: moves(decisions), passed by callers that ask for many items)."""
     d = decisions.get(f"merge:{item_id}") or {}
-    return d.get("choice") or "pending", set((d.get("data") or {}).get("excluded") or [])
+    moved = moves(decisions) if moved is None else moved
+    return d.get("choice") or "pending", set((d.get("data") or {}).get("excluded") or []) | set(moved)
 
 
 def merged(item, status):
@@ -200,19 +215,31 @@ def merged(item, status):
 
 
 def songs(analysis, decisions):
-    """The songs after step 1: lists of row indexes, primary recording first."""
+    """The songs after step 1: lists of row indexes, primary recording first. A mapped recording leaves its own song
+    and joins the song it was mapped onto."""
     recs, ids = analysis["recs"], analysis["ids"]
+    moved = moves(decisions)
     dsu = DSU(len(recs))
     for item_id, item in analysis["items"].items():
-        status, excluded = decision(decisions, item_id)
+        status, excluded = decision(decisions, item_id, moved)
         chosen = [r for r in item["rids"] if ids[r] not in excluded]
         if merged(item, status) and len(chosen) >= 2:
             for r in chosen[1:]:
                 dsu.union(chosen[0], r)
+    rid_of = {x: rid for rid, x in enumerate(ids)}
+    for src, m in moved.items():
+        if src in rid_of and m["to"] in rid_of:
+            dsu.union(rid_of[m["to"]], rid_of[src])
     out = OrderedDict()
     for rid in range(len(recs)):
         out.setdefault(dsu.find(rid), []).append(rid)
     return [[i for r in rids for i in recs[r]] for rids in out.values()]
+
+
+def moved_rows(analysis, decisions):
+    """The sheet row indexes of the mapped recordings: never the main recording of the song they joined."""
+    moved = moves(decisions)
+    return {i for rid, x in enumerate(analysis["ids"]) if x in moved for i in analysis["recs"][rid]}
 
 
 def _final(analysis, decisions):

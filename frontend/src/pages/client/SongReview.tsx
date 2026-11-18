@@ -1,12 +1,22 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, ExternalLink, Maximize2, Minimize2, Search, Undo2, X } from 'lucide-react'
-import { ConfirmDialog, Drawer } from '../../components/ui'
+import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, Search, Undo2, X } from 'lucide-react'
+import { ConfirmDialog, Guide } from '../../components/ui'
 import { api } from '../../lib/api'
 import type { CleanDecisionIn } from '../../lib/api'
 import { useClient } from '../../lib/client'
-import type { CaseKind, CaseRecord, ReviewCase, Step1 } from '../../types'
-import { cellOf, inList, list, n, norm } from './Block'
+import { useToast } from '../../lib/toast'
+import type { CaseKind, CaseRecord, ReviewCase, Step1, TitleMode } from '../../types'
+import { list, n, norm } from './Block'
+import { Act, Block, Compare, Kbd, Legend, LnvCard, LnvRowDetails, MainCard, MapDialog, Part, SHOW, TitleSection, VersionDetails, VersionList, WideBtn,
+  differs, targetsOf, useKeys, useStored, value } from './CaseParts'
+import type { Col, Spot, Target, TitleLine } from './CaseParts'
+import { FamilyView, NO_PENDING, SaveBar, familiesOf, inFamilies, pendingCount, pendingItems, stripSaved, toCheck } from './Families'
+import type { Family, Pending } from './Families'
+import { PICK_SHOWN, draftOf, itemsOf, keyOf, matchOf, pickKey, ready } from './reviewModel'
+import type { Choice, Draft } from './reviewModel'
+
+export { useStored }
 
 /** Step 1 – the LNV is the master; the DSP export (Muso) only brings changes to it. One case per song: the DSP song
  *  next to its LNV row, the names that differ marked, and – always on screen – one button per answer: same song ·
@@ -21,93 +31,7 @@ const KIND: Record<CaseKind, { label: string; short: string; tone: string }> = {
   twice: { label: 'LNV duplicates', short: 'LNV twice', tone: 'bad' },
   left_out: { label: "Not the client's", short: 'Skip', tone: 'soft' },
 }
-const KINDS = Object.keys(KIND) as CaseKind[]
-const SHOW = ['Title', 'Film / album', 'Lyricist', 'Composer', 'Publisher', 'Singer', 'ISRC', 'Year']
-const RULE = {
-  writers: { same: ['good', 'Same writers'], close: ['good', 'Writers: one name extra'], differ: ['bad', 'Different writers'], blank: ['warn', 'Writers missing – cannot check'] },
-  publisher: { same: ['good', 'Same publisher'], differ: ['bad', 'Different publisher'], unchecked: ['warn', 'Publisher not checked'] },
-} as const
-const DECIDES = new Set(['Title', 'Lyricist', 'Composer'])
-const WRITERS = new Set(['Lyricist', 'Composer'])
 
-type Choice = 'same' | 'add' | 'not_ours' | 'different' | null
-/** picks: "pick:<row>:<field>" -> the Muso value chosen over the LNV's, where the two differ */
-type Draft = { in: number[]; rows: number[]; choice: Choice; reject: string[]; picks: Record<string, string | string[]> }
-
-/** Fields where the reviewer may take Muso's value over the LNV's (publisher cells carry shares and IPIs: not here). */
-const PICKABLE = ['Title', 'Film / album', 'Year', 'ISRC', 'Lyricist', 'Composer', 'Singer']
-const pickKey = (row: number, f: string) => `pick:${row}:${f}`
-/** Muso and the LNV hold two different values (a blank is no difference – Muso fills it). */
-function differs(f: string, a: string[], b: string[]) {
-  if (!a.length || !b.length) return false
-  if (f === 'Year') return a[0].slice(0, 4) !== b[0].slice(0, 4)
-  if (WRITERS.has(f) || f === 'Singer' || f === 'ISRC') return a.some((x) => !inList(f, b, x)) || b.some((x) => !inList(f, a, x))
-  return norm(a.join(' ')) !== norm(b.join(' '))
-}
-
-function draftOf(c: ReviewCase, saved: Record<string, string | string[]> = {}): Draft {
-  const a = c.answer
-  const reject = c.updates.filter((u) => !u.accept).map((u) => u.key)
-  const picks = Object.fromEntries(Object.entries(saved).filter(([k]) => c.lnv.some((r) => k.startsWith(`pick:${r.row}:`))))
-  if (c.kind === 'names') return { in: [], rows: [], choice: (a.choice as Choice) ?? null, reject, picks }
-  if (c.kind === 'twice') {   // only an answer the app is sure of (or the reviewer's) is chosen
-    if (!a.choice) return { in: [], rows: [], choice: null, reject, picks }
-    return a.choice === 'different' || a.choice === 'neither' ? { in: [], rows: [], choice: 'different', reject, picks }
-      : { in: [], rows: a.keep ? [a.keep] : [], choice: 'same', reject, picks }
-  }
-  return { in: c.muso.filter((r) => r.in).map((r) => r.id!), rows: a.choice === 'same' ? a.rows ?? [] : [], choice: (a.choice as Choice) ?? null, reject, picks }
-}
-
-/** The decisions one confirm saves (choice null on undo). */
-function itemsOf(c: ReviewCase, d: Draft | null): CleanDecisionIn[] {
-  if (c.kind === 'names') return [d ? { key: c.answer.key!, choice: d.choice as 'same' | 'different', data: { ...c.names! } } : { key: c.answer.key!, choice: null }]
-  if (c.kind === 'twice') {
-    if (!d) return [{ key: c.answer.key!, choice: null }]
-    if (d.choice === 'different') return [{ key: c.answer.key!, choice: c.isrc ? 'neither' : 'different' }]
-    return [{ key: c.answer.key!, choice: c.isrc ? 'owner' : 'duplicate', data: c.isrc ? { row: d.rows[0] } : { keep: d.rows[0] } }]
-  }
-  const out: CleanDecisionIn[] = []
-  // each merge item of the song: its recordings still ticked stay one song, the unticked ones go apart
-  for (const m of c.merge?.items ?? []) {
-    const kept = m.ids.filter((id) => d?.in.includes(id))
-    if (!d) out.push({ key: m.key, choice: null })
-    else if (kept.length <= 1) out.push({ key: m.key, choice: 'rejected' })
-    else out.push({ key: m.key, choice: 'accepted', data: { excluded: m.ids.filter((id) => !d.in.includes(id)) } })
-  }
-  const song = c.answer.song!
-  // the values taken from Muso: kept for the rows the song is linked to, cleared everywhere else
-  const picks = (rows: number[]) => c.lnv.forEach((r) => PICKABLE.forEach((f) => {
-    const key = pickKey(r.row!, f)
-    const v = rows.includes(r.row!) ? d?.picks[key] : undefined
-    out.push(v !== undefined ? { key, choice: 'muso', data: { value: v } } : { key, choice: null })
-  }))
-  if (!d) { out.push({ key: `link:${song}`, choice: null }, { key: `missing:${song}`, choice: null }); picks([]) }
-  else if (d.choice === 'same') {
-    out.push({ key: `link:${song}`, choice: 'same', data: { rows: d.rows } }, { key: `missing:${song}`, choice: null })
-    c.updates.filter((u) => d.rows.includes(u.row)).forEach((u) => out.push({ key: u.key, choice: d.reject.includes(u.key) ? 'reject' : 'accept' }))
-    picks(d.rows)
-  } else if (d.choice === 'add' || d.choice === 'not_ours') { out.push({ key: `link:${song}`, choice: 'none' }, { key: `missing:${song}`, choice: d.choice }); picks([]) }
-  return out
-}
-
-const ready = (c: ReviewCase, d: Draft) => d.choice !== null && (c.kind === 'names' || d.choice !== 'same' || d.rows.length > 0)
-
-/** How a song stands against the LNV, one recording against one LNV row. Exact: the same credits – title, version,
- *  album, writers, publisher – and the same ISRC (or the LNV has none yet). Possible: the same ISRC or the same
- *  credits, not both. New: neither; the closest LNV rows are other songs. */
-type Match = 'exact' | 'possible' | 'new' | 'other'
-const MATCHES = [['exact', 'Exact'], ['possible', 'Possible'], ['new', 'Not in the LNV']] as const
-function matchOf(c: ReviewCase): Match {
-  if (c.kind === 'names' || c.kind === 'twice') return 'other'
-  const levels = c.lnv.map((r) => r.check?.level)
-  if (levels.includes('exact')) return 'exact'
-  // one stage holds – or only the ISRC is shared (the LNV has that recording: it is never added twice) – or the song
-  // is only a version the LNV already has
-  return levels.includes('possible') || levels.includes('isrc_only') || c.in_lnv?.some((v) => v.isrc && v.answer !== 'none') ? 'possible' : 'new'
-}
-
-/** A song's stable name across reloads: an answer can move it from one kind of case to another. */
-const keyOf = (c: ReviewCase) => c.answer.song ?? c.id
 
 /** What a case does to the LNV, in two words – for the list. */
 function verdict(c: ReviewCase, d: Draft) {
@@ -134,32 +58,72 @@ function effect(c: ReviewCase, d: Draft, source: string) {
   return d.choice === 'not_ours' ? "Not added – not the client's song" : ''
 }
 
+type Section = 'songs' | 'new'
+type Sort = 'az' | 'za' | 'most' | 'exact' | 'possible' | 'todo'
+const SORTS: [Sort, string][] = [['az', 'A → Z'], ['za', 'Z → A'], ['most', 'Most matches first'], ['exact', 'Most exact matches first'],
+  ['possible', 'Most possible matches first'], ['todo', 'Most left to check first']]
+/** One line of the list: a song name with every song it holds (f), one song or question (c), or the LNV-only songs. */
+type Item = { id: string; f?: Family; c?: ReviewCase; lnvOnly?: boolean }
+
 export default function SongReview({ d, save }: {
   d: Step1; save: (items: CleanDecisionIn[]) => Promise<boolean>
 }) {
   const { clientId } = useClient()
+  const toast = useToast()
   const [q, setQ] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
   const [help, setHelp] = useState(false)
   const [asking, setAsking] = useState(false)   // "Accept all" waits for a yes
-  // needs: the app has no answer – a real doubt · sure: the app answered, confirm it · done: checked
-  const [status, setStatus] = useState<'needs' | 'sure' | 'done' | 'all'>('needs')
-  const [kind, setKind] = useState<CaseKind | 'all' | 'lnv_only'>('all')
+  // two lists: the songs of the LNV match (by song name) and the songs not in the LNV
+  const [section, setSection] = useState<Section>('songs')
+  const [show, setShow] = useState<'all' | 'todo' | 'done'>('all')
+  const [sort, setSortState] = useState<Sort>(() => { try { return (localStorage.getItem('mrm-sort') as Sort) || 'az' } catch { return 'az' } })
+  const setSort = (s: Sort) => { setSortState(s); try { localStorage.setItem('mrm-sort', s) } catch { /* private mode */ } }
   // the song the reviewer was on is still open when they come back
   const placeKey = `mrm-place-${clientId}`
   const [selectedId, setSelectedId] = useState<string | null>(() => { try { return localStorage.getItem(placeKey) } catch { return null } })
-  // a new filter starts at its first case
-  const filterBy = (st: typeof status, k: typeof kind) => { setStatus(st); setKind(k); setSelectedId(null) }
-  const [match, setMatch] = useState<Match | 'all'>('all')
-  const matches = useMemo(() => new Map(d.cases.map((c) => [c.id, matchOf(c)])), [d])
-  const inMatch = (c: ReviewCase) => match === 'all' ? !c.auto : matches.get(c.id) === match
-  const matchCount = useMemo(() => {
-    const t: Record<string, number> = {}
-    matches.forEach((m) => { t[m] = (t[m] ?? 0) + 1 })
-    return t
-  }, [matches])
-  // a match tab shows every song of its kind; "All songs" goes back to what needs you
-  const matchBy = (m: typeof match) => { setView('review'); setMatch(m); setStatus(m === 'all' ? 'needs' : 'all'); setKind('all'); setSelectedId(null) }
+  const pickSection = (s: Section) => { setView('review'); setSection(s); setSelectedId(null) }
+
+  // ---- the queue: ticks, values and titles save themselves a moment after the last change, or at once with Save
+  const [pending, setPending] = useState<Pending>(NO_PENDING)
+  const [flushing, setFlushing] = useState(false)
+  const live = useRef({ pending, d, save })
+  live.current = { pending, d, save }
+  /** Save the queue now, with these decisions after it (a later decision on the same key wins). */
+  const commit = async (extra: CleanDecisionIn[] = []) => {
+    const { pending: snap, d: now, save: send } = live.current
+    const items = [...pendingItems(snap, now), ...extra]
+    if (!items.length) return true
+    setFlushing(true)
+    const ok = await send(items)
+    setFlushing(false)
+    if (ok) setPending((x) => stripSaved(x, snap))
+    return ok
+  }
+  const count = pendingCount(pending)
+  useEffect(() => {
+    if (!count || flushing) return
+    const t = window.setTimeout(() => { void commit() }, 2500)
+    return () => window.clearTimeout(t)
+  }, [pending, flushing])   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const warn = (e: BeforeUnloadEvent) => { if (pendingCount(live.current.pending)) e.preventDefault() }
+    window.addEventListener('beforeunload', warn)
+    return () => {
+      window.removeEventListener('beforeunload', warn)
+      // leaving the step saves what waits
+      const { pending: snap, d: now, save: send } = live.current
+      if (pendingCount(snap)) void send(pendingItems(snap, now))
+    }
+  }, [])
+
+  const families = useMemo(() => familiesOf(d.cases), [d])
+  const familyOf = useMemo(() => new Map(families.flatMap((f) => f.cases.map((c) => [c.id, f] as const))), [families])
+  const loose = useMemo(() => d.cases.filter((c) => c.kind !== 'names' && c.kind !== 'twice' && !inFamilies(c)), [d])
+  const others = useMemo(() => d.cases.filter((c) => c.kind === 'names' || c.kind === 'twice'), [d])
+  // the songs the app matched exactly: what a recording can be mapped onto
+  const targets = useMemo(() => targetsOf(d.cases, (c) => matchOf(c) === 'exact'), [d])
+
   // answered here, before the next load shows it – by song (keyOf), since an answer can move a song to another case
   const [done, setDone] = useState<Record<string, boolean>>({})
   const refs = useRef<Record<string, HTMLButtonElement | null>>({})
@@ -169,9 +133,9 @@ export default function SongReview({ d, save }: {
     setDone((x) => Object.fromEntries(Object.entries(x).filter(([k, v]) => server.get(k) !== v)))
   }, [d])
   const isDone = (c: ReviewCase) => done[keyOf(c)] ?? c.done
-  const stateOf = (c: ReviewCase) => isDone(c) ? 'done' : ready(c, draftOf(c)) ? 'sure' : 'needs'
   // the Saved tab: every answer the reviewer gave, newest first – this session's at once, before the reload
   const [view, setView] = useState<'review' | 'saved'>('review')
+  const showSaved = () => { void commit(); setView('saved') }
   const [savedAt, setSavedAt] = useState<Record<string, { draft: Draft; at: number }>>({})
   const saved = useMemo(() => d.cases
     .filter((c) => keyOf(c) in savedAt || isDone(c))
@@ -179,43 +143,39 @@ export default function SongReview({ d, save }: {
       you: keyOf(c) in savedAt || c.answer.by === 'you' || c.merge?.by === 'you' }))
     .sort((a, b) => b.at - a.at || a.c.title.localeCompare(b.c.title)),
   [d, savedAt, done])   // eslint-disable-line react-hooks/exhaustive-deps
-  const inStatus = (c: ReviewCase) => status === 'all' || stateOf(c) === status
-  // the whole step, whatever the tabs show: what still needs an answer, and what only needs a confirm
+  // the whole step, whatever the lists show: what still needs an answer, and what only needs a confirm
   const progress = useMemo(() => {
     const t = { needs: 0, sure: 0 }
     d.cases.forEach((c) => { if (!c.auto && !isDone(c)) t[ready(c, draftOf(c)) ? 'sure' : 'needs'] += 1 })
     return t
   }, [d, done])   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const counts = useMemo(() => {
-    const k: Record<string, number> = {}
-    d.cases.forEach((c) => { if (inStatus(c) && inMatch(c)) k[c.kind] = (k[c.kind] ?? 0) + 1 })
-    return k
-  }, [d, status, done, match])   // eslint-disable-line react-hooks/exhaustive-deps
-  const tally = useMemo(() => {
-    const t = { needs: 0, sure: 0, done: 0 }
-    d.cases.forEach((c) => { if (inMatch(c)) t[stateOf(c)] += 1 })
-    return t
-  }, [d, done, match])   // eslint-disable-line react-hooks/exhaustive-deps
-
-  const shown = useMemo(() => {
+  const left = (f: Family) => toCheck(pending, f)
+  const shown: Item[] = useMemo(() => {
     const s = norm(q)
-    return d.cases.filter((c) => {
-      // a search looks through every song, whichever tab is open; a song just answered here stays in view
-      if (!(c.id === selectedId && c.id in done) && !s) {
-        if (!inStatus(c) || !inMatch(c)) return false
-        if (kind !== 'all' && c.kind !== kind) return false
-      }
-      return !s || norm(c.title).includes(s) || [...c.muso, ...c.lnv].some((r) => norm(`${r.ref} ${Object.values(r.fields).flat().join(' ')}`).includes(s))
-    })
-  }, [d, q, status, kind, selectedId, done, match])   // eslint-disable-line react-hooks/exhaustive-deps
+    const hit = (c: ReviewCase) => norm(c.title).includes(s) || [...c.muso, ...c.lnv].some((r) => norm(`${r.ref} ${Object.values(r.fields).flat().join(' ')}`).includes(s))
+    // a search stays inside the open list; the song on screen stays listed until another is picked
+    const keep = (id: string, open: boolean) => id === selectedId || show === 'all' || (show === 'todo') === open
+    const byTitle = (a: string, b: string) => sort === 'za' ? b.localeCompare(a) : a.localeCompare(b)
+    if (section === 'songs') {
+      const score = (f: Family) => sort === 'most' ? f.exact.length + f.possible.length : sort === 'exact' ? f.exact.length
+        : sort === 'possible' ? f.possible.length : sort === 'todo' ? left(f) : 0
+      const fs = families.filter((f) => (!s || norm(f.title).includes(s) || f.cases.some(hit)) && keep(f.id, left(f) > 0))
+        .sort((a, b) => score(b) - score(a) || byTitle(a.title, b.title))
+      const os = others.filter((c) => (!s || hit(c)) && keep(c.id, !isDone(c))).sort((a, b) => byTitle(a.title, b.title))
+      return [...fs.map((f): Item => ({ id: f.id, f })), ...os.map((c): Item => ({ id: c.id, c }))]
+    }
+    const cs = loose.filter((c) => (!s || hit(c)) && keep(c.id, !isDone(c))).sort((a, b) => byTitle(a.title, b.title))
+    return [...cs.map((c): Item => ({ id: c.id, c })), ...(!s && show === 'all' && d.lnv_only.length ? [{ id: 'lnv_only', lnvOnly: true }] : [])]
+  }, [d, q, section, show, sort, selectedId, done, pending, families, loose, others])   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const sel = shown.find((c) => c.id === selectedId) ?? shown[0] ?? null
+  const sel = shown.find((x) => x.id === selectedId) ?? shown[0] ?? null
   const at = sel ? shown.indexOf(sel) : -1
-  const go = (delta: number) => { const next = shown[at + delta]; if (next) setSelectedId(next.id) }
+  const go = (delta: number) => { const x = shown[at + delta]; if (x) setSelectedId(x.id) }
+  const open = (x: Item) => !x.lnvOnly && (x.f ? left(x.f) > 0 : !isDone(x.c!))
   const next = (from: ReviewCase) => {
     const after = shown.slice(at + 1).concat(shown.slice(0, at))
-    const x = after.find((c) => c.id !== from.id && !isDone(c) && (status === 'all' || stateOf(c) === status || status === 'done'))
+    const x = after.find((y) => y.c?.id !== from.id && open(y))
     if (x) setSelectedId(x.id)
   }
   useEffect(() => { if (sel) refs.current[sel.id]?.scrollIntoView({ block: 'nearest' }) }, [sel])
@@ -236,90 +196,134 @@ export default function SongReview({ d, save }: {
       remember(c, null)
     }
   }
-  /** Confirm the app's answer on every case shown that has one. */
+  /** Confirm the app's answer on every song shown that has one. */
+  const cases = shown.flatMap((x) => x.c ? [x.c] : [])
+  const confirmable = cases.filter((c) => !isDone(c) && ready(c, draftOf(c))).length
   const confirmShown = () => {
-    const todo = shown.filter((c) => !isDone(c) && ready(c, draftOf(c)))
+    const todo = cases.filter((c) => !isDone(c) && ready(c, draftOf(c)))
     if (!todo.length) return
     setDone((x) => ({ ...x, ...Object.fromEntries(todo.map((c) => [keyOf(c), true])) }))
-    const at = Date.now()
-    setSavedAt((x) => ({ ...x, ...Object.fromEntries(todo.map((c) => [keyOf(c), { draft: draftOf(c), at }])) }))
+    const now = Date.now()
+    setSavedAt((x) => ({ ...x, ...Object.fromEntries(todo.map((c) => [keyOf(c), { draft: draftOf(c), at: now }])) }))
     save(todo.flatMap((c) => itemsOf(c, draftOf(c))))
   }
   const undoLast = () => { if (last) { setSelectedId(last.c.id); answer(last.c, null) } }
-  // a song the app linked by itself is listed only under its match tab
-  const open = (c: ReviewCase) => { setView('review'); setMatch(c.auto ? matches.get(c.id) ?? 'all' : 'all'); setStatus('all'); setKind('all'); setQ(''); setSelectedId(c.id) }
-  const confirmable = shown.filter((c) => !isDone(c) && ready(c, draftOf(c))).length
+  /** Open a song from the Saved tab: its song name in Songs, or the song under Not in the LNV. */
+  const openCase = (c: ReviewCase) => {
+    const f = familyOf.get(c.id)
+    setView('review'); setQ(''); setShow('all')
+    setSection(f || c.kind === 'names' || c.kind === 'twice' ? 'songs' : 'new')
+    setSelectedId(f ? f.id : c.id)
+  }
   const [wide, setWide] = useStored('mrm-wide', false)
   useKeys({ w: () => setWide(!wide), '/': () => searchRef.current?.focus(), '?': () => setHelp((h) => !h) })
+  const sorts = section === 'songs' ? SORTS : SORTS.slice(0, 2)
+  const sortShown = sorts.some(([id]) => id === sort) ? sort : 'az'
 
   return (
     <section className="cs-body rv">
       {/* the two views of the step: the songs to review, and everything saved – what goes into the LNV */}
       <div className="rv-views">
         <button type="button" className={view === 'review' ? 'on' : ''} onClick={() => setView('review')}>Review songs<span>{n(d.cases.filter((c) => !c.auto && !isDone(c)).length)} open</span></button>
-        <button type="button" className={`rv-view-saved ${view === 'saved' ? 'on' : ''}`} onClick={() => setView('saved')} title="Every saved answer and what it puts into the LNV">
+        <button type="button" className={`rv-view-saved ${view === 'saved' ? 'on' : ''}`} onClick={showSaved} title="Every saved answer and what it puts into the LNV">
           <Check size={14} />Saved to the LNV<span key={saved.length} className="rv-bump">{n(saved.length)}</span></button>
+        <SaveBar count={count} busy={flushing} flush={() => { void commit() }} />
         <Steps steps={[
           { label: progress.needs ? `Answer ${n(progress.needs)} song${progress.needs > 1 ? 's' : ''}` : 'Every doubt answered', left: progress.needs,
-            title: 'Songs the app could not decide: compare and pick an answer', go: () => matchBy('all') },
+            title: 'Songs the app could not decide: compare and pick an answer', go: () => { pickSection('songs'); setShow('todo') } },
           { label: progress.sure ? `Confirm ${n(progress.sure)} app answer${progress.sure > 1 ? 's' : ''}` : "App's answers confirmed", left: progress.sure,
-            title: 'The app has an answer (the green button): check it and press Enter, or Accept all', go: () => { setView('review'); setMatch('all'); filterBy('sure', 'all') } },
-          { label: 'Download the LNV', left: progress.needs + progress.sure, title: 'See every saved answer and download the LNV with the changes', go: () => setView('saved') },
+            title: 'The app has an answer: check it and tick it', go: () => { pickSection('songs'); setShow('todo') } },
+          { label: 'Download the LNV', left: progress.needs + progress.sure, title: 'See every saved answer and download the LNV with the changes', go: showSaved },
         ]} />
       </div>
 
       {view === 'review' && d.wins.length > 0 && <Wins wins={d.wins} source={d.source} save={save} />}
 
-      {view === 'saved' ? <SavedView saved={saved} d={d} open={open} undo={(c) => answer(c, null, false)} /> :
+      {/* how the numbers add up, in one line */}
+      {view === 'review' && (() => {
+        const matched = families.reduce((t, f) => t + f.cases.length, 0)
+        return (
+          <p className="rv-sum">
+            <b>How it adds up:</b> {d.source} has <b>{n(matched + loose.length)} songs</b> – <b>{n(matched)}</b> match an LNV row and sit under <b>{n(families.length)} song
+            names</b> in Songs, <b>{n(loose.length)}</b> match none (Not in the LNV); <b>{n(d.counts.needs)}</b> still need your answer, “to check” counts the matches
+            not ticked yet, and Other questions ({n(others.length)}) are name spellings and LNV rows entered twice.
+          </p>
+        )
+      })()}
+
+      {view === 'saved' ? <SavedView saved={saved} d={d} open={openCase} undo={(c) => answer(c, null, false)} /> :
       <div className={`sm-review ${wide ? 'wide' : ''}`}>
         <div className="sm-list">
           <div className="sm-list-head">
-            <label className="cs-search sm-search"><Search size={15} /><input ref={searchRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search song, writer, ISRC, LNV row…" /></label>
+            <label className="cs-search sm-search"><Search size={15} /><input ref={searchRef} value={q} onChange={(e) => setQ(e.target.value)}
+              placeholder={section === 'songs' ? 'Search in Songs: song, writer, ISRC, LNV row…' : 'Search in Not in the LNV…'} /></label>
             {help && <div className="rv-keys"><span><Kbd>↑</Kbd><Kbd>↓</Kbd> move</span><span><Kbd>Enter</Kbd> accept</span><span><Kbd>S</Kbd> same</span><span><Kbd>N</Kbd> add</span><span><Kbd>X</Kbd> not the client's</span><span><Kbd>U</Kbd> undo</span><span><Kbd>/</Kbd> search</span><span><Kbd>W</Kbd> expand</span></div>}
             <div className="rv-tabs rv-match">
-              <button type="button" className={match === 'all' && view === 'review' ? 'on' : ''} onClick={() => matchBy('all')}>All songs</button>
-              {MATCHES.map(([id, label]) => (
-                <button key={id} type="button" className={match === id && view === 'review' ? 'on' : ''} onClick={() => matchBy(id)}>{label}<span>{n(matchCount[id])}</span></button>
-              ))}
-            </div>
-            <div className="rv-tabs">
-              {([['needs', 'Needs you', tally.needs], ['sure', 'App answered', tally.sure], ['done', 'Done', tally.done],
-                ['all', 'All', null]] as const).map(([id, label, x]) => (
-                <button key={id} type="button" className={status === id && kind !== 'lnv_only' ? 'on' : ''} onClick={() => filterBy(id, kind === 'lnv_only' ? 'all' : kind)}>{label}{x != null && <span>{n(x)}</span>}</button>
-              ))}
+              <button type="button" className={section === 'songs' ? 'on' : ''} onClick={() => pickSection('songs')} title="Songs the LNV has – exact and possible matches, by song name">Songs<span>{n(families.length)}</span></button>
+              <button type="button" className={section === 'new' ? 'on' : ''} onClick={() => pickSection('new')} title={`${d.source} songs no LNV row matches`}>Not in the LNV<span>{n(loose.length)}</span></button>
             </div>
             <div className="rv-list-tools">
-              <select className="rv-kind" value={kind} onChange={(e) => filterBy(status, e.target.value as typeof kind)} aria-label="Kind of case">
-                <option value="all">Every kind</option>
-                {KINDS.filter((k) => counts[k] || kind === k).map((k) => <option key={k} value={k}>{KIND[k].label} ({n(counts[k])})</option>)}
-                <option value="lnv_only">Only in the LNV ({n(d.counts.lnv_only)})</option>
+              <select className="rv-kind" value={show} onChange={(e) => { setShow(e.target.value as typeof show); setSelectedId(null) }} aria-label="Which songs">
+                <option value="all">Show all</option>
+                <option value="todo">{section === 'songs' ? 'Left to check' : 'Needs an answer'}</option>
+                <option value="done">{section === 'songs' ? 'All checked' : 'Done'}</option>
               </select>
-              {kind !== 'lnv_only' && confirmable > 0 && (
+              <select className="rv-kind" value={sortShown} onChange={(e) => setSort(e.target.value as Sort)} aria-label="Order">
+                {sorts.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+              </select>
+              {section === 'new' && confirmable > 0 && (
                 <button type="button" className="btn sm" onClick={() => setAsking(true)} title="Accept the app's answer on every song shown that has one">
                   <CheckCheck size={14} />Accept all {n(confirmable)}</button>
               )}
             </div>
           </div>
           <div className="sm-list-items">
-            {kind === 'lnv_only' ? <p className="sm-list-none">The LNV songs {d.source} does not have are listed on the right.</p>
-              : !shown.length ? <p className="sm-list-none">{status === 'needs' && !q ? 'Nothing needs you here – look at “App answered” and confirm.' : status === 'sure' && !q ? 'Every answer here is confirmed.' : 'Nothing matches.'}</p>
-                : shown.map((x) => {
-                  const v = verdict(x, draftOf(x))
+            {!shown.length ? <p className="sm-list-none">{q ? <>Nothing matches in {section === 'songs' ? 'Songs' : 'Not in the LNV'}.<br />
+              <button type="button" className="btn sm" onClick={() => pickSection(section === 'songs' ? 'new' : 'songs')}>Search {section === 'songs' ? 'Not in the LNV' : 'Songs'}</button></>
+              : show === 'todo' ? 'Nothing left to check here.' : 'Nothing here.'}</p>
+              : shown.map((x, i) => {
+                const on = sel?.id === x.id
+                if (x.lnvOnly) return (
+                  <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => setSelectedId(x.id)}>
+                    <span className="sm-item-text"><b>Only in the LNV</b><small>{n(d.lnv_only.length)} LNV songs {d.source} does not have</small></span>
+                  </button>
+                )
+                if (x.f) {
+                  const f = x.f, l = left(f)
                   return (
-                    <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${sel?.id === x.id ? 'on' : ''}`} onClick={() => setSelectedId(x.id)}>
+                    <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => setSelectedId(x.id)}>
                       <span className="sm-item-text">
-                        <b>{x.title}</b>
-                        <small>{x.answer.recheck && !isDone(x) && <span className="rv-recheck">Check again · </span>}{x.kind === 'versions' ? '' : `${KIND[x.kind].label}${x.muso.length > 1 ? ' · ' : ''}`}{x.muso.length > 1 ? `${x.muso.length} versions` : ''}{v !== 'Needs you' && <> · <span className="rv-verdict">{v}</span></>}</small>
+                        <b>{f.title}</b>
+                        <small><span className="li-n exact">Exact {n(f.exact.length)}</span><span className="li-n possible">Possible {n(f.possible.length)}</span>
+                          {l > 0 && <span className="rv-verdict">{n(l)} to check</span>}</small>
                       </span>
-                      {isDone(x) && <Check size={15} strokeWidth={2.5} className="rv-done" />}
+                      {!l && <Check size={15} strokeWidth={2.5} className="rv-done" />}
                     </button>
                   )
-                })}
+                }
+                const c = x.c!
+                const v = verdict(c, draftOf(c))
+                return (
+                  <Fragment key={x.id}>
+                    {section === 'songs' && !shown[i - 1]?.c && <p className="sm-list-sep">Other questions</p>}
+                    <button type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => setSelectedId(x.id)}>
+                      <span className="sm-item-text">
+                        <b>{c.title}</b>
+                        <small>{c.answer.recheck && !isDone(c) && <span className="rv-recheck">Check again · </span>}{c.kind === 'versions' ? '' : `${KIND[c.kind].label}${c.muso.length > 1 ? ' · ' : ''}`}{c.muso.length > 1 ? `${c.muso.length} versions` : ''}{v !== 'Needs you' && <> · <span className="rv-verdict">{v}</span></>}</small>
+                      </span>
+                      {isDone(c) && <Check size={15} strokeWidth={2.5} className="rv-done" />}
+                    </button>
+                  </Fragment>
+                )
+              })}
           </div>
         </div>
-        {kind === 'lnv_only' ? <LnvOnly d={d} />
-          : sel ? <CaseView key={`${sel.id}-${sel.done}-${JSON.stringify(sel.answer)}-${sel.merge?.status}`} c={sel} source={d.source} done={isDone(sel)} picks={d.picks} savedCount={saved.length} showSaved={() => setView('saved')}
-            pos={at + 1} total={shown.length} prev={() => go(-1)} next={() => go(1)} possible={matches.get(sel.id) === 'possible'} answer={(draft) => answer(sel, draft)} last={last} undoLast={undoLast} save={save}
+        {sel?.lnvOnly ? <LnvOnly d={d} />
+          : sel?.f ? <FamilyView key={sel.f.id} f={sel.f} d={d} p={pending} set={setPending} pos={at + 1} total={shown.length} prev={() => go(-1)} next={() => go(1)}
+            wideBtn={<WideBtn wide={wide} toggle={() => setWide(!wide)} />} targets={targets} commit={commit} toast={toast} />
+          : sel?.c ? <CaseView key={`${sel.c.id}-${sel.c.done}-${JSON.stringify(sel.c.answer)}-${sel.c.merge?.status}-${sel.c.muso.length}`} c={sel.c} source={d.source} done={isDone(sel.c)} picks={d.picks} savedCount={saved.length} showSaved={showSaved}
+            titles={d.titles ?? {}} targets={targets} mapped={(all, t) => { toast(`${all ? 'Every version' : 'The version'} now belongs to “${t.title}” (LNV row ${t.row})`, 'good'); if (all && sel.c) next(sel.c) }}
+            pos={at + 1} total={shown.length} prev={() => go(-1)} next={() => go(1)} possible={matchOf(sel.c) === 'possible'} answer={(draft) => answer(sel.c!, draft)} last={last} undoLast={undoLast} save={save}
             wideBtn={<WideBtn wide={wide} toggle={() => setWide(!wide)} />} />
             : <div className="sm-detail sm-detail-none muted">Nothing to show.</div>}
       </div>}
@@ -397,155 +401,10 @@ function Wins({ wins, source, save }: { wins: Step1['wins']; source: string; sav
   )
 }
 
-export const Kbd = ({ children }: { children: ReactNode }) => <kbd className="sm-kbd">{children}</kbd>
-const value = (v?: string | string[]) => list(v).join(', ')
-
-/** Enter / A = confirm, R = keep the versions apart, U = undo, ↑ ↓ = move – while not typing. */
-export function useKeys(keys: Record<string, () => void>) {
-  const ref = useRef(keys)
-  ref.current = keys
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey || document.querySelector('.drawer, .modal')) return
-      const t = e.target as HTMLElement
-      const tick = t instanceof HTMLInputElement && (t.type === 'checkbox' || t.type === 'radio')   // keys still work after a tick
-      if (/^(TEXTAREA|SELECT)$/.test(t.tagName) || (t.tagName === 'INPUT' && !tick)) return
-      if (e.key === 'Enter' && /^(BUTTON|A)$/.test(t.tagName)) return
-      const fn = ref.current[e.key === 'Enter' ? 'enter' : e.key.toLowerCase()]
-      if (!fn) return
-      e.preventDefault()
-      fn()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
-}
-
-/** One column of a comparison: a record (Muso version, LNV row, IPRS work), its badge, and – when it can be
- *  chosen – the tick that chooses it. */
-export type Col = {
-  r: CaseRecord; badge: string; tone: 'muso' | 'lnv' | 'iprs' | 'add'
-  pick?: { on: boolean; label: string; radio?: boolean; change: () => void }
-  open?: () => void
-}
-
-const writersOf = (r: CaseRecord) => [...new Set([...list(r.fields.Lyricist), ...list(r.fields.Composer)])]
-
-/** How a version's credits differ from the main version's, both ways. */
-function creditsDiff(r: CaseRecord, main: CaseRecord) {
-  const not = (f: string, a: string[], b: string[]) => a.filter((x) => !inList(f, b, x))
-  const w = writersOf(r), mw = writersOf(main), p = list(r.fields.Publisher), mp = list(main.fields.Publisher)
-  return ([['Writers also', not('Lyricist', w, mw)], ['Writers without', not('Lyricist', mw, w)],
-    ['Publisher also', not('Publisher', p, mp)], ['Publisher without', not('Publisher', mp, p)]] as const).filter(([, names]) => names.length)
-}
-
-/** The same-song checks over a record's column: why it fits or not, in a few words. */
-function Marks({ r, ref }: { r: CaseRecord; ref?: CaseRecord | null }) {
-  const ch = r.check
-  if (ch && ch.stage1 !== undefined && ch.stage1 !== null) {
-    // the user's rule: stage 1 the recording, stage 2 the work; both = exact, one = possible
-    const failed = (Array.isArray(r.why) ? r.why : []).filter((w) => !w.good || w.text.startsWith('Writers: one') || w.text.startsWith('Later year'))
-    const level = ch.level === 'exact' ? 'Exact match' : ch.level === 'possible' ? 'Possible match' : ch.level === 'isrc_only' ? 'Only the ISRC is the same' : ''
-    return (
-      <div className="rvc-marks">
-        {level && <b className={`rvc-level ${ch.level}`}>{level}</b>}
-        <span className={ch.stage1 ? 'good' : 'bad'} title="Stage 1 – the recording: song name, album, ISRC, release year">{ch.stage1 ? <Check size={12} /> : <X size={12} />}Stage 1 · recording</span>
-        <span className={ch.stage2 ? 'good' : 'bad'} title="Stage 2 – the work: song name, album, lyricist, composer, publisher">{ch.stage2 ? <Check size={12} /> : <X size={12} />}Stage 2 · work</span>
-        {failed.map((w) => <span key={w.text} className={w.good ? 'warn' : 'bad'}>{w.good ? '~' : <X size={12} />}{w.text}</span>)}
-      </div>
-    )
-  }
-  const why = Array.isArray(r.why) ? r.why.filter((w) => !w.good || w.text.startsWith('Same')) : []
-  const marks = why.length ? why.map((w) => [w.good ? 'good' : 'bad', w.text.split(' – ')[0]] as const)
-    : r.check ? (['writers', 'publisher'] as const).map((k) => RULE[k][r.check![k] as keyof typeof RULE[typeof k]] as readonly [string, string]) : []
-  if (!marks.length) return null
-  // the rule looks at every version and at one company under two names: the names on screen may differ, so do not say "same"
-  const pubs = list(ref?.fields.Publisher)
-  const renamed = pubs.length > 0 && !list(r.fields.Publisher).some((x) => inList('Publisher', pubs, x))
-  const worded = marks.map(([tone, text]) => [tone, text === 'Same publisher' && renamed ? 'Publisher counted as same' : text] as const)
-  const wrong = worded.filter(([tone, text]) => tone !== 'good' || text === 'Publisher counted as same')
-  return <div className="rvc-marks">{(wrong.length ? wrong : [['good', 'Matches'] as const]).map(([tone, text]) => <span key={text} className={tone}>{tone === 'good' ? <Check size={12} /> : tone === 'bad' ? <X size={12} /> : '?'}{text}</span>)}</div>
-}
-
-/** Records side by side, one column each and one line per field, so every difference sits on the same line. The
- *  title is marked against the `base` column; among the writers, only the names the other side does not have are. */
-export function Compare({ cols, fields = SHOW, base = 0 }: { cols: Col[]; fields?: string[]; base?: number | null }) {
-  const ref = base == null ? null : cols[base]?.r
-  const rows = fields.filter((f) => DECIDES.has(f) || cols.some((c) => list(c.r.fields[f]).length))
-  const odd = (f: string, i: number, x: string) => {
-    if (base == null || !WRITERS.has(f) || cols.length < 2) return false
-    // the backend knows aliases and group members: a column it calls the same writers has no odd names
-    const sameWriters = (r: CaseRecord) => r.check?.writers === 'same' || (Array.isArray(r.why) && r.why.some((w) => w.text === 'Same writers'))
-    if (i !== base && sameWriters(cols[i].r)) return false
-    // lyricist or composer does not matter: DSPs list everyone under both, so a name counts if it is anywhere on the other side
-    const against = i === base ? cols.filter((_, j) => j !== base).map((c) => c.r) : [ref!]
-    return against.every((o) => !sameWriters(o) && writersOf(o).length > 0 && !inList(f, writersOf(o), x))
-  }
-  return (
-    <table className="rvc" style={{ minWidth: 100 + cols.length * 240 }}>
-      <thead>
-        <tr>
-          <th className="rvc-f" />
-          {cols.map((c, i) => (
-            <th key={i} className={`rvc-h ${c.tone} ${c.pick?.on ? 'on' : ''}`}>
-              {c.open ? <button type="button" className="rvc-name rvc-open" onClick={c.open} title="See everything about it">{c.badge}<ChevronRight size={14} /></button> : <span className="rvc-name">{c.badge}</span>}
-              {c.pick && <label className="rvc-pick"><input type={c.pick.radio ? 'radio' : 'checkbox'} checked={c.pick.on} onChange={c.pick.change} />{c.pick.label}</label>}
-              <Marks r={c.r} ref={i === base ? null : ref} />
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((f) => (
-          <tr key={f}>
-            <th className="rvc-f">{f}</th>
-            {cols.map((c, i) => {
-              const v = list(c.r.fields[f])
-              const cell = ref && i !== base && f === 'Title' ? cellOf(f, list(ref.fields[f]), v) : ''
-              return <td key={i} className={`${cell ? `c-${cell}` : ''} ${f === 'Title' ? 'rvc-title' : ''} ${f === 'ISRC' || f === 'IPRS code' || f === 'ISWC' ? 'mono' : ''}`}>
-                {v.length ? v.map((x, j) => <Fragment key={j}>{j > 0 && ', '}<span className={odd(f, i, x) ? 'rvc-odd' : ''}>{x}</span></Fragment>) : <span className="muted">—</span>}</td>
-            })}
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  )
-}
-
-/** One answer of a case: green when it is the chosen one (Enter), otherwise its own key. */
-export function Act({ on, k, onClick, disabled, children }: { on?: boolean; k?: string; onClick: () => void; disabled?: boolean; children: ReactNode }) {
-  return <button type="button" className={`btn sm-big ${on ? 'primary' : ''}`} disabled={disabled} onClick={onClick}>{on && <Check size={15} />}{children}{on ? <Kbd>Enter</Kbd> : k && <Kbd>{k}</Kbd>}</button>
-}
-
-/** A part of a case that folds: its heading opens and closes it, and the choice is remembered. */
-export function Part({ id, title, note, initial = true, children }: { id: string; title: ReactNode; note?: ReactNode; initial?: boolean; children: ReactNode }) {
-  const [open, setOpen] = useStored(`mrm-part-${id}`, initial)
-  return (
-    <section className={`rv-sec ${open ? '' : 'shut'}`}>
-      <button type="button" className="rv-sec-head" onClick={() => setOpen(!open)} aria-expanded={open}>
-        <ChevronRight size={15} className="rv-chev" /><b>{title}</b>{note && <small className="muted">{note}</small>}
-      </button>
-      {open && <div className="rv-sec-body">{children}</div>}
-    </section>
-  )
-}
-
-/** A yes/no the viewer chose before (folded parts, the wide case, the slim sidebar), kept in this browser. */
-export function useStored(key: string, initial: boolean): [boolean, (v: boolean) => void] {
-  const [v, setV] = useState(() => { try { const x = localStorage.getItem(key); return x == null ? initial : x === '1' } catch { return initial } })
-  return [v, (x: boolean) => { setV(x); try { localStorage.setItem(key, x ? '1' : '0') } catch { /* private mode */ } }]
-}
-
-/** Show the case across the whole width (the list hidden), or the list and the case side by side. */
-export const WideBtn = ({ wide, toggle }: { wide: boolean; toggle: () => void }) => (
-  <button type="button" className="sm-nav wide-btn" onClick={toggle} title={wide ? 'Show the list (W)' : 'Expand – hide the list (W)'}>
-    {wide ? <Minimize2 size={14} /> : <Maximize2 size={14} />}<span>{wide ? 'Show list' : 'Expand'}</span>
-  </button>
-)
 
 /** Where one DSP recording lands in the LNV with the answer on screen: linked to the song's row, a version row the
  *  LNV already has, a new row, kept apart as its own song, or not added (or waiting for the answer). */
-type Land = { i: number; r: CaseRecord; tone: 'link' | 'have' | 'new' | 'off' | 'wait'; row?: number; to: string; note: string; again?: boolean }
+type Land = Spot & { i: number; r: CaseRecord }
 const LAND_LABEL = { link: ['linked', 'linked'], new: ['new row', 'new rows'], have: ['already in the LNV', 'already in the LNV'],
   wait: ['waiting for you', 'waiting for you'], off: ['not added here', 'not added here'] } as const
 const LAND_ORDER = Object.keys(LAND_LABEL) as Land['tone'][]
@@ -571,7 +430,7 @@ function landsOf(c: ReviewCase, d: Draft, rows: number[], near: boolean, isIn: (
       first = false
       return { i, r, tone: 'new', to: 'New row', note: c.origin ? `names LNV row ${c.origin.row} as its original` : 'a new song in the LNV' }
     }
-    return { i, r, tone: 'wait', to: '?', note: options }
+    return { i, r, tone: 'wait', to: 'Waits for your answer', note: options }
   })
 }
 
@@ -583,7 +442,7 @@ function MergePlan({ lands, source, openVersion, openRow }: { lands: Land[]; sou
   const sorted = [...lands].sort((a, b) => LAND_ORDER.indexOf(a.tone) - LAND_ORDER.indexOf(b.tone) || (a.row ?? 0) - (b.row ?? 0) || a.i - b.i)
   const shown = all ? sorted : sorted.slice(0, 8)
   return (
-    <Part id="plan" title="How it goes into the LNV" note={tally.map(([t, x]) => `${x} ${LAND_LABEL[t][x > 1 ? 1 : 0]}`).join(' · ')}>
+    <Block n={4} title="Where each recording goes in the LNV" note={tally.map(([t, x]) => `${x} ${LAND_LABEL[t][x > 1 ? 1 : 0]}`).join(' · ')}>
       <table className="rv-plan">
         <thead><tr><th>{source} recording</th><th /><th>In the LNV</th></tr></thead>
         <tbody>{shown.map((x) => (
@@ -597,19 +456,20 @@ function MergePlan({ lands, source, openVersion, openRow }: { lands: Land[]; sou
         ))}</tbody>
       </table>
       {lands.length > 8 && !all && <button type="button" className="cs-more" onClick={() => setAll(true)}>Show all {lands.length}</button>}
-    </Part>
+    </Block>
   )
 }
 
-function CaseView({ c, source, done, pos, total, prev, next, possible, answer, last, undoLast, wideBtn, save, picks, savedCount, showSaved }: {
+function CaseView({ c, source, done, pos, total, prev, next, possible, answer, last, undoLast, wideBtn, save, picks, savedCount, showSaved, titles, targets, mapped }: {
   c: ReviewCase; source: string; done: boolean; pos: number; total: number; prev: () => void; next: () => void
   possible: boolean; answer: (d: Draft | null) => void; last: { c: ReviewCase; text: string } | null; undoLast: () => void; wideBtn: ReactNode
   save: (items: CleanDecisionIn[]) => Promise<boolean>; picks: Record<string, string | string[]>; savedCount: number; showSaved: () => void
+  titles: Step1['titles']; targets: Target[]; mapped: (all: boolean, t: Target) => void
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(c, picks))
   const [opened, setOpened] = useState<number | null>(null)   // the version whose details are open
   const [openedRow, setOpenedRow] = useState<number | null>(null)   // the LNV row whose details are open
-  const [allVersions, setAllVersions] = useState(c.muso.length <= 8 || c.kind === 'isrc')
+  const [mapping, setMapping] = useState<CaseRecord | null>(null)   // the recording being mapped onto an exact match
   const twice = c.kind === 'twice'
   const merging = !!c.merge
   const names = c.names
@@ -639,10 +499,9 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   const updates = adding ? [] : c.updates.filter((u) => sameRows.includes(u.row))
   const toggleUpdate = (key: string) => setDraft({ ...draft, reject: draft.reject.includes(key) ? draft.reject.filter((k) => k !== key) : [...draft.reject, key] })
   const kept = updates.filter((u) => !draft.reject.includes(u.key)).length
-  const versions = allVersions ? c.muso : c.muso.slice(0, 8)
   const inCount = merging ? draft.in.length : c.muso.length
   // where each version lands in the LNV: the original on the song's row, every other version on a row of its own
-  const isIn = (r: CaseRecord) => !merging || draft.in.includes(r.id!)
+  const isIn = (r: CaseRecord) => !merging || !!r.moved || draft.in.includes(r.id!)
   const placing = draft.choice === 'same' || draft.choice === 'add'
   const newVersions = placing ? c.muso.filter((r) => isIn(r) && r.part === 'version' && !r.lnv_row).length : 0
   const versionsLine = newVersions ? ` ${newVersions} version${newVersions > 1 ? 's get rows' : ' gets a row'} of ${newVersions > 1 ? 'their' : 'its'} own, naming the original.` : ''
@@ -658,7 +517,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
       : draft.choice === 'add' ? (c.origin ? `A new row is added, naming LNV row ${c.origin.row} “${value(c.origin.fields.Title)}” (${value(c.origin.fields['Film / album'])}) as its original.` : 'A new row is added to the LNV.') + versionsLine
         : draft.choice === 'not_ours' ? "Nothing goes into the LNV – not the client's song."
           : c.origin ? `A new recording of LNV row ${c.origin.row}: add it as a row of its own naming that original, or skip it.`
-          : near ? `No LNV row passes stage 1 or stage 2. Tick one only if ${source}'s data is wrong.`
+          : near ? `No LNV row is the same recording or the same work. Tick one only if ${source}'s data is wrong.`
             : c.lnv.length > 1 ? 'Tick the LNV row this song is, or add it as a new song.'
               : c.lnv.length ? `Is this ${source} song LNV row ${c.lnv[0].row}?` : 'Add it to the LNV, or skip it.'
 
@@ -679,13 +538,39 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   const onSame = draft.choice === 'same' && ready(c, draft)
   // Muso and the chosen LNV rows hold two values: the reviewer says which one goes into the LNV (the LNV's by default)
   const musoRec = musoCol[0]?.r
-  const choices = adding || !musoRec || twice ? [] : c.lnv.filter((r) => sameRows.includes(r.row!)).flatMap((r) => PICKABLE
+  const choices = adding || !musoRec || twice ? [] : c.lnv.filter((r) => sameRows.includes(r.row!)).flatMap((r) => PICK_SHOWN
     .filter((f) => differs(f, list(musoRec.fields[f]), list(r.fields[f])))
     .map((f) => ({ key: pickKey(r.row!, f), row: r.row!, f, lnv: list(r.fields[f]), muso: list(musoRec.fields[f]) })))
   const choose = (key: string, v: string[] | null) => {
     const { [key]: _, ...rest } = draft.picks   // eslint-disable-line @typescript-eslint/no-unused-vars
     setDraft({ ...draft, picks: v ? { ...rest, [key]: v.length === 1 ? v[0] : v } : rest })
   }
+
+  // ② the LNV rows, one card each: every candidate; a row the rule turned down only once ticked (or on the Possible tab)
+  const lnvShown = near ? (possible ? lnvCols.filter((x) => x.pick?.on || x.r.row !== c.origin?.row) : lnvCols.filter((x) => x.pick?.on)) : lnvCols
+  const lnvCount = lnvShown.length + (near && !possible ? closest.length : 0)
+  const lnvCard = (x: Col) => <LnvCard key={x.r.row} r={x.r} main={main} badge={x.badge} open={x.open!} tick={x.pick} />
+  // where each recording lands with the answer on screen – for ③, ④ and ⑤
+  const lands = landsOf(c, draft, sameRows, near, isIn, kept, Object.keys(draft.picks).length, source)
+  // every LNV row on this screen, in screen order: the LNV row popup's ← → go through them
+  const caseRows = [...new Set([c.origin?.row, ...c.lnv.map((r) => r.row), ...lands.map((x) => x.row), ...(c.in_lnv ?? []).map((v) => v.row)]
+    .filter((x): x is number => x != null))]
+  // ⑤ the title of each recording that goes into the LNV: the LNV's own where it lands on an LNV row, else the DSP's
+  const rowRec = (row?: number | null) => row == null ? undefined
+    : c.lnv.find((x) => x.row === row) ?? c.in_lnv?.find((v) => v.row === row)?.lnv ?? (c.origin?.row === row ? c.origin : undefined)
+  const lnvTitle = (row: number | null | undefined, label: string) => {
+    const t = value(rowRec(row)?.fields.Title)
+    return t && row != null ? { title: t, row, label } : undefined
+  }
+  const titleLines: TitleLine[] = lands.filter((x) => x.tone !== 'off').map((x) => {
+    const home = sameRows[0] ?? c.origin?.row
+    const lnv = x.tone === 'link' || x.tone === 'have' ? lnvTitle(x.row, `LNV row ${x.row}`)
+      : x.i === 0 ? lnvTitle(home, `LNV row ${home}`) : lnvTitle(home, `LNV row ${home} (the original)`)
+    // a title taken from the DSP earlier ("which value goes into the LNV") stays the DSP's
+    const earlier = x.tone === 'link' && x.row != null && draft.picks[pickKey(x.row, 'Title')] !== undefined
+    const def: TitleMode = (x.tone === 'link' || x.tone === 'have') && lnv && !earlier ? 'lnv' : 'muso'
+    return { r: x.r, i: x.i, spot: x, lnv, def, saved: titles[String(x.r.id)] }
+  })
 
   return (
     <div className="sm-detail rv-case">
@@ -708,20 +593,46 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
             <b>{names.a}</b><span className="rv-names-eq">=?</span><b>{names.b}</b>
             {names.songs.length > 0 && <p className="rv-none">For example: {names.songs.join(' · ')}</p>}
           </div>
-        ) : closest.length > 0 && possible ? <Compare cols={cols.concat(closest)} /> : <Compare cols={cols} />}
+        ) : twice ? <Compare cols={cols} /> : <>
+          <Guide id="step2" title="How to review a song" steps={[
+            <>Pick a song on the left – <b>Show: Needs an answer</b> lists what is still open.</>,
+            <>Read it top down: <b>①</b> main version, <b>②</b> LNV rows that may be it, <b>③</b> other {source} versions.</>,
+            <>Answer at the bottom – the green button is the app's answer (Enter).</>,
+            <>In <b>⑤ Titles</b> pick each recording's LNV title, or map it to an exact match.</>,
+            <><b>Saved to the LNV</b> lists every answer and has the download.</>,
+          ]} />
+          <Legend source={source} />
+          <Block n={1} title="Main version" note={!main.version || main.version === 'Original'
+            ? `${source}'s original – the oldest recording with no remix, lofi or other tag. Everything below is compared with it.`
+            : `${source} has no plain recording of this song, so its first version (${main.version}) stands as the main one. Everything below is compared with it.`}>
+            <MainCard r={main} source={source} count={c.muso.length} open={() => setOpened(0)} />
+          </Block>
 
-        {closest.length > 0 && !possible && (
-          <Part id="closest" initial={false} title={`Closest LNV row${closest.length > 1 ? 's' : ''} – not the same song`}
-            note={`no same ISRC or credits; open only if you think ${source}'s data is wrong`}>
-            <Compare cols={[...musoCol, ...closest]} />
-          </Part>
-        )}
+          <Block n={2} title={`LNV rows that may be this song${lnvCount ? ` (${lnvCount})` : ''}`}
+            note={near ? `No LNV row is the same recording or the same work – these are only the closest. Tick one only if ${source}'s data is wrong.`
+              : c.lnv.length > 1 ? 'One after another, each compared with the main version. Tick the row that is this song.'
+                : c.lnv.length ? 'Compared with the main version: what differs is marked.' : undefined}>
+            {c.origin && <LnvCard r={c.origin} main={main} badge={`Original work · LNV row ${c.origin.row}`} open={() => setOpenedRow(c.origin!.row!)}
+              note={<p className="cv-note">{c.origin.sure ? 'The same writers' : 'A shared writer'} – {source} has a new recording of this LNV song. Added, it gets a row of its own naming this row as its original.</p>} />}
+            {lnvShown.map(lnvCard)}
+            {closest.length > 0 && !possible && (
+              <Part id="closest" initial={false} title={`Closest LNV row${closest.length > 1 ? 's' : ''} – not the same song (${closest.length})`}
+                note={`no same ISRC or credits; open only if you think ${source}'s data is wrong`}>
+                <div className="cv-cards">{closest.map(lnvCard)}</div>
+              </Part>
+            )}
+            {!c.lnv.length && !c.origin && <p className="cv-none">No LNV row shares this song's ISRC or credits – it is not in the LNV.</p>}
+          </Block>
 
-        {!names && !twice && c.muso.length > 0 && (
-          <MergePlan lands={landsOf(c, draft, sameRows, near, isIn, kept, Object.keys(draft.picks).length, source)} source={source}
-            openVersion={setOpened} openRow={setOpenedRow} />
-        )}
+          {c.muso.length > 1 && (
+            <Block n={3} title={`Other ${source} versions of this song (${c.muso.length - 1})`}
+              note={merging ? `Possible matches to the main version – a similar title and the same writers. Untick one that is a different song${inCount < c.muso.length ? ` (${inCount} of ${c.muso.length} counted as this song)` : ''}.`
+                : 'Each one is a recording of this song: it gets an LNV row of its own naming the original, unless the LNV has it already.'}>
+              <VersionList c={c} spots={lands} merging={merging} isIn={isIn} toggle={toggleIn} open={setOpened} openRow={setOpenedRow} save={save} />
+            </Block>
+          )}
 
+          <MergePlan lands={lands} source={source} openVersion={setOpened} openRow={setOpenedRow} />
         {updates.length > 0 && (
           <section className="rv-fills">
             <h4>Blank in the LNV – filled from {source}</h4>
@@ -736,7 +647,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
 
         {choices.length > 0 && (
           <section className="rv-fills rv-picks">
-            <h4>{source} and the LNV differ – which value goes into the LNV?</h4>
+            <h4>{source} and the LNV differ – which value goes into the LNV? <small className="muted">(the title is chosen in part 5)</small></h4>
             <table className="rv-versions">
               <thead><tr><th />{sameRows.length > 1 && <th>Row</th>}<th>Keep the LNV's</th><th>Use {source}'s</th></tr></thead>
               <tbody>{choices.map((x) => {
@@ -785,39 +696,20 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
           </Part>
         )}
 
-        {c.muso.length > 1 && (
-          <Part id={`versions-${c.kind === 'versions' || c.kind === 'isrc' ? 'open' : 'shut'}`} initial={c.kind === 'versions' || c.kind === 'isrc'}
-            title={`${c.muso.length} ${source} versions`} note={merging && inCount < c.muso.length ? `${inCount} counted as this song` : 'Click one to see everything about it'}>
-            <div className="rv-table-wrap">
-              <table className="rv-versions rv-clean">
-                <thead><tr>{merging && <th title="Same song" />}<th>Title</th><th>Album</th><th>Singer</th>{c.kind === 'isrc' && <th>ISRC</th>}<th>Year</th></tr></thead>
-                <tbody>{versions.map((r, i) => {
-                  const on = !merging || draft.in.includes(r.id!)
-                  const diff = creditsDiff(r, main)
-                  const singers = list(r.fields.Singer)
-                  return (
-                    <tr key={r.id} className={on ? '' : 'off'} onClick={() => setOpened(i)}>
-                      {merging && <td onClick={(e) => e.stopPropagation()}>{i > 0 && <input type="checkbox" checked={on} onChange={() => toggleIn(r.id!)} aria-label="Same song" />}</td>}
-                      <td><button type="button" className="rv-ver-open" onClick={(e) => { e.stopPropagation(); setOpened(i) }}>{value(r.fields.Title)}</button>
-                        {(i === 0 || r.version) && <small className="muted"> {i === 0 ? 'Main' : r.version}</small>}
-                        {diff.map(([label, names]) => <div key={label} className="rv-ver-diff"><span className="muted">{label}: </span><span className="rvc-odd">{names.join(', ')}</span></div>)}</td>
-                      <td className="muted">{value(r.fields['Film / album'])}</td>
-                      <td>{singers.slice(0, 2).join(', ')}{singers.length > 2 && <span className="muted"> +{singers.length - 2}</span>}</td>
-                      {c.kind === 'isrc' && <td className="mono small">{list(r.fields.ISRC).join(', ')}</td>}
-                      <td className="muted nowrap">{value(r.fields.Year).slice(0, 4)}</td>
-                    </tr>
-                  )
-                })}</tbody>
-              </table>
-            </div>
-            {!allVersions && <button type="button" className="cs-more" onClick={() => setAllVersions(true)}>Show all {c.muso.length} versions</button>}
-          </Part>
-        )}
+
+          <Block n={5} title="Titles in the LNV" note={`For each recording: the title it gets in the LNV and where that title comes from. Pick one, type your own, or map the recording to a song the app matched exactly.`}>
+            <TitleSection lines={titleLines} titles={titles} source={source} save={save} map={setMapping}
+              closed={draft.choice === 'not_ours' ? "Not the client's song – no title goes into the LNV." : undefined} />
+          </Block>
+        </>}
       </div>
 
-      {opened !== null && c.muso[opened] && <VersionDetails r={c.muso[opened]} at={opened} total={c.muso.length} source={source} go={setOpened} close={() => setOpened(null)} />}
+      {mapping && <MapDialog c={c} rec={mapping} recs={c.muso.filter(isIn)} targets={targets} source={source} save={save}
+        close={() => setMapping(null)} done={mapped} />}
 
-      {openedRow !== null && <LnvRowDetails row={openedRow} close={() => setOpenedRow(null)} />}
+      {opened !== null && c.muso[opened] && <VersionDetails r={c.muso[opened]} main={main} at={opened} total={c.muso.length} source={source} go={setOpened} close={() => setOpened(null)} />}
+
+      {openedRow !== null && <LnvRowDetails row={openedRow} rows={caseRows} go={setOpenedRow} close={() => setOpenedRow(null)} />}
 
       {/* the answer – always on screen */}
       <div className="rv-bar">
@@ -850,82 +742,6 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   )
 }
 
-/** The sheet's columns under plain headings; a column no heading claims goes under "More". */
-const GROUPS: [string, RegExp][] = [
-  ['Credits', /artist|singer|lyricist|composer|author|writer|producer|engineer|publisher|credit|role/i],
-  ['Release', /title|song|album|type of|date|label|upc|track count|line/i],
-  ['Recording', /isrc|duration|length|genre|popularity|bpm|key/i],
-  ['Links and IDs', /link|url|\bid\b/i],
-]
-function grouped(fields: { name: string; value: string }[]) {
-  const of = (name: string) => (/link|url|\bid\b/i.test(name) ? 'Links and IDs' : /label/i.test(name) ? 'Release' : GROUPS.find(([, test]) => test.test(name))?.[0] ?? 'More')
-  return [...GROUPS.map(([g]) => g), 'More'].map((g) => [g, fields.filter((f) => of(f.name) === g)] as const).filter(([, x]) => x.length)
-}
-
-/** Everything the sheet holds for one version. A recording listed on several sheet rows shows one row at a time. */
-function VersionDetails({ r, at, total, source, go, close }: { r: CaseRecord; at: number; total: number; source: string; go: (i: number) => void; close: () => void }) {
-  const { clientId } = useClient()
-  const [rows, setRows] = useState<{ row: number; fields: { name: string; value: string }[] }[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [tab, setTab] = useState(0)
-  useEffect(() => {
-    let on = true
-    setRows(null); setError(null); setTab(0)
-    api.cleanRows(clientId, r.sheet_rows ?? []).then((x) => { if (on) setRows(x.rows) }).catch((e) => { if (on) setError((e as Error).message) })
-    return () => { on = false }
-  }, [clientId, r])
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft' && at > 0) go(at - 1)
-      if (e.key === 'ArrowRight' && at < total - 1) go(at + 1)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [at, total, go])
-  const row = rows?.[tab]
-  return (
-    <Drawer open onClose={close} width={620} title={value(r.fields.Title)} subtitle={
-      <div className="rv-det-sub">
-        <span className="muted">{source}{r.version ? ` · ${r.version}` : ''}</span>
-        {total > 1 && <><span className="muted">Version {at + 1} of {total}</span>
-          <button type="button" className="sm-nav" disabled={at === 0} onClick={() => go(at - 1)} title="Previous (←)"><ArrowLeft size={15} /></button>
-          <button type="button" className="sm-nav" disabled={at === total - 1} onClick={() => go(at + 1)} title="Next (→)"><ArrowRight size={15} /></button></>}
-      </div>}>
-      {error ? <div className="alert bad">{error}</div> : !rows ? <div className="loading"><span className="spinner" />Loading…</div> : !row ? <p className="muted">This row is no longer in the sheet.</p> : (
-        <>
-          {rows.length > 1 && <div className="rv-tabs rv-det-tabs">{rows.map((x, i) => <button key={x.row} type="button" className={i === tab ? 'on' : ''} onClick={() => setTab(i)}>Sheet row {x.row}</button>)}</div>}
-          {grouped(row.fields).map(([g, fields]) => (
-            <section key={g} className="rv-det">
-              <h4>{g}</h4>
-              <dl>{fields.map((f) => <Fragment key={f.name}><dt>{f.name}</dt><dd>{/^https?:\/\//.test(f.value) ? <a href={f.value} target="_blank" rel="noreferrer">{f.value}<ExternalLink size={12} /></a> : f.value}</dd></Fragment>)}</dl>
-            </section>
-          ))}
-        </>
-      )}
-    </Drawer>
-  )
-}
-
-/** One LNV row with what each file holds for it, side by side. */
-function LnvRowDetails({ row, close }: { row: number; close: () => void }) {
-  const { clientId } = useClient()
-  const [records, setRecords] = useState<CaseRecord[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  useEffect(() => {
-    let on = true
-    api.stepRow(clientId, row).then((r) => { if (on) setRecords(r as CaseRecord[]) }).catch((e) => { if (on) setError((e as Error).message) })
-    return () => { on = false }
-  }, [clientId, row])
-  const lnv = records?.findIndex((r) => r.src === 'LNV') ?? -1
-  return (
-    <Drawer open onClose={close} width={Math.min(320 + (records?.length ?? 1) * 280, window.innerWidth)} title={`LNV row ${row}`} subtitle={<span className="muted">What each file holds for this song</span>}>
-      {error ? <div className="alert bad">{error}</div> : !records ? <div className="loading"><span className="spinner" />Loading…</div> : (
-        <div className="rv-table-wrap"><Compare base={lnv >= 0 ? lnv : null} fields={[...SHOW, 'Alternate title', 'ISWC', 'IPRS code', 'Language', 'Label', 'Length']}
-          cols={records.map((r): Col => ({ r, tone: r.src === 'LNV' ? 'lnv' : r.src === 'IPRS' ? 'iprs' : 'muso', badge: r.src === 'LNV' ? `LNV row ${r.row ?? ''}` : r.src === 'IPRS' ? r.ref ?? 'IPRS' : r.src }))} /></div>
-      )}
-    </Drawer>
-  )
-}
 
 function LnvOnly({ d }: { d: Step1 }) {
   const [limit, setLimit] = useState(60)
@@ -981,7 +797,7 @@ function SavedView({ saved, d, open, undo }: {
           <span><b>{n(k.fills)}</b>blanks filled from {d.source}</span>
           <span><b>{n(k.picks ?? 0)}</b>values changed to {d.source}'s</span>
           <span className="grow" />
-          <a className="btn primary" href={api.lnvUpdateUrl(clientId)} title="The client's LNV with every saved answer applied – takes a few seconds">Download the LNV with these changes</a>
+          <a className="btn primary" href={api.lnvUpdateUrl(clientId)} title="The client's LNV with every saved answer applied, rows A–Z with each song's rows together under its main version (its row and title in two columns at the end) – takes a few seconds">Download the LNV with these changes</a>
         </div>
         <div className="rv-saved-tools">
           <div className="rv-tabs">

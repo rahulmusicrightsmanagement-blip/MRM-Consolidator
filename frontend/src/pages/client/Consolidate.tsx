@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, ArrowRight, Check, Download, ListChecks, UploadCloud } from 'lucide-react'
-import { Button } from '../../components/ui'
+import { Button, Guide } from '../../components/ui'
 import { api } from '../../lib/api'
 import { today, useClient } from '../../lib/client'
 import { RunProvider, useRun } from '../../lib/run'
@@ -116,6 +116,11 @@ export default function Consolidate() {
         <>
           <StepHead n={1} title="The client's three files"
             text={`The LNV is the client's catalogue – the master. The ${src} export brings the songs the stores have; the IPRS report what is registered. Drop each file on its box; you can replace one any time.`} />
+          <Guide id="step1" title="Add the client's files" steps={[
+            <>Drop the client's <b>LNV</b> on the first box – the master catalogue everything is compared with.</>,
+            <>Then the <b>{src} export</b> – the songs the stores have – and the <b>IPRS report</b> – what is registered.</>,
+            <>To replace a file, drop the new one on its box. When all three are in, continue to step 2.</>,
+          ]} />
           <div className="cs-files">
             <FileCard tone="lnv" label="LNV" what="The client's LNV report – the master" file={f.lnv?.name} text={f.lnv && `${n(f.lnv.stats.songs)} songs`}
               busy={busy.lnv} onFile={(x) => upload('lnv', x)} accept=".xlsx,.xlsm" />
@@ -137,7 +142,14 @@ export default function Consolidate() {
       {step === 3 && (
         <>
           {!f.lnv || !f.iprs ? <Empty>This step needs the LNV and the IPRS report – <button type="button" className="rv-link-btn" onClick={() => go(1)}>add them in step 1</button>.</Empty>
-            : <RunProvider key={data.run} runId={data.run!} onChange={() => { load(); refresh() }}><IprsStep /></RunProvider>}
+            : <>
+              <Guide id="step3" title="Check the LNV against IPRS" steps={[
+                <>Every LNV song is looked up in the IPRS report. <b>To decide</b>: pick the IPRS work that is the song, or say none is.</>,
+                <><b>Amend</b>: IPRS has the song with other details – it goes on the amendment list.</>,
+                <><b>Register</b>: IPRS does not have the song yet – it goes on the registration list.</>,
+              ]} />
+              <RunProvider key={data.run} runId={data.run!} onChange={() => { load(); refresh() }}><IprsStep /></RunProvider>
+            </>}
         </>
       )}
       {step === 4 && <Final data={data} clientId={clientId} go={go} />}
@@ -169,6 +181,11 @@ function Final({ data, clientId, go }: { data: StepsPayload; clientId: number; g
     <>
       <StepHead n={4} title="The final LNV"
         text={`The client's own LNV file with every answer written in: details filled (yellow), new songs added (green), rows entered twice marked (orange – never deleted), IPRS codes and statuses, and a sheet listing every change.`} />
+      <Guide id="step4" title="Download the final LNV" steps={[
+        <>Check the two boxes: what step 2 ({src}) and step 3 (IPRS) put into the LNV.</>,
+        <><b>Download the final LNV</b>: the client's own file with every change coloured – <span className="t-warn">yellow</span> filled or changed, <span className="t-good">green</span> added, orange entered twice.</>,
+        <>Its <b>MRM changes</b> sheet lists every change row by row. The amendment and registration lists go to IPRS.</>,
+      ]} />
       {open > 0 && (
         <div className="alert warn cs-pending">
           <span className="grow"><b>{n(open)}</b> songs still need you{c1?.needs ? <> – {n(c1.needs)} in step 2</> : null}{c3?.review_open ? <> – {n(c3.review_open)} in step 3</> : null}.
