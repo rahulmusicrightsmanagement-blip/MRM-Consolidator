@@ -126,5 +126,29 @@ export const api = {
   /** Save step 1 decisions without rebuilding the result (step 1 keeps its own state while the reviewer works). */
   mergeSave: (clientId: number, items: CleanDecisionIn[]) => request<{ saved: number }>(`/api/clients/${clientId}/clean/decisions/`, send({ items, quiet: true })),
   mergeExportUrl: (clientId: number) => `/api/clients/${clientId}/steps/merged/`,
+  /** The final LNV: the stage 2 LNV with step 3's (IPRS) answers. */
   lnvUpdateUrl: (clientId: number) => `/api/clients/${clientId}/steps/lnv/`,
+  /** The stage 1 LNV: the LNV with step 2's answers, A–Z by song or by album. */
+  stage1Url: (clientId: number, order: LnvOrder = 'song') => `/api/clients/${clientId}/steps/lnv/?stage=1${order === 'album' ? '&order=album' : ''}`,
+  /** Mark Muso vs LNV completed (its result is kept as the stage 2 LNV), or open it again. */
+  completeStage1: (clientId: number, done: boolean) => request<ClientDetail>(`/api/clients/${clientId}/stage1/`, send({ done })),
+  stage2Url: (clientId: number) => `/api/clients/${clientId}/stage2/`,
+  /** A corrected stage 2 LNV, in place of the one step 2 made. */
+  uploadStage2: (clientId: number, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<ClientDetail>(`/api/clients/${clientId}/stage2/`, { method: 'POST', body: form })
+  },
+  /** The IPRS report, added in LNV vs IPRS: the society is added and its report opened when needed. */
+  uploadIprs: async (clientId: number, file: File, run?: number | null) => {
+    if (!run) {
+      await request<ClientDetail>(`/api/clients/${clientId}/societies/`, send({ societies: ['IPRS'] }))
+      run = (await request<RunSummary>(`/api/clients/${clientId}/societies/IPRS/`, send({ report_date: new Date().toISOString().slice(0, 10) }))).id
+    }
+    const form = new FormData()
+    form.append('file', file)
+    return request<RunPayload & { detected: FileKind }>(`/api/runs/${run}/files/iprs/`, { method: 'POST', body: form })
+  },
 }
+
+export type LnvOrder = 'song' | 'album'

@@ -18,6 +18,7 @@ import NewClient from './pages/NewClient'
 import Tasks from './pages/client/Tasks'
 import Catalogue from './pages/client/Catalogue'
 import WorkPage from './pages/client/WorkPage'
+import IprsBoard from './pages/IprsBoard'
 
 /** Old /runs/:id links open that report inside its client. */
 function RunRedirect() {
@@ -30,13 +31,15 @@ function RunRedirect() {
   return null
 }
 
-// Login → clients → add client (details · the three files) → the client's flow: 1 files · 2 Muso & LNV ·
-// 3 LNV vs IPRS · 4 final LNV. Follow-up tasks, the catalogue and the society workspaces ("More tools") sit beside it.
+// Login → clients → add client (details · the LNV and the Muso export) → the client's flow: 1 files · 2 Muso vs LNV
+// (stage 1 LNV) · 3 LNV vs IPRS (stage 2 LNV; the IPRS report is added there) · 4 final LNV. "LNV vs IPRS" (/iprs)
+// lists the clients whose step 2 is completed. Follow-up tasks, the catalogue and the society workspaces sit beside it.
 const router = createBrowserRouter([{ errorElement: <ErrorPage />, children: [
   { path: '/login', element: <Login /> },
   { element: <RequireAuth />, children: [
     { path: '/', element: <Tracker /> },
     { path: '/clients/new', element: <NewClient /> },
+    { path: '/iprs', element: <IprsBoard /> },
     {
       path: '/clients/:clientId',
       element: <ClientLayout />,

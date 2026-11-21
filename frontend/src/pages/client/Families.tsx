@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Link2, Pencil, Plus, X } from 'lucide-react'
-import { Guide } from '../../components/ui'
+import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Link2, Pencil, Plus, Undo2, X } from 'lucide-react'
+import { Dropdown, Guide } from '../../components/ui'
+import type { DropOption } from '../../components/ui'
 import type { CleanDecisionIn } from '../../lib/api'
 import type { CaseRecord, ReviewCase, Step1, TitleMode } from '../../types'
 import { list, n, norm } from './Block'
-import { Checks, LnvRowDetails, MapDialog, Part, VersionDetails, differs, useKeys, useStored, value } from './CaseParts'
+import { Checks, Links, LnvRowDetails, MapDialog, Part, VersionDetails, differs, hasLink, useKeys, useStored, value, writersOf } from './CaseParts'
 import type { Target } from './CaseParts'
-import { PICKABLE, PICK_SHOWN, draftOf, itemsOf, matchOf, pickKey } from './reviewModel'
+import { NAME_FIELDS, PICKABLE, PICK_SHOWN, draftOf, itemsOf, matchOf, pickItem, pickKey } from './reviewModel'
 
 /** Step 2 by song name: every song one name holds – its original, remixes, lofis, parts – on one screen. On top
  *  the main version (the client's oldest recording with no tag); under it the exact matches side by side (scrolled
@@ -168,6 +169,27 @@ const locked = (e: Entry) => !e.v && !!e.c.auto && savedLinks(e.c).includes(e.ro
 const gTicked = (p: Pending, g: Group) => g.entries.every((e) => ticked(p, e))
 const gLocked = (g: Group) => g.entries.every(locked)
 export const toCheck = (p: Pending, f: Family) => [...f.exact, ...f.possible].filter((g) => !gTicked(p, g)).length
+/** A song name's exact and possible matches not ticked yet. */
+export const openOf = (p: Pending, f: Family) => ({ exact: f.exact.filter((g) => !gTicked(p, g)).length, possible: f.possible.filter((g) => !gTicked(p, g)).length })
+
+/** Every LNV row the Songs list matched – exact and possible – as a song a "Not in the LNV" song can be mapped onto:
+ *  linked to that row (the same song), or joined to its song as a version. */
+export function songTargets(fs: Family[]): Target[] {
+  const out = new Map<number, Target>()
+  for (const f of fs) {
+    for (const g of [...f.exact, ...f.possible]) {
+      const e = g.entries.find((x) => !x.v) ?? g.entries[0]
+      const to = e.c.muso[0]?.id
+      if (to == null || e.c.muso[0].moved) continue
+      const isrcs = [...new Set([...list(g.lnv.fields.ISRC), ...g.recs.flatMap((r) => list(r.fields.ISRC))])]
+      g.rows.forEach((row) => {
+        if (!out.has(row)) out.set(row, { c: e.c, row, to, title: value(g.lnv.fields.Title) || f.title, film: value(g.lnv.fields['Film / album']),
+          writers: writersOf(g.lnv).join(', '), isrcs, match: g.match, family: f.title })
+      })
+    }
+  }
+  return [...out.values()].sort((a, b) => a.title.localeCompare(b.title) || a.row - b.row)
+}
 
 function tick(p: Pending, e: Entry, on: boolean, saved: Step1['picks']): Pending {
   if (e.v) return { ...p, vers: put(p.vers, e.v.key, on ? 'same' : null, savedVer(e.v)) }
@@ -200,7 +222,9 @@ export function pendingItems(p: Pending, d: Step1): CleanDecisionIn[] {
     c.lnv.forEach((r) => PICKABLE.forEach((f) => handled.add(pickKey(r.row!, f))))
     out.push(...(rows.length ? itemsOf(c, { ...draftOf(c, picks), choice: 'same', rows }) : itemsOf(c, null)))
   }
-  Object.entries(p.picks).forEach(([k, v]) => { if (!handled.has(k)) out.push(v == null ? { key: k, choice: null } : { key: k, choice: 'muso', data: { value: v } }) })
+  // a value on a row no song here owns (a version the LNV has): the DSP's when one of its recordings holds it, else typed
+  const recsOf = (row: number) => d.cases.flatMap((c) => [...(c.lnv.some((r) => r.row === row) ? c.muso : []), ...(c.in_lnv ?? []).filter((v) => v.row === row).map((v) => v.muso)])
+  Object.entries(p.picks).forEach(([k, v]) => { if (!handled.has(k)) out.push(v == null ? { key: k, choice: null } : pickItem(k, v, recsOf(Number(k.split(':')[1])))) })
   const vers = new Map(d.cases.flatMap((c) => c.in_lnv ?? []).map((v) => [v.key, v.row]))
   Object.entries(p.vers).forEach(([k, v]) => out.push(v ? { key: k, choice: 'same', data: { rows: vers.has(k) ? [vers.get(k)!] : [] } } : { key: k, choice: null }))
   Object.entries(p.titles).forEach(([id, t]) => out.push(t ? { key: `title:${id}`, choice: t.mode, data: { value: t.value } } : { key: `title:${id}`, choice: null }))
@@ -285,7 +309,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
     const l = ls[0]
     if (!l) return null
     return <TitlePick key={`${l.id}-${modeOf(l)}`} line={l} mode={modeOf(l)} final={finalOf(l)} from={fromOf(l)} isMain={ls.some((x) => x.id === mainLine.id)}
-      source={source} choose={(m, t) => chooseTitle(ls, m, t)} map={map} />
+      mainTitle={finalOf(mainLine)} source={source} choose={(m, t) => chooseTitle(ls, m, t)} map={map} />
   }
 
   // ---- values: where Muso and the LNV row differ, the one the LNV keeps – on every row of the card
@@ -412,6 +436,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
             {FIELDS.slice(1).map((fl) => (
               <div key={fl}><dt>{fl}</dt><dd className={fl === 'ISRC' ? 'mono' : ''} title={value(main.fields[fl])}>{value(main.fields[fl]) || <span className="muted">—</span>}</dd></div>
             ))}
+            {hasLink([main]) && <div><dt>Link</dt><dd><Links urls={[main.link]} /></dd></div>}
           </dl>}
         </section>
 
@@ -462,6 +487,16 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                       {f.exact.map((g) => {
                         const lv = list(g.lnv.fields[fl]), mvs = variants(fl, g.recs)
                         const other = mvs.filter((v) => differs(fl, v, lv))
+                        // every field but the title (it has its own row): the LNV's, the DSP's, or typed
+                        if (PICK_SHOWN.includes(fl)) {
+                          const taken = pickOf(pickKey(g.rows[0], fl))
+                          const now = taken !== undefined ? list(taken) : lv.length ? lv : mvs[0] ?? []
+                          return (
+                            <td key={g.key} className={`${mark(fl, now, g.recs[0]) ? 'fx-dm' : ''} ${fl === 'ISRC' ? 'mono' : ''}`}>
+                              <FieldChoice key={`${fl}-${JSON.stringify(taken ?? null)}`} fl={fl} lv={lv} mvs={mvs} taken={taken} source={source} pick={(v) => choosePick(g, fl, v)} />
+                            </td>
+                          )
+                        }
                         return (
                           <td key={g.key} className={`${mark(fl, lv.length ? lv : mvs[0] ?? [], g.recs[0]) ? 'fx-dm' : ''} ${fl === 'ISRC' ? 'mono' : ''} ${fl === 'Title' ? 'fx-t' : ''}`}>
                             {lv.length ? lv.join(', ') : mvs.length ? <span className="fx-fill">{mvs.map((v) => v.join(', ')).join(' / ')}<small>blank in the LNV – {source}'s fills it</small></span> : <span className="muted">—</span>}
@@ -471,6 +506,15 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                       })}
                     </tr>
                   ))}
+                  {/* the song's links (a Spotify track …) – from the LNV's website or Spotify ID, and from the DSP */}
+                  {hasLink([main, ...f.exact.flatMap((g) => [g.lnv, ...g.recs])]) && (
+                    <tr className="fx-link">
+                      <th className="fx-f">Link</th>
+                      <td className="fx-main"><Links urls={[main.link]} /></td>
+                      {f.exact.map((g) => <td key={g.key}><Links urls={[g.lnv.link]} from="LNV" /><Links urls={g.recs.map((r) => r.link)} from={source} />
+                        {!hasLink([g.lnv, ...g.recs]) && <span className="muted">—</span>}</td>)}
+                    </tr>
+                  )}
                   <tr className="fx-title">
                     <th className="fx-f">Title in the LNV</th>
                     <td className="fx-main"><b>{finalOf(mainLine)}</b></td>
@@ -504,7 +548,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
           {!f.possible.length ? <p className="cv-none">No possible match for this song name.</p> : f.possible.map((g) => {
             const on = gTicked(p, g)
             const e = g.entries[0]
-            const shown = FIELDS.filter((fl) => fl === 'Title' || variants(fl, g.recs).length || list(g.lnv.fields[fl]).length)
+            const shown = FIELDS   // every field: each one can be picked or typed
             return (
               <article key={g.key} className={`pc ${on ? 'on' : ''}`}>
                 <header className="pc-head">
@@ -538,6 +582,8 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                       const two = opts.length > 0
                       const taken = pickOf(pickKey(g.rows[0], fl))
                       const at = taken === undefined ? -1 : opts.findIndex((v) => same(list(taken), v))
+                      const typed = PICK_SHOWN.includes(fl) && taken !== undefined && at < 0 && !mvs.some((v) => same(list(taken), v)) ? list(taken) : null
+                      const keep: Keep = typed ? 'custom' : taken !== undefined ? 'muso' : lv.length ? 'lnv' : mvs.length ? 'muso' : 'blank'
                       const opt = (v: string[], on: boolean, pick: string[] | null, key: string) => (
                         <label key={key} className={`pc-opt ${on ? 'on' : ''}`}>
                           <input type="radio" name={`${g.key}-${fl}`} checked={on} onChange={() => choosePick(g, fl, pick)} />
@@ -546,20 +592,25 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                       )
                       const tone = (v: string[], from: CaseRecord) => `${mark(fl, v, from) ? 'fx-dm' : ''} ${fl === 'ISRC' ? 'mono' : ''} ${fl === 'Title' ? 'fx-t' : ''}`
                       return (
-                        <tr key={fl} className={two ? 'two' : ''}>
-                          <th>{fl}{two && <small>pick one</small>}</th>
+                        <tr key={fl} className={`${two ? 'two' : ''} ${typed ? 'typed' : ''}`}>
+                          <th>{fl}{PICK_SHOWN.includes(fl) && <KeepChip keep={keep} source={source} />}{two && <small>pick one</small>}</th>
                           <td className={tone(mvs[0] ?? [], g.recs[0])}>
                             {two ? <div className="pc-opts">{opts.map((v, i) => opt(v, i === at, v, String(i)))}
                               {opts.length < mvs.length && <small className="muted">{n(mvs.length - opts.length)} more with the LNV's value</small>}</div>
                               : mvs.length ? mvs.map((v, i) => <div key={i}>{v.join(', ')}</div>) : <span className="muted">—</span>}
                           </td>
                           <td className={tone(lv, g.lnv)}>
-                            {two ? opt(lv, at < 0, null, 'lnv')
-                              : lv.length ? lv.join(', ') : mvs.length ? <span className="fx-fill">blank – {source}'s fills it</span> : <span className="muted">—</span>}
+                            {two && opt(lv, taken === undefined, null, 'lnv')}
+                            {/* every field edited in place: the pencil (or a click on the value) types the value the LNV keeps */}
+                            {PICK_SHOWN.includes(fl) ? <EditPick key={`${g.key}-${fl}-${JSON.stringify(typed)}`} fl={fl} radio={two} typed={typed}
+                              shown={lv.length ? lv : mvs[0] ?? []} note={!lv.length && mvs.length ? `blank in the LNV – ${source}'s fills it` : null}
+                              start={taken !== undefined ? list(taken) : lv.length ? lv : mvs[0] ?? []} save={(v) => choosePick(g, fl, v)} />
+                              : !two && (lv.length ? lv.join(', ') : mvs.length ? <span className="fx-fill">blank – {source}'s fills it</span> : <span className="muted">—</span>)}
                           </td>
                         </tr>
                       )
                     })}
+                    {hasLink([g.lnv, ...g.recs]) && <tr className="pc-link"><th>Link</th><td><Links urls={g.recs.map((r) => r.link)} /></td><td><Links urls={[g.lnv.link]} /></td></tr>}
                     <tr className="pc-title-row"><th>Title in the LNV</th><td colSpan={2}>{titlePick(g.trs.map((r) => r.id), () => mapCard(g))}</td></tr>
                     {/* the answer at the bottom, as in the exact matches: the tick, then "not a match" */}
                     <tr className="pc-yes"><th>Same song?</th><td colSpan={2} className={on ? 'on' : ''}>{tickBox(g, 'Yes, same song')}{hintOf(g) && <small className="fx-hint">{hintOf(g)}</small>}</td></tr>
@@ -669,35 +720,160 @@ function useAcross(reset: string) {
 }
 
 /** The title one recording gets in the LNV: same as the main version, the DSP's, the LNV's, typed – or map it. */
-function TitlePick({ line, mode, final, from, isMain, source, choose, map }: {
-  line: Line; mode: TitleMode; final: string; from: string; isMain: boolean; source: string
+function TitlePick({ line, mode, final, from, isMain, mainTitle, source, choose, map }: {
+  line: Line; mode: TitleMode; final: string; from: string; isMain: boolean; mainTitle: string; source: string
   choose: (mode: TitleMode, text?: string) => void; map: () => void
 }) {
   const [typing, setTyping] = useState<string | null>(null)
-  const commit = () => {
-    if (typing == null) return
-    const t = typing.trim()
-    setTyping(null)
-    if (t && t !== final) choose('custom', t)
-  }
+  const options: DropOption<TitleMode | 'map'>[] = [
+    ...(!isMain ? [{ value: 'main' as const, label: 'Same as main version', hint: mainTitle }] : []),
+    { value: 'muso', label: <KeepOption keep="muso" tag={source} text={`Keep ${source}'s title${line.def === 'muso' ? ' (as is)' : ''}`} />, hint: line.muso },
+    ...(line.lnv ? [{ value: 'lnv' as const, label: <KeepOption keep="lnv" tag="LNV" text={`Keep the LNV's title${line.def === 'lnv' ? ' (as is)' : ''}`} />, hint: line.lnv }] : []),
+    { value: 'custom', label: <KeepOption keep="custom" tag="Custom" text="Customise – type it" />, hint: mode === 'custom' ? final : 'Type the title for the LNV', sep: true },
+    { value: 'map', label: 'Map to another song…', hint: 'It is a version of another song in the LNV' },
+  ]
   return (
     <div className="tp">
-      <select className="tp-sel" value={typing != null ? 'custom' : mode} aria-label="Title in the LNV"
-        onChange={(e) => { const m = e.target.value; if (m === 'map') map(); else if (m === 'custom') setTyping(final); else choose(m as TitleMode) }}>
-        {!isMain && <option value="main">Same as main version</option>}
-        <option value="muso">Keep {source}'s{line.def === 'muso' ? ' (as is)' : ''}</option>
-        {line.lnv && <option value="lnv">Keep the LNV's{line.def === 'lnv' ? ' (as is)' : ''}</option>}
-        <option value="custom">Customise…</option>
-        <option value="map">Map to another song…</option>
-      </select>
-      {typing != null && (
-        <input autoFocus className="tp-in" value={typing} onChange={(e) => setTyping(e.target.value)} onBlur={commit}
-          onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setTyping(null) }} placeholder="Type the title for the LNV" aria-label="Custom title" />
-      )}
-      <div className="tp-final">
-        <b>{final}</b><span className={`cv-from ${mode}`}>{from}</span>
-        {mode === 'custom' && typing == null && <button type="button" className="rv-text-btn" onClick={() => setTyping(final)}><Pencil size={13} />Edit</button>}
-      </div>
+      <Dropdown className="tp-dd" value={mode} options={options} label="Title in the LNV" menuWidth={300}
+        onChange={(m) => { if (m === 'map') map(); else if (m === 'custom') setTyping(final); else choose(m) }} />
+      {typing != null
+        ? <EditBox initial={typing} label="Title for the LNV" placeholder="Type the title for the LNV"
+          done={(t) => { setTyping(null); if (t && t !== final) choose('custom', t) }} />
+        : <EditLine label="title" edit={() => setTyping(final)}><b>{final}</b><span className={`cv-from ${mode}`}>{from}</span></EditLine>}
     </div>
   )
+}
+
+/** The box to type a value in place: ready to type (the cursor after the text), with ✓ to keep it and ✕ to drop it –
+ *  or Enter / leaving the box, and Esc. done(null): nothing changed. */
+function EditBox({ initial, label, placeholder, done }: { initial: string; label: string; placeholder: string; done: (text: string | null) => void }) {
+  const [text, setText] = useState(initial)
+  const over = useRef(false)   // a click on ✓ or ✕ is on its way: leaving the box is not "keep"
+  const keep = () => done(text.trim())
+  return (
+    <div className="fe-edit">
+      <input autoFocus className="fc-in" value={text} onChange={(e) => setText(e.target.value)} aria-label={label} placeholder={placeholder}
+        onFocus={(e) => { const end = e.currentTarget.value.length; e.currentTarget.setSelectionRange(end, end) }}
+        onBlur={() => { if (!over.current) keep() }}
+        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); keep() } if (e.key === 'Escape') { e.preventDefault(); done(null) } }} />
+      <button type="button" className="fe-btn ok" title="Keep (Enter)" aria-label="Keep"
+        onPointerDown={() => { over.current = true }} onClick={() => { over.current = false; keep() }}><Check size={15} /></button>
+      <button type="button" className="fe-btn" title="Cancel (Esc)" aria-label="Cancel"
+        onPointerDown={() => { over.current = true }} onClick={() => { over.current = false; done(null) }}><X size={15} /></button>
+    </div>
+  )
+}
+
+/** A field's value typed: names split at their commas. done(null) when nothing changed. */
+function TypeIn({ fl, initial, now, done }: { fl: string; initial: string; now: string[]; done: (v: string[] | null) => void }) {
+  return (
+    <EditBox initial={initial} label={`${fl} for the LNV`}
+      placeholder={NAME_FIELDS.has(fl) ? 'Names, comma between them' : fl === 'Year' ? 'e.g. 2015' : `Type the ${fl.toLowerCase()} for the LNV`}
+      done={(t) => {
+        if (t == null) return done(null)
+        const v = NAME_FIELDS.has(fl) ? t.split(',').map((x) => x.trim()).filter(Boolean) : t ? [t] : []
+        done(v.length && !same(v, now) ? v : null)
+      }} />
+  )
+}
+
+/** A value as it goes into the LNV, and its pencil – always at the same place, the top right; only the pencil opens
+ *  the box to type it. */
+function EditLine({ label, edit, children }: { label: string; edit: () => void; children: ReactNode }) {
+  return (
+    <div className="fe">
+      <span className="fe-text">{children}</span>
+      <button type="button" className="fe-btn pen" onClick={edit} title={`Edit the ${label} – type the value the LNV keeps`} aria-label={`Edit the ${label}`}><Pencil size={14} /></button>
+    </div>
+  )
+}
+
+/** Which value a field keeps in the LNV: the LNV's own, the DSP's (picked, or filling a blank), typed, or blank. */
+type Keep = 'lnv' | 'muso' | 'custom' | 'blank'
+const keepText = (k: Keep, source: string) => k === 'lnv' ? 'LNV' : k === 'muso' ? source : k === 'custom' ? 'Customised' : 'Blank'
+
+/** A small chip: "Keeps LNV" · "Keeps Muso" · "Keeps Customised". */
+function KeepChip({ keep, source }: { keep: Keep; source: string }) {
+  return <span className={`keep-chip ${keep}`} title={`The LNV keeps ${keep === 'custom' ? 'the value typed by you' : keep === 'blank' ? 'nothing – blank' : `${keepText(keep, source)}'s value`}`}>
+    <i aria-hidden />Keeps {keepText(keep, source)}</span>
+}
+
+/** An option of the "keep" dropdown: its source as a coloured tag, then what it does. */
+const KeepOption = ({ keep, tag, text }: { keep: Keep; tag: string; text: string }) =>
+  <span className="keep-opt"><i className={`keep-tag ${keep}`}>{tag}</i>{text}</span>
+
+/** A field's value with its pencil (see EditLine). */
+const EditValue = ({ fl, value: v, note, edit }: { fl: string; value: string[]; note?: string | null; edit: () => void }) => (
+  <EditLine label={fl.toLowerCase()} edit={edit}>{v.length ? v.join(', ') : <span className="muted">—</span>}{note && <small className="fx-fill-note">{note}</small>}</EditLine>
+)
+
+/** One field of an exact match as it goes into the LNV: the value – edited in place with its pencil – and under it a
+ *  dropdown saying what the LNV keeps: the LNV's own value, the DSP's, or a customised (typed) one. With the LNV
+ *  blank, the DSP's value fills it unless another is chosen. */
+function FieldChoice({ fl, lv, mvs, taken, source, pick }: {
+  fl: string; lv: string[]; mvs: string[][]; taken?: string | string[]; source: string; pick: (v: string[] | null) => void
+}) {
+  const [typing, setTyping] = useState<string | null>(null)
+  const opts = lv.length ? mvs.filter((v) => differs(fl, v, lv)) : mvs
+  const at = taken === undefined ? -1 : opts.findIndex((v) => same(list(taken), v))
+  const mode = taken === undefined ? (lv.length ? 'lnv' : mvs.length ? 'm0' : 'blank') : at >= 0 ? `m${at}` : 'custom'
+  const now = taken !== undefined ? list(taken) : lv.length ? lv : mvs[0] ?? []
+  const fills = !lv.length && mode === 'm0'
+  const keep: Keep = mode === 'lnv' ? 'lnv' : mode === 'custom' ? 'custom' : mode === 'blank' ? 'blank' : 'muso'
+  const options: DropOption[] = [
+    ...(lv.length ? [{ value: 'lnv', label: <KeepOption keep="lnv" tag="LNV" text="Keep the LNV's value" />, hint: lv.join(', ') }]
+      : !mvs.length ? [{ value: 'blank', label: <KeepOption keep="blank" tag="—" text="Leave it blank" /> }] : []),
+    ...opts.map((v, i) => ({ value: `m${i}`, label: <KeepOption keep="muso" tag={source} text={!lv.length && i === 0 ? `Keep ${source}'s – fills the blank` : `Keep ${source}'s value`} />, hint: v.join(', ') })),
+    { value: 'custom', label: <KeepOption keep="custom" tag="Custom" text="Customise – type it" />, hint: mode === 'custom' ? now.join(', ') : `Type the ${fl.toLowerCase()} yourself`, sep: true },
+  ]
+  const choose = (m: string) => {
+    if (m === 'custom') setTyping(now.join(', '))
+    else if (m === 'lnv' || m === 'blank' || (!lv.length && m === 'm0')) pick(null)
+    else pick(opts[Number(m.slice(1))])
+  }
+  return (
+    <div className={`fc ${mode === 'custom' ? 'typed' : ''}`}>
+      <Dropdown className="fc-dd" tone={keep === 'blank' ? '' : keep} value={mode} options={options} label={`What the LNV keeps for ${fl}`} menuWidth={290}
+        shown={<><i className="dd-dot" />Keep: {keepText(keep, source)}</>} onChange={choose} />
+      {typing != null ? <TypeIn fl={fl} initial={typing} now={now} done={(v) => { setTyping(null); if (v) pick(v) }} />
+        : <EditValue fl={fl} value={now} note={fills ? `blank in the LNV – ${source}'s fills it` : null} edit={() => setTyping(now.join(', '))} />}
+      {mode === 'lnv' && opts.length > 0 && <small className="fx-other">{source}: {opts.map((v) => v.join(', ')).join(' / ')}</small>}
+    </div>
+  )
+}
+
+/** A possible match's field in the LNV's column, edited in place. In a row where the DSP and the LNV differ (radio):
+ *  a third choice under the LNV's – Customise – with its pencil: a click on it opens the box to type the value right
+ *  there (and again, to change a typed one). Else the value itself, a click or its pencil to type another; once typed,
+ *  the value and back to the LNV's. */
+function EditPick({ fl, radio, typed, shown, note, start, save }: {
+  fl: string; radio: boolean; typed: string[] | null; shown: string[]; note?: string | null; start: string[]
+  save: (v: string[] | null) => void
+}) {
+  const [typing, setTyping] = useState<string | null>(null)
+  const edit = (from: string[]) => setTyping(from.join(', '))
+  const box = typing != null ? <TypeIn fl={fl} initial={typing} now={typed ?? start} done={(v) => { setTyping(null); if (v) save(v) }} /> : null
+  if (radio) return box ? <div className="pc-opt pc-custom editing">{box}</div> : typed ? (
+    <div className={`pc-opt pc-custom on`}>
+      <i className="pc-radio" aria-hidden />
+      <span>{typed.join(', ')}</span>
+      <button type="button" className="fe-btn pen" onClick={() => edit(typed)} title={`Edit the ${fl.toLowerCase()} – type the value the LNV keeps`} aria-label={`Edit the ${fl.toLowerCase()}`}><Pencil size={14} /></button>
+      <small>customised by you – goes into the LNV</small>
+    </div>
+  ) : (
+    <button type="button" className="pc-opt pc-custom" onClick={() => edit(start)} title={`Type the ${fl.toLowerCase()} the LNV keeps`}>
+      <i className="pc-radio" aria-hidden />
+      <span>Customise – type it</span>
+      <span className="fe-btn pen" aria-hidden><Pencil size={14} /></span>
+    </button>
+  )
+  if (box) return box
+  return typed ? (
+    <div className="pc-typed">
+      <EditValue fl={fl} value={typed} edit={() => edit(typed)} />
+      <span className="pc-typed-btns">
+        <button type="button" className="rv-text-btn" onClick={() => save(null)}><Undo2 size={13} />Back to the LNV's</button>
+      </span>
+    </div>
+  ) : <EditValue fl={fl} value={shown} note={note} edit={() => edit(start)} />
 }

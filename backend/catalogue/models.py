@@ -14,6 +14,9 @@ class Client(models.Model):
     due_date = models.DateField(null=True, blank=True)
     home_society = models.CharField(max_length=20, default="IPRS")
     created_at = models.DateTimeField(auto_now_add=True)
+    # Muso vs LNV (step 2, the stage 1 LNV) marked completed: when and by whom. Then the client is in LNV vs IPRS.
+    stage1_done_at = models.DateTimeField(null=True, blank=True)
+    stage1_done_by = models.CharField(max_length=254, blank=True)
 
     class Meta:
         ordering = ["name"]
@@ -22,19 +25,36 @@ class Client(models.Model):
         return self.name
 
     def active_master(self):
-        return self.masters.order_by("-uploaded_at").first()
+        """The LNV as uploaded – the stage 1 LNV step 2 checks against the Muso export."""
+        return self.masters.filter(stage=MasterFile.STAGE1).order_by("-uploaded_at").first()
+
+    def stage2_master(self):
+        """The stage 2 LNV: step 2's result (made when step 2 is completed) or the corrected one uploaded in its place."""
+        return self.masters.filter(stage=MasterFile.STAGE2).order_by("-uploaded_at").first()
+
+    def compare_master(self):
+        """The LNV the societies are checked against: the stage 2 LNV, else (a client from before stages) the uploaded one."""
+        return self.stage2_master() or self.active_master()
 
 
 def master_path(instance, filename):
-    return f"clients/{instance.client_id}/master/{filename}"
+    return f"clients/{instance.client_id}/{'lnv2' if instance.stage == MasterFile.STAGE2 else 'master'}/{filename}"
 
 
 class MasterFile(models.Model):
-    """Our master (LNV report) for a client – uploaded once, shared by every society check. Older versions are kept."""
+    """One LNV of a client. Stage 1: the LNV as uploaded, checked against the Muso export in step 2. Stage 2: the LNV
+    after step 2 (made from its answers, or the corrected file uploaded in its place) – the one IPRS is checked against.
+    Older versions are kept."""
+    STAGE1, STAGE2 = 1, 2
+    UPLOAD, FROM_STAGE1 = "upload", "stage1"
+
     client = models.ForeignKey(Client, related_name="masters", on_delete=models.CASCADE)
     file = models.FileField(upload_to=master_path, max_length=300)
     original_name = models.CharField(max_length=255)
     stats = models.JSONField(default=dict, blank=True)
+    stage = models.PositiveSmallIntegerField(default=STAGE1)
+    origin = models.CharField(max_length=20, default=UPLOAD)   # upload · stage1 (made from step 2's answers)
+    uploaded_by = models.CharField(max_length=254, blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
 

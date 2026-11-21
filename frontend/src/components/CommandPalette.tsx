@@ -25,7 +25,8 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
 
   const items = useMemo<Item[]>(() => {
     const out: Item[] = [{ id: 'home', label: 'Client tracker', hint: 'all clients', kind: 'page', go: () => navigate('/') },
-      { id: 'new', label: 'Add client', hint: '', kind: 'page', go: () => navigate('/clients/new') }]
+      { id: 'new', label: 'Add client', hint: '', kind: 'page', go: () => navigate('/clients/new') },
+      { id: 'iprs', label: 'LNV vs IPRS', hint: 'clients with Muso vs LNV completed', kind: 'page', go: () => navigate('/iprs') }]
     if (client) {
       const base = `/clients/${client.clientId}`
       const sections: [string, string][] = [['', 'Client home'], ...(client.detail?.societies ?? []).map((s) => [`/societies/${s.code}`, `${s.code} workspace`] as [string, string])]

@@ -1,5 +1,20 @@
 # MRM changelog
 
+## 1.4.1 – 2026-11-20 (patch)
+- Every field's pencil and Keep button sit at the same place in each cell; only the pencil opens the box to type (ready to type, with ✓ and ✕), clicking the value no longer does
+
+## 1.4.0 – 2026-11-20 (minor)
+- Sidebar and song list close by themselves (open on hover) with a lock to keep them open; steps strip on top removed; sidebar shows two stages – Muso vs LNV marked completed, LNV vs IPRS starting again with the stage 2 LNV (extracted or uploaded); straight to the check once both files are in (Add client and LNV vs IPRS); larger review screen; new logo and favicon
+
+## 1.3.2 – 2026-11-20 (patch)
+- Customise in a possible match: clicking its pencil (or the Customise choice) opens the box to type the value right there, already filled in; clicking it again edits a typed value
+
+## 1.3.1 – 2026-11-20 (patch)
+- Step 2 gets a Completed button and its LNV (stage 1) downloads A–Z by song or by album; new LNV vs IPRS page lists the clients with Muso vs LNV completed – their stage 2 LNV (step 2's result, or a corrected one uploaded) is checked against the IPRS report, which is no longer asked for when a client is added; every field has a pencil to edit it in place and the dropdowns say what the LNV keeps: LNV, Muso or Customised
+
+## 1.3.0 – 2026-11-20 (minor)
+- Download the LNV from Saved to the LNV works (saves waiting changes first, shows Preparing…, never leaves the page); every field of an exact or possible match can be kept from the LNV, taken from Muso or typed (Publisher too), with a Link row for Spotify or any link the LNV or Muso has; Not in the LNV songs can be mapped to an exact or possible match – as the same song (linked to its LNV row) or as a version; Exact / Possible / Not in the LNV counts on top; every dropdown redesigned
+
 ## 1.2.0 – 2026-11-18 (minor)
 - The downloaded LNV comes in alphabetical order with each song's rows together under its main version, plus columns for the main version's row, its title, and each row's number in the uploaded LNV
 

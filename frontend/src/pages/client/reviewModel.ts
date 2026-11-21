@@ -1,5 +1,6 @@
 import type { CleanDecisionIn } from '../../lib/api'
-import type { ReviewCase } from '../../types'
+import type { CaseRecord, ReviewCase } from '../../types'
+import { list, norm } from './Block'
 
 /** Step 2's answers as the reviewer gives them (a draft per song) and the decisions each one saves. */
 
@@ -7,11 +8,21 @@ export type Choice = 'same' | 'add' | 'not_ours' | 'different' | null
 /** picks: "pick:<row>:<field>" -> the Muso value chosen over the LNV's, where the two differ */
 export type Draft = { in: number[]; rows: number[]; choice: Choice; reject: string[]; picks: Record<string, string | string[]> }
 
-/** Fields where the reviewer may take Muso's value over the LNV's (publisher cells carry shares and IPIs: not here). */
-export const PICKABLE = ['Title', 'Film / album', 'Year', 'ISRC', 'Lyricist', 'Composer', 'Singer']
+/** Fields where the reviewer may take Muso's value over the LNV's, or type one of their own. A publisher picked or
+ *  typed replaces the LNV's publisher names (a slot keeps its IPI only while it holds the same company). */
+export const PICKABLE = ['Title', 'Film / album', 'Year', 'ISRC', 'Lyricist', 'Composer', 'Singer', 'Publisher']
 export const pickKey = (row: number, f: string) => `pick:${row}:${f}`
 /** Fields offered in "which value goes into the LNV" – the title has a part of its own (the titles part). */
 export const PICK_SHOWN = PICKABLE.filter((f) => f !== 'Title')
+/** Fields that hold a list of names: a typed value is split at its commas. */
+export const NAME_FIELDS = new Set(['Lyricist', 'Composer', 'Singer', 'Publisher'])
+
+const key = (v: string | string[]) => list(v).map(norm).sort().join('|')
+/** Is this chosen value one the DSP holds for the field (picked), or one the reviewer typed (custom)? */
+export const isFrom = (recs: CaseRecord[], f: string, v: string | string[]) => recs.some((r) => list(r.fields[f]).length > 0 && key(r.fields[f]) === key(v))
+/** The decision for a value chosen over the LNV's: the DSP's (muso) or typed by the reviewer (custom). */
+export const pickItem = (k: string, v: string | string[], recs: CaseRecord[]): CleanDecisionIn =>
+  ({ key: k, choice: isFrom(recs, k.split(':').slice(2).join(':'), v) ? 'muso' : 'custom', data: { value: v } })
 
 export function draftOf(c: ReviewCase, saved: Record<string, string | string[]> = {}): Draft {
   const a = c.answer
@@ -47,7 +58,7 @@ export function itemsOf(c: ReviewCase, d: Draft | null): CleanDecisionIn[] {
   const picks = (rows: number[]) => c.lnv.forEach((r) => PICKABLE.forEach((f) => {
     const key = pickKey(r.row!, f)
     const v = rows.includes(r.row!) ? d?.picks[key] : undefined
-    out.push(v !== undefined ? { key, choice: 'muso', data: { value: v } } : { key, choice: null })
+    out.push(v !== undefined ? pickItem(key, v, [...c.muso, ...(c.in_lnv ?? []).map((x) => x.muso)]) : { key, choice: null })
   }))
   if (!d) { out.push({ key: `link:${song}`, choice: null }, { key: `missing:${song}`, choice: null }); picks([]) }
   else if (d.choice === 'same') {
@@ -70,8 +81,10 @@ export function matchOf(c: ReviewCase): Match {
   const levels = c.lnv.map((r) => r.check?.level)
   if (levels.includes('exact')) return 'exact'
   // one stage holds – or only the ISRC is shared (the LNV has that recording: it is never added twice) – or the song
-  // is only a version the LNV already has
-  return levels.includes('possible') || levels.includes('isrc_only') || c.in_lnv?.some((v) => v.isrc && v.answer !== 'none') ? 'possible' : 'new'
+  // is only a version the LNV already has – or the reviewer linked it to an LNV row themselves (mapped from "Not in
+  // the LNV"): it is in the LNV
+  return levels.includes('possible') || levels.includes('isrc_only') || c.in_lnv?.some((v) => v.isrc && v.answer !== 'none')
+    || (c.answer.choice === 'same' && c.answer.by === 'you' && !!c.answer.rows?.length) ? 'possible' : 'new'
 }
 
 /** A song's stable name across reloads: an answer can move it from one kind of case to another. */

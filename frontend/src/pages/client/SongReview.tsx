@@ -1,20 +1,21 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, Search, Undo2, X } from 'lucide-react'
-import { ConfirmDialog, Guide } from '../../components/ui'
-import { api } from '../../lib/api'
+import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, ListMusic, Search, Undo2, X } from 'lucide-react'
+import { ConfirmDialog, Dropdown, Guide, LockToggle } from '../../components/ui'
+import { useFlag, usePeek } from '../../lib/peek'
 import type { CleanDecisionIn } from '../../lib/api'
 import { useClient } from '../../lib/client'
 import { useToast } from '../../lib/toast'
-import type { CaseKind, CaseRecord, ReviewCase, Step1, TitleMode } from '../../types'
+import type { CaseKind, CaseRecord, ReviewCase, Stage1Done, Step1, TitleMode } from '../../types'
 import { list, n, norm } from './Block'
-import { Act, Block, Compare, Kbd, Legend, LnvCard, LnvRowDetails, MainCard, MapDialog, Part, SHOW, TitleSection, VersionDetails, VersionList, WideBtn,
+import { Act, Block, Compare, Kbd, Legend, LnvCard, LnvRowDetails, MainCard, MapDialog, Part, SHOW, TitleSection, VersionDetails, VersionList,
   differs, targetsOf, useKeys, useStored, value } from './CaseParts'
 import type { Col, Spot, Target, TitleLine } from './CaseParts'
-import { FamilyView, NO_PENDING, SaveBar, familiesOf, inFamilies, pendingCount, pendingItems, stripSaved, toCheck } from './Families'
+import { FamilyView, NO_PENDING, SaveBar, familiesOf, inFamilies, openOf, pendingCount, pendingItems, songTargets, stripSaved, toCheck } from './Families'
 import type { Family, Pending } from './Families'
 import { PICK_SHOWN, draftOf, itemsOf, keyOf, matchOf, pickKey, ready } from './reviewModel'
 import type { Choice, Draft } from './reviewModel'
+import { CompleteBar, Stage1Download } from './LnvStages'
 
 export { useStored }
 
@@ -52,7 +53,7 @@ function effect(c: ReviewCase, d: Draft, source: string) {
   if (d.choice === 'same') {
     const fills = c.updates.filter((u) => d.rows.includes(u.row) && !d.reject.includes(u.key)).length
     const picks = Object.keys(d.picks).length
-    return `Linked to LNV row ${d.rows.join(' + ')}${fills ? ` · ${fills} blank${fills > 1 ? 's' : ''} filled from ${source}` : ''}${picks ? ` · ${picks} value${picks > 1 ? 's' : ''} changed to ${source}'s` : ''}${more}`
+    return `Linked to LNV row ${d.rows.join(' + ')}${fills ? ` · ${fills} blank${fills > 1 ? 's' : ''} filled from ${source}` : ''}${picks ? ` · ${picks} value${picks > 1 ? 's' : ''} changed (${source}'s or typed)` : ''}${more}`
   }
   if (d.choice === 'add') return (c.origin ? `New LNV row naming row ${c.origin.row} “${value(c.origin.fields.Title)}” as its original` : 'New LNV row') + more
   return d.choice === 'not_ours' ? "Not added – not the client's song" : ''
@@ -65,8 +66,10 @@ const SORTS: [Sort, string][] = [['az', 'A → Z'], ['za', 'Z → A'], ['most', 
 /** One line of the list: a song name with every song it holds (f), one song or question (c), or the LNV-only songs. */
 type Item = { id: string; f?: Family; c?: ReviewCase; lnvOnly?: boolean }
 
-export default function SongReview({ d, save }: {
+export default function SongReview({ d, save, stage1, complete }: {
   d: Step1; save: (items: CleanDecisionIn[]) => Promise<boolean>
+  /** step 2 marked completed (its LNV is the stage 2 LNV) – and marking it so, or opening it again */
+  stage1: Stage1Done | null; complete: (done: boolean) => Promise<boolean>
 }) {
   const { clientId } = useClient()
   const toast = useToast()
@@ -123,6 +126,8 @@ export default function SongReview({ d, save }: {
   const others = useMemo(() => d.cases.filter((c) => c.kind === 'names' || c.kind === 'twice'), [d])
   // the songs the app matched exactly: what a recording can be mapped onto
   const targets = useMemo(() => targetsOf(d.cases, (c) => matchOf(c) === 'exact'), [d])
+  // every exact and possible match in Songs: what a "Not in the LNV" song can be mapped onto
+  const mapTargets = useMemo(() => songTargets(families), [families])
 
   // answered here, before the next load shows it – by song (keyOf), since an answer can move a song to another case
   const [done, setDone] = useState<Record<string, boolean>>({})
@@ -215,13 +220,22 @@ export default function SongReview({ d, save }: {
     setSection(f || c.kind === 'names' || c.kind === 'twice' ? 'songs' : 'new')
     setSelectedId(f ? f.id : c.id)
   }
-  const [wide, setWide] = useStored('mrm-wide', false)
-  useKeys({ w: () => setWide(!wide), '/': () => searchRef.current?.focus(), '?': () => setHelp((h) => !h) })
+  // the song list: closes by itself to a slim strip (it opens while the pointer is on it) – or locked open beside the song
+  const [listLock, setListLock] = useFlag('mrm-list-lock', false)
+  const listPeek = usePeek(60, 360)
+  const lockList = () => { setListLock(!listLock); listPeek.set(false) }
+  // how the numbers add up: one paragraph, folded away so the song has the room
+  const [sumOpen, setSumOpen] = useStored('mrm-sum-open', false)
+  const pick = (id: string) => { setSelectedId(id); if (!listLock) listPeek.set(false) }
+  useKeys({ w: lockList, '/': () => { if (!listLock) listPeek.set(true); searchRef.current?.focus() }, '?': () => setHelp((h) => !h) })
+  const lockBtn = <LockToggle className="sm-nav wide-btn" locked={listLock} what="song list" toggle={lockList} label={<span>{listLock ? 'List locked' : 'Lock list'}</span>} />
   const sorts = section === 'songs' ? SORTS : SORTS.slice(0, 2)
   const sortShown = sorts.some(([id]) => id === sort) ? sort : 'az'
 
   return (
     <section className="cs-body rv">
+      {/* the end of the step: mark it completed – its LNV goes on to LNV vs IPRS – and the download */}
+      <CompleteBar clientId={clientId} stage1={stage1} needs={progress.needs} flush={() => commit()} complete={complete} />
       {/* the two views of the step: the songs to review, and everything saved – what goes into the LNV */}
       <div className="rv-views">
         <button type="button" className={view === 'review' ? 'on' : ''} onClick={() => setView('review')}>Review songs<span>{n(d.cases.filter((c) => !c.auto && !isDone(c)).length)} open</span></button>
@@ -233,14 +247,39 @@ export default function SongReview({ d, save }: {
             title: 'Songs the app could not decide: compare and pick an answer', go: () => { pickSection('songs'); setShow('todo') } },
           { label: progress.sure ? `Confirm ${n(progress.sure)} app answer${progress.sure > 1 ? 's' : ''}` : "App's answers confirmed", left: progress.sure,
             title: 'The app has an answer: check it and tick it', go: () => { pickSection('songs'); setShow('todo') } },
-          { label: 'Download the LNV', left: progress.needs + progress.sure, title: 'See every saved answer and download the LNV with the changes', go: showSaved },
+          { label: stage1 ? 'Completed' : 'Mark as completed', left: stage1 ? 0 : progress.needs + progress.sure, title: 'See every saved answer, download the stage 1 LNV and mark the step completed', go: showSaved },
         ]} />
       </div>
+
+      {/* how many matches the whole step holds: exact and possible (one per LNV row) and the songs not in the LNV */}
+      {view === 'review' && (() => {
+        const t = families.reduce((a, f) => {
+          const o = openOf(pending, f)
+          return { exact: a.exact + f.exact.length, possible: a.possible + f.possible.length, exactLeft: a.exactLeft + o.exact, possibleLeft: a.possibleLeft + o.possible }
+        }, { exact: 0, possible: 0, exactLeft: 0, possibleLeft: 0 })
+        const newLeft = loose.filter((c) => !isDone(c)).length
+        const by = (s: Sort) => { pickSection('songs'); setSort(s) }
+        return (
+          <div className="rv-totals" aria-label="Matches in this step">
+            <button type="button" className="rv-total exact" onClick={() => by('exact')} title="Show the songs with the most exact matches first">
+              <span className="rv-total-label">Exact match</span><b>{n(t.exact)}</b>
+              <small>{t.exactLeft ? `${n(t.exactLeft)} to check` : 'all checked'}</small></button>
+            <button type="button" className="rv-total possible" onClick={() => by('possible')} title="Show the songs with the most possible matches first">
+              <span className="rv-total-label">Possible match</span><b>{n(t.possible)}</b>
+              <small>{t.possibleLeft ? `${n(t.possibleLeft)} to check` : 'all checked'}</small></button>
+            <button type="button" className="rv-total new" onClick={() => pickSection('new')} title={`${d.source} songs no LNV row matches`}>
+              <span className="rv-total-label">Not in the LNV</span><b>{n(loose.length)}</b>
+              <small>{newLeft ? `${n(newLeft)} need an answer` : 'all answered'}</small></button>
+            <span className="rv-total-note muted">One match is one LNV row; <b>{n(families.length)}</b> song names in Songs.
+              <button type="button" className="rv-text-btn rv-sum-btn" onClick={() => setSumOpen(!sumOpen)} aria-expanded={sumOpen}>{sumOpen ? 'Hide how it adds up' : 'How it adds up'}</button></span>
+          </div>
+        )
+      })()}
 
       {view === 'review' && d.wins.length > 0 && <Wins wins={d.wins} source={d.source} save={save} />}
 
       {/* how the numbers add up, in one line */}
-      {view === 'review' && (() => {
+      {view === 'review' && sumOpen && (() => {
         const matched = families.reduce((t, f) => t + f.cases.length, 0)
         return (
           <p className="rv-sum">
@@ -251,26 +290,34 @@ export default function SongReview({ d, save }: {
         )
       })()}
 
-      {view === 'saved' ? <SavedView saved={saved} d={d} open={openCase} undo={(c) => answer(c, null, false)} /> :
-      <div className={`sm-review ${wide ? 'wide' : ''}`}>
+      {view === 'saved' ? <SavedView saved={saved} d={d} open={openCase} undo={(c) => answer(c, null, false)} flush={() => commit()} /> :
+      <div className={`sm-review ${listLock ? 'locked' : 'auto'} ${!listLock && listPeek.open ? 'peek' : ''}`}>
+        <div className="sm-dock" {...(listLock ? {} : listPeek.handlers)}>
+        {!listLock && (
+          <button type="button" className="sm-rail" onClick={listPeek.toggle} aria-expanded={listPeek.open}
+            title="The song list – point at it to open it; lock it to keep it open (W)">
+            <ListMusic size={17} /><span className="sm-rail-text">{section === 'songs' ? 'Songs' : 'Not in the LNV'}</span><b>{n(shown.length)}</b>
+          </button>
+        )}
         <div className="sm-list">
           <div className="sm-list-head">
-            <label className="cs-search sm-search"><Search size={15} /><input ref={searchRef} value={q} onChange={(e) => setQ(e.target.value)}
-              placeholder={section === 'songs' ? 'Search in Songs: song, writer, ISRC, LNV row…' : 'Search in Not in the LNV…'} /></label>
-            {help && <div className="rv-keys"><span><Kbd>↑</Kbd><Kbd>↓</Kbd> move</span><span><Kbd>Enter</Kbd> accept</span><span><Kbd>S</Kbd> same</span><span><Kbd>N</Kbd> add</span><span><Kbd>X</Kbd> not the client's</span><span><Kbd>U</Kbd> undo</span><span><Kbd>/</Kbd> search</span><span><Kbd>W</Kbd> expand</span></div>}
+            <div className="sm-list-top">
+              <label className="cs-search sm-search"><Search size={15} /><input ref={searchRef} value={q} onChange={(e) => setQ(e.target.value)}
+                placeholder={section === 'songs' ? 'Search in Songs: song, writer, ISRC, LNV row…' : 'Search in Not in the LNV…'} /></label>
+              <LockToggle className="icon-btn" locked={listLock} what="song list" toggle={lockList} />
+            </div>
+            {help && <div className="rv-keys"><span><Kbd>↑</Kbd><Kbd>↓</Kbd> move</span><span><Kbd>Enter</Kbd> accept</span><span><Kbd>S</Kbd> same</span><span><Kbd>N</Kbd> add</span><span><Kbd>X</Kbd> not the client's</span><span><Kbd>M</Kbd> map to a song</span><span><Kbd>U</Kbd> undo</span><span><Kbd>/</Kbd> search</span><span><Kbd>W</Kbd> lock the list</span></div>}
             <div className="rv-tabs rv-match">
               <button type="button" className={section === 'songs' ? 'on' : ''} onClick={() => pickSection('songs')} title="Songs the LNV has – exact and possible matches, by song name">Songs<span>{n(families.length)}</span></button>
               <button type="button" className={section === 'new' ? 'on' : ''} onClick={() => pickSection('new')} title={`${d.source} songs no LNV row matches`}>Not in the LNV<span>{n(loose.length)}</span></button>
             </div>
             <div className="rv-list-tools">
-              <select className="rv-kind" value={show} onChange={(e) => { setShow(e.target.value as typeof show); setSelectedId(null) }} aria-label="Which songs">
-                <option value="all">Show all</option>
-                <option value="todo">{section === 'songs' ? 'Left to check' : 'Needs an answer'}</option>
-                <option value="done">{section === 'songs' ? 'All checked' : 'Done'}</option>
-              </select>
-              <select className="rv-kind" value={sortShown} onChange={(e) => setSort(e.target.value as Sort)} aria-label="Order">
-                {sorts.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
-              </select>
+              <Dropdown className="rv-dd" label="Which songs" value={show} onChange={(v) => { setShow(v); setSelectedId(null) }} options={[
+                { value: 'all', label: 'Show all', hint: section === 'songs' ? 'Every song name' : 'Every song not in the LNV' },
+                { value: 'todo', label: section === 'songs' ? 'Left to check' : 'Needs an answer', hint: section === 'songs' ? 'A match not ticked yet' : 'No answer saved yet' },
+                { value: 'done', label: section === 'songs' ? 'All checked' : 'Done', hint: section === 'songs' ? 'Every match ticked' : 'Answered' },
+              ]} />
+              <Dropdown className="rv-dd" label="Order" value={sortShown} onChange={setSort} options={sorts.map(([id, label]) => ({ value: id, label }))} />
               {section === 'new' && confirmable > 0 && (
                 <button type="button" className="btn sm" onClick={() => setAsking(true)} title="Accept the app's answer on every song shown that has one">
                   <CheckCheck size={14} />Accept all {n(confirmable)}</button>
@@ -284,14 +331,14 @@ export default function SongReview({ d, save }: {
               : shown.map((x, i) => {
                 const on = sel?.id === x.id
                 if (x.lnvOnly) return (
-                  <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => setSelectedId(x.id)}>
+                  <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => pick(x.id)}>
                     <span className="sm-item-text"><b>Only in the LNV</b><small>{n(d.lnv_only.length)} LNV songs {d.source} does not have</small></span>
                   </button>
                 )
                 if (x.f) {
                   const f = x.f, l = left(f)
                   return (
-                    <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => setSelectedId(x.id)}>
+                    <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => pick(x.id)}>
                       <span className="sm-item-text">
                         <b>{f.title}</b>
                         <small><span className="li-n exact">Exact {n(f.exact.length)}</span><span className="li-n possible">Possible {n(f.possible.length)}</span>
@@ -306,7 +353,7 @@ export default function SongReview({ d, save }: {
                 return (
                   <Fragment key={x.id}>
                     {section === 'songs' && !shown[i - 1]?.c && <p className="sm-list-sep">Other questions</p>}
-                    <button type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => setSelectedId(x.id)}>
+                    <button type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => pick(x.id)}>
                       <span className="sm-item-text">
                         <b>{c.title}</b>
                         <small>{c.answer.recheck && !isDone(c) && <span className="rv-recheck">Check again · </span>}{c.kind === 'versions' ? '' : `${KIND[c.kind].label}${c.muso.length > 1 ? ' · ' : ''}`}{c.muso.length > 1 ? `${c.muso.length} versions` : ''}{v !== 'Needs you' && <> · <span className="rv-verdict">{v}</span></>}</small>
@@ -318,13 +365,15 @@ export default function SongReview({ d, save }: {
               })}
           </div>
         </div>
+        </div>
         {sel?.lnvOnly ? <LnvOnly d={d} />
           : sel?.f ? <FamilyView key={sel.f.id} f={sel.f} d={d} p={pending} set={setPending} pos={at + 1} total={shown.length} prev={() => go(-1)} next={() => go(1)}
-            wideBtn={<WideBtn wide={wide} toggle={() => setWide(!wide)} />} targets={targets} commit={commit} toast={toast} />
+            wideBtn={lockBtn} targets={targets} commit={commit} toast={toast} />
           : sel?.c ? <CaseView key={`${sel.c.id}-${sel.c.done}-${JSON.stringify(sel.c.answer)}-${sel.c.merge?.status}-${sel.c.muso.length}`} c={sel.c} source={d.source} done={isDone(sel.c)} picks={d.picks} savedCount={saved.length} showSaved={showSaved}
-            titles={d.titles ?? {}} targets={targets} mapped={(all, t) => { toast(`${all ? 'Every version' : 'The version'} now belongs to “${t.title}” (LNV row ${t.row})`, 'good'); if (all && sel.c) next(sel.c) }}
+            titles={d.titles ?? {}} targets={targets} mapTargets={mapTargets} mapped={(all, t) => { toast(`${all ? 'Every version' : 'The version'} now belongs to “${t.title}” (LNV row ${t.row})`, 'good'); if (all && sel.c) next(sel.c) }}
+            linked={(t) => toast(`“${sel.c!.title}” is now the same song as LNV row ${t.row} “${t.title}” – it is under Songs`, 'good')}
             pos={at + 1} total={shown.length} prev={() => go(-1)} next={() => go(1)} possible={matchOf(sel.c) === 'possible'} answer={(draft) => answer(sel.c!, draft)} last={last} undoLast={undoLast} save={save}
-            wideBtn={<WideBtn wide={wide} toggle={() => setWide(!wide)} />} />
+            wideBtn={lockBtn} />
             : <div className="sm-detail sm-detail-none muted">Nothing to show.</div>}
       </div>}
       <ConfirmDialog open={asking} tone="primary" title={`Accept the app's answer on ${n(confirmable)} songs?`} confirmLabel="Accept all" onCancel={() => setAsking(false)}
@@ -460,13 +509,16 @@ function MergePlan({ lands, source, openVersion, openRow }: { lands: Land[]; sou
   )
 }
 
-function CaseView({ c, source, done, pos, total, prev, next, possible, answer, last, undoLast, wideBtn, save, picks, savedCount, showSaved, titles, targets, mapped }: {
+function CaseView({ c, source, done, pos, total, prev, next, possible, answer, last, undoLast, wideBtn, save, picks, savedCount, showSaved, titles, targets, mapTargets, mapped, linked }: {
   c: ReviewCase; source: string; done: boolean; pos: number; total: number; prev: () => void; next: () => void
   possible: boolean; answer: (d: Draft | null) => void; last: { c: ReviewCase; text: string } | null; undoLast: () => void; wideBtn: ReactNode
   save: (items: CleanDecisionIn[]) => Promise<boolean>; picks: Record<string, string | string[]>; savedCount: number; showSaved: () => void
   titles: Step1['titles']; targets: Target[]; mapped: (all: boolean, t: Target) => void
+  /** the exact and possible matches in Songs, and what to say once the song is linked to one */
+  mapTargets: Target[]; linked: (t: Target) => void
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(c, picks))
+  const [mapSong, setMapSong] = useState(false)   // "Map to a song in the LNV": the popup is open
   const [opened, setOpened] = useState<number | null>(null)   // the version whose details are open
   const [openedRow, setOpenedRow] = useState<number | null>(null)   // the LNV row whose details are open
   const [mapping, setMapping] = useState<CaseRecord | null>(null)   // the recording being mapped onto an exact match
@@ -487,7 +539,8 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   const apart = () => { if (merging) answer({ ...draft, in: [main.id!] }) }
   const isSame = () => { if (names) act('same') }
   const different = () => { if (names || twice) act('different') }
-  useKeys({ enter: confirm, a: confirm, s: names ? isSame : same, n: add, x: skip, d: different, r: apart, u: () => { if (done) answer(null); else undoLast() }, arrowdown: next, j: next, arrowup: prev, k: prev })
+  const mapToSong = () => { if (!names && !twice) setMapSong(true) }
+  useKeys({ enter: confirm, a: confirm, s: names ? isSame : same, n: add, x: skip, m: mapToSong, d: different, r: apart, u: () => { if (done) answer(null); else undoLast() }, arrowdown: next, j: next, arrowup: prev, k: prev })
 
   const toggleIn = (id: number) => setDraft({ ...draft, in: draft.in.includes(id) ? draft.in.filter((x) => x !== id) : [...draft.in, id] })
   const pick = (row: number) => {
@@ -706,6 +759,8 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
 
       {mapping && <MapDialog c={c} rec={mapping} recs={c.muso.filter(isIn)} targets={targets} source={source} save={save}
         close={() => setMapping(null)} done={mapped} />}
+      {mapSong && main && <MapDialog c={c} rec={main} recs={c.muso.filter(isIn)} targets={mapTargets} source={source} save={save}
+        close={() => setMapSong(false)} done={mapped} link={(t) => { linked(t); answer({ ...draft, choice: 'same', rows: [t.row] }) }} />}
 
       {opened !== null && c.muso[opened] && <VersionDetails r={c.muso[opened]} main={main} at={opened} total={c.muso.length} source={source} go={setOpened} close={() => setOpened(null)} />}
 
@@ -730,6 +785,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
               {c.lnv.length > 0 && (!near || sameRows.length > 0) && <Act on={onSame} k="S" onClick={same} disabled={!sameRows.length}>{sameRows.length ? `Same song as row ${sameRows.join(' + ')}` : 'Tick an LNV row above'}</Act>}
               <Act on={draft.choice === 'add'} k="N" onClick={add}>{c.lnv.length && !near ? 'New song – add to LNV' : 'Add to the LNV'}</Act>
               <Act on={draft.choice === 'not_ours'} k="X" onClick={skip}>Not the client's</Act>
+              <Act k="M" onClick={mapToSong}>Map to a song in the LNV…</Act>
               {merging && <button type="button" className="rv-text-btn" onClick={apart}>Keep separate<Kbd>R</Kbd></button>}
             </>
           )}
@@ -767,8 +823,10 @@ function LnvOnly({ d }: { d: Step1 }) {
 /** Everything saved, newest first, and what each answer puts into the LNV sheet – grouped by what it does. Saved
  *  means answered: by the reviewer, or the app's own answer that goes into the LNV as it is. Each line opens its song,
  *  and the reviewer's own answers can be taken back here. */
-function SavedView({ saved, d, open, undo }: {
+function SavedView({ saved, d, open, undo, flush }: {
   saved: { c: ReviewCase; draft: Draft; at: number; you: boolean }[]; d: Step1; open: (c: ReviewCase) => void; undo: (c: ReviewCase) => void
+  /** save what still waits in the queue – before the download, so the file has every answer */
+  flush: () => Promise<boolean>
 }) {
   const { clientId } = useClient()
   const [limit, setLimit] = useState(200)
@@ -795,9 +853,9 @@ function SavedView({ saved, d, open, undo }: {
           <span><b>{n(k.adding)}</b>new songs added</span>
           <span><b>{n(k.versions_new)}</b>new rows for other recordings</span>
           <span><b>{n(k.fills)}</b>blanks filled from {d.source}</span>
-          <span><b>{n(k.picks ?? 0)}</b>values changed to {d.source}'s</span>
+          <span><b>{n(k.picks ?? 0)}</b>values changed – {d.source}'s or typed</span>
           <span className="grow" />
-          <a className="btn primary" href={api.lnvUpdateUrl(clientId)} title="The client's LNV with every saved answer applied, rows A–Z with each song's rows together under its main version (its row and title in two columns at the end) – takes a few seconds">Download the LNV with these changes</a>
+          <Stage1Download clientId={clientId} before={flush} primary label="Download the LNV with these changes" />
         </div>
         <div className="rv-saved-tools">
           <div className="rv-tabs">
@@ -805,10 +863,8 @@ function SavedView({ saved, d, open, undo }: {
               <button key={id} type="button" className={who === id ? 'on' : ''} onClick={() => setWho(id)}>{label}<span>{n(x)}</span></button>
             ))}
           </div>
-          <select className="rv-kind" value={what} onChange={(e) => setWhat(e.target.value)} aria-label="What the answer does">
-            <option value="all">Every answer</option>
-            {groups.map(([id, title, items]) => <option key={id} value={id}>{title} ({n(items.length)})</option>)}
-          </select>
+          <Dropdown className="rv-dd boxed" label="What the answer does" value={what} onChange={setWhat} menuWidth={280}
+            options={[{ value: 'all', label: 'Every answer', hint: `${n(mine.length)} saved` }, ...groups.map(([id, title, items]) => ({ value: id as string, label: title, hint: `${n(items.length)} saved` }))]} />
           <label className="cs-search sm-search"><Search size={15} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search a saved song…" /></label>
         </div>
       </div>

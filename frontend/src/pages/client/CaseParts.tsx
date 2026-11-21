@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Link2, Maximize2, Minimize2, Search, Undo2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Link2, Search, Undo2, X } from 'lucide-react'
 import { Drawer } from '../../components/ui'
 import { api } from '../../lib/api'
 import type { CleanDecisionIn } from '../../lib/api'
@@ -60,6 +60,28 @@ export const Legend = ({ source }: { source: string }) => (
   </div>
 )
 
+/** A link's name, by its site: Spotify, YouTube, Apple Music … else the site's own name. */
+export function linkName(url: string) {
+  try {
+    const h = new URL(url).hostname.replace(/^www\./, '')
+    const known: [RegExp, string][] = [[/spotify/, 'Spotify'], [/youtu/, 'YouTube'], [/apple/, 'Apple Music'], [/saavn/, 'JioSaavn'],
+      [/gaana/, 'Gaana'], [/wynk/, 'Wynk'], [/amazon/, 'Amazon Music'], [/deezer/, 'Deezer'], [/soundcloud/, 'SoundCloud']]
+    return known.find(([re]) => re.test(h))?.[1] ?? h
+  } catch { return 'Link' }
+}
+/** Each link once, as a button that opens it in a new tab; from: who holds it ("LNV", "Muso"). */
+export function Links({ urls, from }: { urls: (string | undefined | null)[]; from?: string }) {
+  const shown = [...new Set(urls.map((u) => (u ?? '').trim()).filter((u) => /^https?:\/\//i.test(u)))]
+  if (!shown.length) return null
+  return (
+    <span className="lk">
+      {from && <small className="lk-from">{from}</small>}
+      {shown.map((u) => <a key={u} className="lk-a" href={u} target="_blank" rel="noreferrer" title={u} onClick={(e) => e.stopPropagation()}>{linkName(u)}<ExternalLink size={12} /></a>)}
+    </span>
+  )
+}
+export const hasLink = (rs: (CaseRecord | undefined | null)[]) => rs.some((r) => /^https?:\/\//i.test(r?.link ?? ''))
+
 /** A record's fields; where they differ from the main version's they are marked, the main's value written under. */
 export function Fields({ r, main, fields = CARD_FIELDS }: { r: CaseRecord; main?: CaseRecord | null; fields?: string[] }) {
   const other = !!main && main !== r
@@ -81,6 +103,7 @@ export function Fields({ r, main, fields = CARD_FIELDS }: { r: CaseRecord; main?
           </Fragment>
         )
       })}
+      {hasLink([r]) && <><dt>Link</dt><dd><Links urls={[r.link]} /></dd></>}
     </dl>
   )
 }
@@ -320,7 +343,11 @@ export function TitleSection({ lines, titles, source, save, map, closed }: {
 /* ---------- map onto an exact match ---------- */
 
 /** A song the app matched exactly: what a recording can be mapped onto. */
-export type Target = { c: ReviewCase; row: number; to: number; title: string; film: string; writers: string; isrcs: string[] }
+export type Target = {
+  c: ReviewCase; row: number; to: number; title: string; film: string; writers: string; isrcs: string[]
+  /** how the Songs list matched it, and the song name it sits under there */
+  match?: 'exact' | 'possible'; family?: string
+}
 
 export function targetsOf(cases: ReviewCase[], exact: (c: ReviewCase) => boolean): Target[] {
   return cases.filter((c) => exact(c) && c.muso[0]?.id != null && !c.muso[0].moved).flatMap((c) => {
@@ -328,16 +355,18 @@ export function targetsOf(cases: ReviewCase[], exact: (c: ReviewCase) => boolean
     if (!row) return []
     const lnv = c.lnv.find((r) => r.row === row)
     return [{ c, row, to: c.muso[0].id!, title: value(lnv?.fields.Title) || c.title, film: value(lnv?.fields['Film / album'] ?? c.muso[0].fields['Film / album']),
-      writers: writersOf(lnv ?? c.muso[0]).join(', '), isrcs: [...list(lnv?.fields.ISRC), ...list(c.muso[0].fields.ISRC)] }]
+      writers: writersOf(lnv ?? c.muso[0]).join(', '), isrcs: [...list(lnv?.fields.ISRC), ...list(c.muso[0].fields.ISRC)], match: 'exact' as const }]
   })
 }
 
 /** The popup that maps a recording – or every recording of its song – onto a song the app matched exactly: search,
  *  pick the song, then say whether only this version or all of them join it. They become that song's versions, each
  *  with a row of its own naming its LNV row (or linked to the version row the LNV has), and fill what it lacks. */
-export function MapDialog({ c, rec, recs, targets, source, close, save, done }: {
+export function MapDialog({ c, rec, recs, targets, source, close, save, done, link }: {
   c: ReviewCase; rec: CaseRecord; recs: CaseRecord[]; targets: Target[]; source: string; close: () => void
   save: (items: CleanDecisionIn[]) => Promise<boolean>; done: (all: boolean, t: Target) => void
+  /** a "Not in the LNV" song: it can also be that song itself – linked to the LNV row, no row of its own */
+  link?: (t: Target) => void
 }) {
   const base = c.title.replace(/\s*[-–(\[].*$/, '').trim()
   const [q, setQ] = useState(base)
@@ -348,7 +377,7 @@ export function MapDialog({ c, rec, recs, targets, source, close, save, done }: 
     const words = q.toLowerCase().split(/\s+/).map(norm).filter((w) => w.length > 2)
     return targets.filter((t) => t.c.id !== c.id)
       .map((t) => {
-        const hay = norm(`${t.title} ${t.c.title} ${t.film} ${t.writers} ${t.isrcs.join(' ')} ${t.row}`)
+        const hay = norm(`${t.title} ${t.c.title} ${t.family ?? ''} ${t.film} ${t.writers} ${t.isrcs.join(' ')} ${t.row}`)
         const score = !s ? 1 : hay.includes(s) ? 3 + (norm(t.title).startsWith(s) ? 2 : 0) : words.filter((w) => hay.includes(w)).length / Math.max(1, words.length)
         return { t, score }
       })
@@ -365,23 +394,30 @@ export function MapDialog({ c, rec, recs, targets, source, close, save, done }: 
     if (ok) { done(all, picked); close() }
   }
   return (
-    <Drawer open onClose={close} title={<>Map to an exact match</>}
-      subtitle={<span className="muted">“{value(rec.fields.Title)}” – pick the song the app matched exactly that this recording belongs to.</span>}>
+    <Drawer open onClose={close} title={link ? <>Map to a song in the LNV</> : <>Map to an exact match</>}
+      subtitle={<span className="muted">“{value(rec.fields.Title)}” – {link
+        ? `pick the exact or possible match in Songs that it is: search its title, film, writer, ISRC or LNV row.`
+        : 'pick the song the app matched exactly that this recording belongs to.'}</span>}>
       {!picked ? (
         <div className="mp">
           <label className="cs-search mp-search"><Search size={17} /><input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search a title, film, writer, ISRC or LNV row…" /></label>
-          <p className="muted mp-count">{n(found.length)} exact match{found.length === 1 ? '' : 'es'}{q ? ` for “${q}”` : ''}{found.length === 80 ? ' (first 80 – type more to narrow)' : ''}</p>
+          <p className="muted mp-count">{n(found.length)} {link ? 'song' : 'exact match'}{found.length === 1 ? '' : link ? 's' : 'es'}{q ? ` for “${q}”` : ''}{found.length === 80 ? ' (first 80 – type more to narrow)' : ''}</p>
           <div className="mp-list">
-            {!found.length && <p className="cv-none">No song the app matched exactly fits. Try fewer words, the film, a writer or an ISRC.</p>}
-            {found.map((t) => (
-              <button key={t.c.id} type="button" className="mp-item" onClick={() => setPicked(t)}>
-                <span className="cv-badge lnv">LNV row {t.row}</span>
-                <span className="grow mp-text"><b>{t.title}</b>
-                  <small className="muted">{[norm(t.c.title) !== norm(t.title) && `${source}: ${t.c.title}`, t.film, t.writers].filter(Boolean).join(' · ')}</small></span>
-                <span className="muted mp-vers">{t.c.muso.length} {source} version{t.c.muso.length === 1 ? '' : 's'}</span>
-                <ChevronRight size={16} />
-              </button>
-            ))}
+            {!found.length && <p className="cv-none">No {link ? 'exact or possible match' : 'song the app matched exactly'} fits. Try fewer words, the film, a writer or an ISRC.</p>}
+            {found.map((t) => {
+              const isrc = t.isrcs.find((x) => norm(q).length >= 4 && norm(x).includes(norm(q))) ?? t.isrcs[0]
+              return (
+                <button key={`${t.c.id}:${t.row}`} type="button" className="mp-item" onClick={() => setPicked(t)}>
+                  <span className="cv-badge lnv">LNV row {t.row}</span>
+                  {link && t.match && <span className={`mp-match ${t.match}`}>{t.match === 'exact' ? 'Exact' : 'Possible'}</span>}
+                  <span className="grow mp-text"><b>{t.title}</b>
+                    <small className="muted">{[norm(t.c.title) !== norm(t.title) && `${source}: ${t.c.title}`, t.film, t.writers].filter(Boolean).join(' · ')}</small>
+                    {isrc && <small className="mp-isrc mono">ISRC {isrc}{t.isrcs.length > 1 ? ` +${t.isrcs.length - 1}` : ''}</small>}</span>
+                  <span className="muted mp-vers">{t.c.muso.length} {source} version{t.c.muso.length === 1 ? '' : 's'}</span>
+                  <ChevronRight size={16} />
+                </button>
+              )
+            })}
           </div>
         </div>
       ) : (
@@ -389,21 +425,35 @@ export function MapDialog({ c, rec, recs, targets, source, close, save, done }: 
           <button type="button" className="rv-text-btn" onClick={() => setPicked(null)}>← Back to the search</button>
           <div className="mp-target">
             <span className="cv-badge lnv">LNV row {picked.row}</span>
+            {link && picked.match && <span className={`mp-match ${picked.match}`}>{picked.match === 'exact' ? 'Exact match' : 'Possible match'}</span>}
             <b>{picked.title}</b>
-            <small className="muted">{[picked.film, picked.writers].filter(Boolean).join(' · ')}</small>
+            <small className="muted">{[picked.film, picked.writers, picked.isrcs[0] && `ISRC ${picked.isrcs.join(', ')}`].filter(Boolean).join(' · ')}</small>
           </div>
-          <h3>Add which recordings to “{picked.title}”?</h3>
+          {link && <>
+            <h3>Is “{value(rec.fields.Title)}” this song?</h3>
+            <div className="mp-choices one">
+              <button type="button" className="mp-choice main" disabled={busy} onClick={() => { link(picked); close() }}>
+                <b>Yes – the same song as LNV row {picked.row}</b>
+                <span>“{c.title}” is linked to it: no row of its own</span>
+                <small className="muted">It moves to Songs, under that row; what the LNV row leaves blank is filled from {source}. Undo is on the song.</small>
+              </button>
+            </div>
+            <h3 className="mp-or">Or a version of it – which recordings join “{picked.title}”?</h3>
+          </>}
+          {!link && <h3>Add which recordings to “{picked.title}”?</h3>}
           <div className="mp-choices">
             <button type="button" className="mp-choice" disabled={busy} onClick={() => go(false)}>
               <b>Only this version</b>
               <span>“{value(rec.fields.Title)}”{rec.version ? ` · ${rec.version}` : ''}</span>
               <small className="muted">The rest of “{c.title}” stays where it is.</small>
             </button>
-            <button type="button" className="mp-choice" disabled={busy || recs.length < 2} onClick={() => go(true)}>
-              <b>All {recs.length} versions of this song</b>
-              <span>“{c.title}” and its versions</span>
-              <small className="muted">The whole song becomes part of “{picked.title}”.</small>
-            </button>
+            {recs.length > 1 && (
+              <button type="button" className="mp-choice" disabled={busy} onClick={() => go(true)}>
+                <b>All {recs.length} versions of this song</b>
+                <span>“{c.title}” and its versions</span>
+                <small className="muted">The whole song becomes part of “{picked.title}”.</small>
+              </button>
+            )}
           </div>
           <p className="muted mp-what">They become versions of LNV row {picked.row}: each gets a row of its own naming it as the original (or joins the version row the LNV already has), and fills what that song’s rows leave blank. Undo is on the song they join.</p>
           {busy && <div className="loading"><span className="spinner" />Saving…</div>}
@@ -550,13 +600,6 @@ export function useStored(key: string, initial: boolean): [boolean, (v: boolean)
   const [v, setV] = useState(() => { try { const x = localStorage.getItem(key); return x == null ? initial : x === '1' } catch { return initial } })
   return [v, (x: boolean) => { setV(x); try { localStorage.setItem(key, x ? '1' : '0') } catch { /* private mode */ } }]
 }
-
-/** Show the case across the whole width (the list hidden), or the list and the case side by side. */
-export const WideBtn = ({ wide, toggle }: { wide: boolean; toggle: () => void }) => (
-  <button type="button" className="sm-nav wide-btn" onClick={toggle} title={wide ? 'Show the list (W)' : 'Expand – hide the list (W)'}>
-    {wide ? <Minimize2 size={14} /> : <Maximize2 size={14} />}<span>{wide ? 'Show list' : 'Expand'}</span>
-  </button>
-)
 
 /** The sheet's columns under plain headings; a column no heading claims goes under "More". */
 export const GROUPS: [string, RegExp][] = [

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
+import { useToast } from '../lib/toast'
 import {
   AlertTriangle, ArrowDown, ArrowUp, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDashed, CircleHelp,
-  Download as DownloadIcon, FileSpreadsheet, Info, Lightbulb, Search, Trash2, UploadCloud, X, XCircle,
+  Download as DownloadIcon, FileSpreadsheet, Info, Lightbulb, Lock, LockOpen, Search, Trash2, UploadCloud, X, XCircle,
 } from 'lucide-react'
 
 /* ---------- layout ---------- */
@@ -111,6 +112,147 @@ export function Button({ children, variant = 'default', size, icon, ...rest }: R
 
 export function DownloadLink({ href, children, primary }: { href: string; children: ReactNode; primary?: boolean }) {
   return <a className={`btn ${primary ? 'primary' : 'default'}`} href={href}><DownloadIcon size={15} />{children}</a>
+}
+
+/** A download that says it is working and never leaves the page: the file is fetched (the big lists take up to half
+ *  a minute), then saved; an error shows as a message instead of a page of raw text. `before` runs first – e.g. the
+ *  step 2 queue is saved, so the file holds the latest answers. */
+export function FileButton({ url, className = '', size = 15, title, before, children }: {
+  url: string; className?: string; size?: number; title?: string; before?: () => Promise<boolean>; children: ReactNode
+}) {
+  const toast = useToast()
+  const [busy, setBusy] = useState(false)
+  const get = async () => {
+    setBusy(true)
+    try {
+      if (before && !(await before())) throw new Error('Your latest changes could not be saved – try again.')
+      const res = await fetch(url, { credentials: 'same-origin' })
+      if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? 'The file could not be prepared.')
+      const name = /filename="?([^";]+)"?/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? 'download.xlsx'
+      const href = URL.createObjectURL(await res.blob())
+      // in the page while it is clicked, and the file kept a moment: Firefox and Safari drop a download whose link
+      // is not in the page or whose file is freed at once
+      const link = Object.assign(document.createElement('a'), { href, download: name, style: 'display:none' })
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(href), 60_000)
+      toast(`${name} downloaded`, 'good')
+    } catch (e) { toast((e as Error).message, 'bad') } finally { setBusy(false) }
+  }
+  return <button type="button" className={`btn ${className}`} disabled={busy} onClick={get} title={title}>
+    {busy ? <><span className={`spinner ${className.includes('primary') ? 'small' : 'small-dark'}`} />Preparing…</> : <><DownloadIcon size={size} />{children}</>}</button>
+}
+
+/* ---------- dropdown ---------- */
+
+export type DropOption<T extends string = string> = { value: T; label: ReactNode; hint?: ReactNode; disabled?: boolean; sep?: boolean }
+
+/** The app's dropdown: a button showing the choice, and a list under it (above it near the bottom of the screen) –
+ *  each option with a line of detail. Keys: ↑ ↓ Home End to move, Enter or Space to choose, Esc to close; they never
+ *  reach the page's own shortcuts. The list is in <body>, so a table that scrolls never cuts it off. */
+export function Dropdown<T extends string>({ value, options, onChange, label, shown, className = '', tone, title, menuWidth }: {
+  value: T; options: DropOption<T>[]; onChange: (v: T) => void; label: string
+  /** what the closed button shows, when not the chosen option's label */
+  shown?: ReactNode; className?: string; tone?: string; title?: string; menuWidth?: number
+}) {
+  const [open, setOpen] = useState(false)
+  const [at, setAt] = useState(0)
+  const [pos, setPos] = useState<{ left: number; top?: number; bottom?: number; width: number; max: number } | null>(null)
+  const btn = useRef<HTMLButtonElement>(null)
+  const menu = useRef<HTMLDivElement>(null)
+  const id = `dd-${useId().replace(/[^a-zA-Z0-9]/g, '')}`
+  const current = options.find((o) => o.value === value)
+  const usable = options.map((o, i) => (o.disabled ? -1 : i)).filter((i) => i >= 0)
+
+  const place = () => {
+    const b = btn.current?.getBoundingClientRect()
+    if (!b) return
+    const width = Math.max(b.width, menuWidth ?? 0)
+    const left = Math.max(8, Math.min(b.left, window.innerWidth - width - 8))
+    const below = window.innerHeight - b.bottom - 12, above = b.top - 12
+    setPos(below >= 220 || below >= above ? { left, top: b.bottom + 4, width, max: Math.min(360, below) }
+      : { left, bottom: window.innerHeight - b.top + 4, width, max: Math.min(360, above) })
+  }
+  const show = () => { place(); setAt(Math.max(0, options.findIndex((o) => o.value === value))); setOpen(true) }
+  const close = (focus = true) => { setOpen(false); if (focus) btn.current?.focus({ preventScroll: true }) }
+  // the chosen option again still counts: "Customise…" on a typed value opens it for editing
+  const choose = (i: number) => { const o = options[i]; if (!o || o.disabled) return; close(); onChange(o.value) }
+
+  useEffect(() => {
+    if (!open) return
+    const away = (e: Event) => { const t = e.target as Node; if (!menu.current?.contains(t) && !btn.current?.contains(t)) close(false) }
+    // the page scrolled (a scroll still settling, the table moved across): the list follows its button, and closes
+    // only once the button is off the screen
+    const moved = (e: Event) => {
+      if (menu.current?.contains(e.target as Node)) return
+      const b = btn.current?.getBoundingClientRect()
+      if (!b || b.bottom < 0 || b.top > window.innerHeight || b.right < 0 || b.left > window.innerWidth) close(false)
+      else place()
+    }
+    window.addEventListener('pointerdown', away, true)
+    window.addEventListener('scroll', moved, true)
+    window.addEventListener('resize', place)
+    return () => { window.removeEventListener('pointerdown', away, true); window.removeEventListener('scroll', moved, true); window.removeEventListener('resize', place) }
+  }, [open])   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) menu.current?.querySelector(`#${id}-${at}`)?.scrollIntoView({ block: 'nearest' }) }, [open, at, id])
+
+  const step = (dir: number) => {
+    const k = usable.indexOf(at)
+    const next = usable[k < 0 ? 0 : Math.max(0, Math.min(usable.length - 1, k + dir))]
+    if (next != null) setAt(next)
+  }
+  const onKey = (e: React.KeyboardEvent) => {
+    const keys: Record<string, () => void> = open ? {
+      ArrowDown: () => step(1), ArrowUp: () => step(-1), Home: () => setAt(usable[0] ?? 0), End: () => setAt(usable[usable.length - 1] ?? 0),
+      Enter: () => choose(at), ' ': () => choose(at), Escape: () => close(), Tab: () => close(false),
+    } : { ArrowDown: show, ArrowUp: show, Enter: show, ' ': show }
+    const fn = keys[e.key]
+    if (!fn) return
+    if (e.key !== 'Tab') e.preventDefault()
+    e.stopPropagation()   // the page's shortcuts (↑ ↓ for the next song, Enter to accept) stay out of it
+    fn()
+  }
+
+  return (
+    <>
+      <button ref={btn} type="button" className={`dd ${tone ?? ''} ${open ? 'open' : ''} ${className}`} aria-label={label} title={title ?? label}
+        aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? id : undefined} aria-activedescendant={open ? `${id}-${at}` : undefined}
+        onClick={() => (open ? close() : show())} onKeyDown={onKey}>
+        <span className="dd-text">{shown ?? current?.label ?? label}</span>
+        <ChevronDown size={15} className="dd-chev" aria-hidden />
+      </button>
+      {open && pos && createPortal(
+        <div ref={menu} id={id} role="listbox" aria-label={label} className="dd-menu"
+          style={{ left: pos.left, top: pos.top, bottom: pos.bottom, minWidth: pos.width, maxHeight: pos.max }}>
+          {options.map((o, i) => (
+            <Fragment key={o.value}>
+              {o.sep && i > 0 && <div className="dd-sep" role="separator" />}
+              <div id={`${id}-${i}`} role="option" aria-selected={o.value === value} aria-disabled={o.disabled || undefined}
+                className={`dd-opt ${i === at ? 'at' : ''} ${o.value === value ? 'on' : ''} ${o.disabled ? 'off' : ''}`}
+                onPointerEnter={() => !o.disabled && setAt(i)} onClick={() => choose(i)}>
+                <span className="dd-check">{o.value === value && <Check size={14} strokeWidth={2.5} />}</span>
+                <span className="dd-opt-text"><span className="dd-opt-label">{o.label}</span>{o.hint && <small>{o.hint}</small>}</span>
+              </div>
+            </Fragment>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </>
+  )
+}
+
+/** Lock a panel open (the sidebar, the song list), or let it close by itself. */
+export function LockToggle({ locked, toggle, what, label, className = '' }: {
+  locked: boolean; toggle: () => void; what: string; label?: ReactNode; className?: string
+}) {
+  const tip = locked ? `Unlock – the ${what} closes by itself` : `Lock the ${what} open`
+  return (
+    <button type="button" className={`lock-btn ${locked ? 'on' : ''} ${className}`} onClick={toggle} title={tip} aria-label={tip} aria-pressed={locked}>
+      {locked ? <Lock size={15} /> : <LockOpen size={15} />}{label}
+    </button>
+  )
 }
 
 export function Kbd({ children }: { children: ReactNode }) {
