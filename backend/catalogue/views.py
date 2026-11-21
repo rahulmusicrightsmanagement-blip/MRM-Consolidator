@@ -9,6 +9,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.core.cache import cache
+from django.core.files.base import ContentFile
 from django.db import connection, transaction
 from django.db.models import Count, Prefetch, Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
@@ -81,7 +82,14 @@ def _client_json(client):
     if not client:
         return None
     return {"id": client.id, "name": client.name, "ipi": client.ipi, "owner": client.owner, "due_date": _iso(client.due_date),
-            "home_society": client.home_society}
+            "home_society": client.home_society, "stage1": _stage1_json(client)}
+
+
+def _stage1_json(client):
+    """Muso vs LNV marked completed: when and by whom (None while it is open)."""
+    if not client.stage1_done_at:
+        return None
+    return {"done_at": client.stage1_done_at.isoformat(), "by": client.stage1_done_by}
 
 
 def _run_json(run):
@@ -163,7 +171,7 @@ def _inputs(run):
     """The files one society check uses: its own society file, the client's master, and – for a foreign society –
     the client's latest IPRS report, so it is compared with the catalogue as IPRS has completed it."""
     own = run.active_files()
-    master = run.client.active_master() if run.client else None
+    master = run.client.compare_master() if run.client else None   # the stage 2 LNV, once there is one
     inputs = {"master": master or own["master"], "iprs": None, "prs": None}
     if run.society == "IPRS":
         inputs["iprs"] = own["iprs"]
@@ -255,7 +263,8 @@ def _master_edits(client):
 def _master_json(master):
     if not master:
         return None
-    return {"id": master.id, "name": master.original_name, "uploaded_at": master.uploaded_at.isoformat(), "stats": master.stats}
+    return {"id": master.id, "name": master.original_name, "uploaded_at": master.uploaded_at.isoformat(), "stats": master.stats,
+            "stage": master.stage, "origin": master.origin, "by": master.uploaded_by}
 
 
 def _runs(client):
@@ -283,20 +292,27 @@ def _dsp(client):
     return client._dsp
 
 
+def _master2(client):
+    if not hasattr(client, "_master2"):
+        _load([client])
+    return client._master2
+
+
 def _load(clients):
     """Reports (with files), societies, newest master and DSP sheet of many clients in four queries, not four per
     client."""
     by_id = {c.id: c for c in clients}
     for c in clients:
-        c._runs, c._societies, c._master, c._dsp = [], [], None, None
+        c._runs, c._societies, c._master, c._master2, c._dsp = [], [], None, None, None
     for run in Run.objects.filter(client_id__in=by_id).order_by(*NEWEST_FIRST).prefetch_related("files"):
         run.client = by_id[run.client_id]
         run.client._runs.append(run)
     for cs in ClientSociety.objects.filter(client_id__in=by_id):
         by_id[cs.client_id]._societies.append(cs)
     for master in MasterFile.objects.filter(client_id__in=by_id).order_by("-uploaded_at"):
-        if by_id[master.client_id]._master is None:
-            by_id[master.client_id]._master = master
+        attr = "_master2" if master.stage == MasterFile.STAGE2 else "_master"
+        if getattr(by_id[master.client_id], attr) is None:
+            setattr(by_id[master.client_id], attr, master)
     for dsp in DspFile.objects.filter(client_id__in=by_id).order_by("-uploaded_at"):
         if by_id[dsp.client_id]._dsp is None:
             by_id[dsp.client_id]._dsp = dsp
@@ -326,27 +342,31 @@ def society_summaries(client, coverage, task_counts):
     return out
 
 
-JOURNEY = ["Add the files", "Muso & LNV", "LNV vs IPRS", "Final LNV"]
+JOURNEY = ["Add the files", "Muso vs LNV", "LNV vs IPRS", "Final LNV"]
 
 
 def _journey(client):
-    """Where the client is in the consolidate flow: 1 the files · 2 the DSP export and the LNV · 3 the LNV against
-    IPRS · 4 the final LNV. A step is done when nothing in it needs a person (the counts each step stores)."""
-    master, dsp = _master(client), _dsp(client)
-    run = next((r for r in _runs(client) if r.society == "IPRS" and r.active_files().get("iprs")), None)
-    files = {"lnv": bool(master), "dsp": bool(dsp), "iprs": bool(run)}
+    """Where the client is in the consolidate flow: 1 the files (the LNV and the Muso export) · 2 Muso vs LNV, until
+    it is marked completed (the stage 1 LNV) · 3 the stage 2 LNV against IPRS – the IPRS report is added there · 4 the
+    final LNV. Step 3 is done when nothing in it needs a person (the counts it stores)."""
+    master, dsp, lnv2 = _master(client), _dsp(client), _master2(client)
+    iprs = next((r for r in _runs(client) if r.society == "IPRS" and r.active_files().get("iprs")), None)
+    files = {"lnv": bool(master), "dsp": bool(dsp), "iprs": bool(iprs), "lnv2": bool(lnv2)}
     needs = {"2": ((dsp.summary or {}).get("flow") or {}).get("needs") if dsp else None,
-             "3": (run.summary or {}).get("needs") if run else None}
-    if not all(files.values()):
+             "3": (iprs.summary or {}).get("needs") if iprs else None}
+    if not (files["lnv"] and files["dsp"]):
         step = 1
-    elif needs["2"] is None or needs["2"] > 0:
+    elif not client.stage1_done_at:
         step = 2
     elif needs["3"] is None or needs["3"] > 0:
         step = 3
     else:
         step = 4
+    f = iprs.active_files()["iprs"] if iprs else None
     return {"step": step, "label": JOURNEY[step - 1], "steps": JOURNEY, "files": files, "needs": needs,
-            "source": dsp.source if dsp else "Muso"}
+            "source": dsp.source if dsp else "Muso", "stage1": _stage1_json(client), "lnv2": _master_json(lnv2),
+            "iprs": {"run": iprs.id, "name": f.original_name, "uploaded_at": f.uploaded_at.isoformat(),
+                     "works": (iprs.summary or {}).get("works")} if iprs else None}
 
 
 def latest_run(client):
@@ -543,9 +563,9 @@ def client_master(request, client_id):
     client = get_object_or_404(Client, pk=client_id)
     if request.method == "DELETE":
         with transaction.atomic():
-            masters = list(client.masters.all())
+            masters = list(client.masters.filter(stage=MasterFile.STAGE1))
             _delete_files_after_commit([m.file for m in masters])
-            client.masters.all().delete()
+            client.masters.filter(stage=MasterFile.STAGE1).delete()
         return client_detail(_as_get(request), client_id)
     uploaded = request.FILES.get("file")
     if not uploaded:
@@ -564,17 +584,106 @@ def client_master(request, client_id):
     uploaded.seek(0)
     stats = {**parsed["stats"], "issues": len(parsed["issues"]),
              "issue_counts": dict(Counter(i["code"] for i in parsed["issues"]))}
-    master = MasterFile(client=client, original_name=uploaded.name, stats=stats)
+    master = MasterFile(client=client, original_name=uploaded.name, stats=stats, uploaded_by=_who(request))
     try:
         master.file.save(uploaded.name, uploaded, save=False)   # store the file (Google Drive) before the database row
     except DriveError as e:
         return JsonResponse({"error": f"The file could not be saved: {e}"}, status=502)
     master.save()
-    # Only once the new master is safely stored: choices that point at rows of the old master go.
-    client.master_edits.all().delete()
-    client.song_flags.filter(key__startswith="M").delete()
+    # Only once the new master is safely stored: choices that point at rows of the old master go – step 3's too while
+    # IPRS is checked against this LNV (no stage 2 LNV yet). A new LNV is a new Muso vs LNV: it is open again.
+    if not client.stage2_master():
+        client.master_edits.all().delete()
+        client.song_flags.filter(key__startswith="M").delete()
     _drop_row_decisions(client)
+    if client.stage1_done_at:
+        client.stage1_done_at, client.stage1_done_by = None, ""
+        client.save(update_fields=["stage1_done_at", "stage1_done_by"])
     return client_detail(_as_get(request), client_id)
+
+
+def _who(request):
+    user = getattr(request, "user", None)
+    return ((user.first_name or user.email) if user and user.is_authenticated else "")[:254]
+
+
+def _parse_problem(path):
+    """Why a file is no LNV (None if it is one): the LNV's own check, or – a common mistake – it is the IPRS or PRS
+    file."""
+    parsed, error = _try_parse(path, SourceFile.MASTER)
+    if not error:
+        return parsed, None
+    for other in (SourceFile.IPRS, SourceFile.PRS):
+        if _try_parse(path, other)[0] is not None:
+            error = {"error": f"This is the {other.upper()} file, not an LNV."}
+    return None, error
+
+
+def _save_stage2(client, data, name, origin, by):
+    """Keep a stage 2 LNV (the file's bytes) once it reads as an LNV; returns the error response, else None. The step 3
+    choices made on the rows of the LNV it replaces go (its rows are other ones)."""
+    with tempfile.NamedTemporaryFile(suffix=Path(name).suffix or ".xlsx") as tmp:
+        tmp.write(data)
+        tmp.flush()
+        parsed, error = _parse_problem(tmp.name)
+    if error:
+        return JsonResponse(error, status=422)
+    stats = {**parsed["stats"], "issues": len(parsed["issues"]), "issue_counts": dict(Counter(i["code"] for i in parsed["issues"]))}
+    lnv2 = MasterFile(client=client, original_name=name[:255], stats=stats, stage=MasterFile.STAGE2, origin=origin, uploaded_by=by)
+    try:
+        lnv2.file.save(name, ContentFile(data), save=False)
+    except DriveError as e:
+        return JsonResponse({"error": f"The file could not be saved: {e}"}, status=502)
+    with transaction.atomic():
+        lnv2.save()
+        client.master_edits.all().delete()
+        client.song_flags.filter(key__startswith="M").delete()
+    return None
+
+
+@require_http_methods(["POST"])
+def client_stage1(request, client_id):
+    """{"done": true}: Muso vs LNV (step 2) is completed – its result, the stage 1 LNV (the LNV with step 2's answers,
+    songs A–Z), is kept as the client's stage 2 LNV, the one IPRS is checked against. Completing again makes a new one
+    from the answers as they are then. {"done": false} opens step 2 again; the stage 2 LNV stays."""
+    client = get_object_or_404(Client, pk=client_id)
+    if _body(request).get("done"):
+        try:
+            content = _stage1_lnv(client)
+        except (FileNotFoundError, DriveError) as e:
+            return JsonResponse({"error": f"The LNV could not be opened: {e}"}, status=502)
+        if content is None:
+            return JsonResponse({"error": "Upload the LNV first"}, status=409)
+        error = _save_stage2(client, content, f"{client.name.replace(' ', '_')}_LNV_stage1_{date.today()}.xlsx",
+                             MasterFile.FROM_STAGE1, _who(request))
+        if error:
+            return error
+        client.stage1_done_at, client.stage1_done_by = timezone.now(), _who(request)
+    else:
+        client.stage1_done_at, client.stage1_done_by = None, ""
+    client.save(update_fields=["stage1_done_at", "stage1_done_by"])
+    return client_detail(_as_get(request), client_id)
+
+
+@require_http_methods(["GET", "POST"])
+def client_stage2(request, client_id):
+    """The stage 2 LNV. GET: the file as kept. POST (file): a corrected stage 2 LNV, uploaded in place of the one step 2
+    made – IPRS is checked against it from now on."""
+    client = get_object_or_404(Client, pk=client_id)
+    if request.method == "GET":
+        lnv2 = client.stage2_master()
+        if not lnv2:
+            return JsonResponse({"error": "There is no stage 2 LNV yet: complete Muso vs LNV (step 2), or upload one"}, status=404)
+        try:
+            with open(lnv2.file.path, "rb") as fh:
+                return _xlsx(fh.read(), Path(lnv2.original_name).stem)
+        except (FileNotFoundError, DriveError) as e:
+            return JsonResponse({"error": f"The stage 2 LNV could not be opened: {e}"}, status=502)
+    uploaded = request.FILES.get("file")
+    if not uploaded:
+        return JsonResponse({"error": "No file was sent"}, status=400)
+    error = _save_stage2(client, uploaded.read(), uploaded.name, MasterFile.UPLOAD, _who(request))
+    return error or client_detail(_as_get(request), client_id)
 
 
 # ---------------------------------------------------------------- data clean (step 1: today's LNV against one DSP sheet)
@@ -584,7 +693,7 @@ ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:")
 CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}, "name": {"same", "different"},
                  "junk": {"fix", "ok"}, "missing": {"add", "not_ours"}, "fill": {"accept", "reject"}, "link": {"same", "none"},
                  "merge": {"accepted", "rejected", "pending"}, "type": {"set"}, "version": {"same", "none"},
-                 "writer": {"ignore", "keep"}, "pub": {"same", "different"}, "pick": {"muso"},
+                 "writer": {"ignore", "keep"}, "pub": {"same", "different"}, "pick": {"muso", "custom"},
                  # a recording mapped onto an exactly matched song · the title that goes into the LNV for a recording
                  "map": {"join"}, "title": set(dataclean.TITLE_MODES)}
 # Answers about people and companies, not about one client's songs: kept once, for every client
@@ -787,21 +896,27 @@ def client_steps(request, client_id):
         f = run.active_file("iprs")
         files["iprs"] = {"name": f.original_name, "uploaded_at": f.uploaded_at.isoformat(), "run": run.id,
                          "report_date": run.report_date.isoformat() if run.report_date else None, "works": None}
+    lnv2 = client.stage2_master()
+    files["lnv2"] = _master_json(lnv2)
+    stage1 = _stage1_json(client)
+    if stage1:   # answers changed after it was completed: the stage 2 LNV does not have them
+        stage1["changed"] = client.clean_decisions.filter(updated_at__gt=client.stage1_done_at).exists()
     out = {"files": files, "run": run.id if run else None, "source": dsp.source if dsp else "Muso",
-           "counts": {"1": None, "3": None}, "step": None}
+           "counts": {"1": None, "3": None}, "step": None, "stage1": stage1}
     if not master:
         return JsonResponse(out)
     decisions = _clean_decisions(client)
     try:
         _, dsp, clean = _clean_result(client, decisions)
         result = compute(run) if run else None
-        parsed = result["master"] if result and result.get("master") else _cached(
-            f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
+        # step 2 reads the LNV as uploaded (stage 1); step 3 the one IPRS is checked against (stage 2, once there is one)
+        parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
+        compared = result["master"] if result and result.get("master") else parsed
         sheet, merge = _dsp_sheet(dsp) if dsp else (None, None)
     except (FileNotFoundError, DriveError) as e:
         return JsonResponse({"error": f"A spreadsheet could not be opened: {e}"}, status=502)
-    if request.GET.get("row"):
-        return JsonResponse({"records": steps.records_for_row(parsed, clean, result, int(request.GET["row"]), out["source"])})
+    if request.GET.get("row"):   # an LNV row of step 2: IPRS only where it is checked against this same LNV
+        return JsonResponse({"records": steps.records_for_row(parsed, clean, None if lnv2 else result, int(request.GET["row"]), out["source"])})
     built = {}
     if clean:
         built["1"] = review.build(sheet, merge, decisions, clean, parsed)
@@ -811,56 +926,93 @@ def client_steps(request, client_id):
             DspFile.objects.filter(pk=dsp.pk).update(summary=dsp.summary)
     if result and result.get("tunecodes"):
         aliases, _ = dataclean.learned(decisions)
-        people = dataclean.People(aliases, dataclean._client_keys(parsed["songs"], client.name), dataclean.rules_of(decisions))
-        built["3"] = steps.step3(parsed, result, _decisions(run), _not_our_work(client), people, fill_plan(run, result)["summary"])
+        people = dataclean.People(aliases, dataclean._client_keys(compared["songs"], client.name), dataclean.rules_of(decisions))
+        built["3"] = steps.step3(compared, result, _decisions(run), _not_our_work(client), people, fill_plan(run, result)["summary"])
         files["iprs"]["works"] = result["iprs"]["stats"]["works"]
     out["counts"] = {k: (built[k]["counts"] if k in built else None) for k in ("1", "3")}
     out["step"] = built.get(request.GET.get("step", ""))
     return JsonResponse(out)
 
 
-def lnv_update_export(request, client_id):
-    """The final LNV: the client's LNV with step 1's answers (the reviewer's, else the app's) and – once the IPRS
-    report is in – step 2's: IPRS codes and statuses, the IPRS-only works, the values taken from IPRS. One file."""
-    client = get_object_or_404(Client, pk=client_id)
+def _dsp_part(decisions, master, dsp, clean):
+    """What step 2 (Muso vs LNV) writes into the LNV – the reviewer's answers, else the app's – and the rows' order
+    (each song's rows together under its main version, step 2's song names). (None, {}) without a DSP export."""
+    if not clean:
+        return None, {}
+    choice = lambda item: (item.get("decision") or {}).get("choice")
+    part = {
+        "fills": [f for f in clean["fills"] if choice(f) == "accept"],
+        "adds": [m for m in clean["missing"] if choice(m) == "add"],
+        "repeats": [{"row": r["row"], "keep": d["data"]["keep"]} for c in clean["duplicates"] for d in [c.get("decision") or {}]
+                    if d.get("choice") == "duplicate" and not d.get("auto") and (d.get("data") or {}).get("keep")
+                    for r in c["rows"] if r["row"] != d["data"]["keep"]],
+        # the values the reviewer chose over the LNV's own: "pick:<row>:<field>" = muso (the DSP's) or custom (typed),
+        # data.value
+        "picks": [{"row": int(k.split(":")[1]), "field": k.split(":", 2)[2], "value": (d.get("data") or {}).get("value"),
+                   **({"why": "typed by the reviewer"} if d.get("choice") == "custom" else {})}
+                  for k, d in decisions.items() if k.startswith("pick:") and d.get("choice") in ("muso", "custom")],
+        "source": dsp.source}
+    # each version of a song the LNV lacks gets a row of its own
+    parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
+    sheet, merge = _dsp_sheet(dsp)
+    arrange = review.families(review.build(sheet, merge, decisions, clean, parsed)["cases"])
+    part["versions"] = dataclean.lnv_versions(clean, parsed["songs"])
+    # the titles the reviewer chose, where each recording lands (after the older Title picks: they win)
+    titled, part["versions"], part["adds"] = dataclean.apply_titles(clean, part["versions"], part["adds"], dataclean.titles_of(decisions))
+    part["picks"] += titled
+    return part, arrange
+
+
+def _stage1_lnv(client, order="song"):
+    """The stage 1 LNV: the client's LNV as uploaded with step 2's answers written in, the rows A–Z by song (each song's
+    rows together under its main version) or by album. None without the LNV."""
     decisions = _clean_decisions(client)
     master, dsp, clean = _clean_result(client, decisions)
     if not master:
-        return JsonResponse({"error": "Upload the LNV master first"}, status=409)
-    dsp_part = None
-    if clean:
-        choice = lambda item: (item.get("decision") or {}).get("choice")
-        dsp_part = {
-            "fills": [f for f in clean["fills"] if choice(f) == "accept"],
-            "adds": [m for m in clean["missing"] if choice(m) == "add"],
-            "repeats": [{"row": r["row"], "keep": d["data"]["keep"]} for c in clean["duplicates"] for d in [c.get("decision") or {}]
-                        if d.get("choice") == "duplicate" and not d.get("auto") and (d.get("data") or {}).get("keep")
-                        for r in c["rows"] if r["row"] != d["data"]["keep"]],
-            # the values the reviewer took from the DSP over the LNV's own: "pick:<row>:<field>" = muso, data.value
-            "picks": [{"row": int(k.split(":")[1]), "field": k.split(":", 2)[2], "value": (d.get("data") or {}).get("value")}
-                      for k, d in decisions.items() if k.startswith("pick:") and d.get("choice") == "muso"],
-            "source": dsp.source}
-    run = _iprs_run(client)
-    result = compute(run) if run else None
-    arrange = {}   # the rows A–Z, each song's together under its main version (step 2's song names)
+        return None
+    part, arrange = _dsp_part(decisions, master, dsp, clean)
+    return export.final_report(master.file.path, dsp=part, arrange=arrange, order=order)
+
+
+ORDERS = ("song", "album")
+
+
+def lnv_update_export(request, client_id):
+    """?stage=1: the stage 1 LNV – step 2's result, A–Z by song or (?order=album) by album. Else the final LNV: the
+    stage 2 LNV with step 3's answers (IPRS codes and statuses, the IPRS-only works, the values taken from IPRS) – or,
+    for a client from before stages (no stage 2 LNV), the LNV as uploaded with both steps' answers. One file."""
+    client = get_object_or_404(Client, pk=client_id)
+    order = request.GET.get("order") if request.GET.get("order") in ORDERS else "song"
+    name = client.name.replace(" ", "_")
     try:
-        if dsp_part:   # each version of a song the LNV lacks gets a row of its own
-            parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
-            sheet, merge = _dsp_sheet(dsp)
-            arrange = review.families(review.build(sheet, merge, decisions, clean, parsed)["cases"])
-            dsp_part["versions"] = dataclean.lnv_versions(clean, parsed["songs"])
-            # the titles the reviewer chose, where each recording lands (after the older Title picks: they win)
-            titled, dsp_part["versions"], dsp_part["adds"] = dataclean.apply_titles(
-                clean, dsp_part["versions"], dsp_part["adds"], dataclean.titles_of(decisions))
-            dsp_part["picks"] += titled
+        if request.GET.get("stage") == "1":
+            content = _stage1_lnv(client, order)
+            if content is None:
+                return JsonResponse({"error": "Upload the LNV master first"}, status=409)
+            return _xlsx(content, f"{name}_LNV_stage1{'_by_album' if order == 'album' else ''}_{date.today()}")
+        run = _iprs_run(client)
+        result = compute(run) if run else None
+        lnv2 = client.stage2_master()
+        if lnv2:   # step 2 is in it already; its change list stays, step 3's goes on a sheet of its own
+            if not (result and result.get("final")):
+                with open(lnv2.file.path, "rb") as fh:
+                    return _xlsx(fh.read(), f"{name}_LNV_final_{date.today()}")
+            content = export.final_report(lnv2.file.path, result["iprs"], result["final"], _master_edits(client),
+                                          fill_plan(run, result), log_name="MRM changes IPRS")
+            return _xlsx(content, f"{name}_LNV_final_{date.today()}")
+        decisions = _clean_decisions(client)
+        master, dsp, clean = _clean_result(client, decisions)
+        if not master:
+            return JsonResponse({"error": "Upload the LNV master first"}, status=409)
+        part, arrange = _dsp_part(decisions, master, dsp, clean)
         if result and result.get("final"):
             content = export.final_report(master.file.path, result["iprs"], result["final"], _master_edits(client),
-                                          fill_plan(run, result), dsp_part, arrange=arrange)
+                                          fill_plan(run, result), part, arrange=arrange, order=order)
         else:
-            content = export.final_report(master.file.path, dsp=dsp_part, arrange=arrange)
+            content = export.final_report(master.file.path, dsp=part, arrange=arrange, order=order)
     except (FileNotFoundError, DriveError) as e:
         return JsonResponse({"error": f"The LNV could not be opened: {e}"}, status=502)
-    return _xlsx(content, f"{client.name.replace(' ', '_')}_LNV_final_{date.today()}")
+    return _xlsx(content, f"{name}_LNV_final_{date.today()}")
 
 
 def merge_export(request, client_id):

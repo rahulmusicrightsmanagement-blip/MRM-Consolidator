@@ -3,7 +3,9 @@
 export type FileKind = 'iprs' | 'master' | 'prs'
 export type Status = 'Match' | 'Amend' | 'Registration'
 
-export interface ClientRef { id: number; name: string; ipi: string; owner: string; due_date: string | null; home_society: string }
+/** Muso vs LNV (step 2) marked completed: when and by whom; changed – answers given since (steps payload only). */
+export interface Stage1Done { done_at: string; by: string; changed?: boolean }
+export interface ClientRef { id: number; name: string; ipi: string; owner: string; due_date: string | null; home_society: string; stage1?: Stage1Done | null }
 
 export interface RunStats {
   stage?: number
@@ -340,7 +342,8 @@ export interface SocietySummary {
   tasks: number
   review: number
 }
-export interface MasterInfo { id: number; name: string; uploaded_at: string; stats: { songs?: number; columns?: number; societies?: string[]; with_credits?: number; issues?: number; issue_counts?: Record<string, number> } }
+/** An LNV file. stage 1: as uploaded · 2: after Muso vs LNV – origin stage1 (made from step 2's answers) or upload (a corrected one). */
+export interface MasterInfo { id: number; name: string; uploaded_at: string; stage?: 1 | 2; origin?: 'upload' | 'stage1'; by?: string; stats: { songs?: number; columns?: number; societies?: string[]; with_credits?: number; issues?: number; issue_counts?: Record<string, number> } }
 
 export interface ClientMetrics {
   master: MasterInfo | null
@@ -352,8 +355,10 @@ export interface ClientMetrics {
   tasks: { open: number; closed: number; total: number; overdue: number; verified: number; by_type: Record<string, { open: number; closed: number }> }
   stage: { index: number; label: string }
   /** Where the client is in the consolidate flow: 1 files · 2 Muso & LNV · 3 LNV vs IPRS · 4 final LNV */
-  journey: { step: number; label: string; steps: string[]; files: { lnv: boolean; dsp: boolean; iprs: boolean }
-    needs: { '2': number | null; '3': number | null }; source: string }
+  journey: { step: number; label: string; steps: string[]; files: { lnv: boolean; dsp: boolean; iprs: boolean; lnv2: boolean }
+    needs: { '2': number | null; '3': number | null }; source: string
+    stage1: Stage1Done | null; lnv2: MasterInfo | null
+    iprs: { run: number; name: string; uploaded_at: string; works: number | null } | null }
   review: number
   latest_report: RunSummary | null
 }
@@ -591,10 +596,10 @@ export interface Step3 {
 }
 export interface StepsPayload {
   files: {
-    lnv: MasterInfo | null; dsp: DspInfo | null
+    lnv: MasterInfo | null; dsp: DspInfo | null; lnv2: MasterInfo | null
     iprs: { name: string; uploaded_at: string; run: number; report_date: string | null; works: number | null } | null
   }
-  run: number | null; source: string
+  run: number | null; source: string; stage1: Stage1Done | null
   counts: { '1': Step1['counts'] | null; '3': Step3['counts'] | null }
   step: Step1 | Step3 | null
 }

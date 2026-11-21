@@ -161,11 +161,15 @@ def plainness(title, version=None):
 
 
 def _level(c):
-    """exact · possible · new – how a song stands against the LNV (the screen's matchOf)."""
+    """exact · possible · new – how a song stands against the LNV (the screen's matchOf). A song the reviewer linked to
+    an LNV row themselves (mapped from "Not in the LNV") is in the LNV: possible, unless the rule finds it exact."""
     levels = [(l.get("check") or {}).get("level") for l in c["lnv"]]
     if "exact" in levels:
         return "exact"
     if "possible" in levels or "isrc_only" in levels or any(v["isrc"] and v["answer"] != "none" for v in c.get("in_lnv") or []):
+        return "possible"
+    a = c.get("answer") or {}
+    if a.get("choice") == "same" and a.get("by") == "you" and a.get("rows"):
         return "possible"
     return "new"
 

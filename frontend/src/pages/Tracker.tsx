@@ -11,15 +11,17 @@ import { useToast } from '../lib/toast'
 import type { ClientMetrics, ClientRow, SocietySummary } from '../types'
 
 /** The consolidate flow every client goes through, one step after the other. */
-export const STAGES = ['Add the files', 'Muso & LNV', 'LNV vs IPRS', 'Final LNV']
+export const STAGES = ['Add the files', 'Muso vs LNV', 'LNV vs IPRS', 'Final LNV']
 const at = (c: ClientMetrics) => (c.journey?.step ?? 1) - 1
 
 /** What still needs a person in the client's current step, in a few words. */
 export function journeyNote(j?: ClientMetrics['journey']) {
   if (!j) return ''
-  if (j.step === 1) return [!j.files.lnv && 'the LNV', !j.files.dsp && `the ${j.source} export`, !j.files.iprs && 'the IPRS report'].filter(Boolean).join(', ').replace(/^/, 'Needs ')
+  if (j.step === 1) return [!j.files.lnv && 'the LNV', !j.files.dsp && `the ${j.source} export`].filter(Boolean).join(', ').replace(/^/, 'Needs ')
   const n = j.needs[String(j.step) as '2' | '3']
   if (j.step === 4) return 'Ready to download'
+  if (j.step === 3 && !j.files.iprs) return 'Needs the IPRS report'
+  if (j.step === 2 && n === 0) return 'Ready to mark completed'
   return n == null ? 'Not opened yet' : `${n.toLocaleString('en-IN')} need you`
 }
 
@@ -158,9 +160,9 @@ export default function Tracker() {
       </header>
 
       <Guide id="clients" title="Getting started" steps={[
-        <><b>Add client</b> (top right): the client's name, then drop their three files – the LNV, the Muso export and the IPRS report.</>,
-        <>Open a client: its <b>four steps</b> are in the sidebar on the left – Files, Muso & LNV, LNV vs IPRS, Final LNV.</>,
-        <>Work through the steps in order; the client's row here shows the step it is at and how many songs still need you.</>,
+        <><b>Add client</b> (top right): the client's name, then drop their two files – the LNV and the Muso export.</>,
+        <>Open a client: its <b>two stages</b> are in the sidebar – Stage 1 (files, Muso vs LNV) and Stage 2 (the stage 2 LNV, LNV vs IPRS, the final LNV). The sidebar closes by itself; the lock keeps it open.</>,
+        <>Mark <b>Muso vs LNV</b> completed and the client moves to <b>LNV vs IPRS</b> (sidebar): there its stage 2 LNV is checked against the IPRS report, added then.</>,
       ]} />
 
       <section className="card flush tracker">
@@ -180,7 +182,7 @@ export default function Tracker() {
           <div className="loading"><span className="spinner" />Loading clients…</div>
         )) : clients.length === 0 ? (
           <Empty icon={<Users size={22} />} title="No clients yet" action={<Button variant="primary" onClick={() => navigate('/clients/new')}>Add the first client</Button>}>
-            Add a client with its three files – the LNV, the Muso export and the IPRS report – then go through the four steps.
+            Add a client with its two files – the LNV and the Muso export – then go through the four steps. The IPRS report comes in step 3.
           </Empty>
         ) : (
           <DataTable<ClientRow> rows={rows} rowKey={(c) => String(c.id)} filters={filters}

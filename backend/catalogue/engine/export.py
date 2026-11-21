@@ -224,7 +224,7 @@ def lnv_update(master_path, fills, adds, repeats, source):
 
 
 PICK_FIELDS = {"Title": "title", "Film / album": "movie", "Year": "release_year", "ISRC": "isrc", "Label": "label"}
-PICK_SLOTS = {"Lyricist": "authors", "Composer": "composers", "Singer": "singers"}
+PICK_SLOTS = {"Lyricist": "authors", "Composer": "composers", "Singer": "singers", "Publisher": "publishers"}
 
 
 def _replace_names(ws, layout, row, group, names, fill):
@@ -525,7 +525,7 @@ def _write_fill_row(ws, iprs_blocks, row, f):
     return changes
 
 
-def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=None, arrange=None):
+def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=None, arrange=None, order="song", log_name="MRM changes"):
     """The final LNV: the client's own LNV file with everything applied – the IPRS columns filled from the IPRS
     report and the values the reviewer chose to take from IPRS (yellow), step 1's answers from the DSP export (blank
     fields filled, yellow; repeats marked, orange), and the songs the LNV was missing appended (green): the DSP's new
@@ -533,7 +533,8 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
     get rows of their own (VERSION "MOD") naming their original in two columns, Original Work and Original Movie /
     Album, added after the LNV's last column. Every change is listed in "MRM changes".
     arrange (review.families, the step 2 download): the rows in alphabetical order, each song's rows together under its
-    main version, with three columns more – the main version's row, its title, and the row in the uploaded LNV."""
+    main version, with three columns more – the main version's row, its title, and the row in the uploaded LNV;
+    order "album": A–Z by album first. log_name: the change list's sheet (a stage 2 LNV keeps step 2's own list)."""
     ws = PatchSheet(master_path)   # only the changed cells are written: a whole LNV takes openpyxl about a minute
     layout = read_layout([c.value for c in ws[1]])
     iprs_blocks = [b for b in layout["blocks"] if b["society"] == "IPRS"]
@@ -610,18 +611,20 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
                         + (f" (ISRC {v['isrcs'][0]})" if v.get("isrcs") else "")])
 
     if arrange is not None:
-        changes = _arrange(ws, layout, last, uploaded, arrange, changes)
-    return ws.save(changes, ["LNV row", "Title", "Change", "Detail"], (10, 45, 22, 90))
+        changes = _arrange(ws, layout, last, uploaded, arrange, changes, by=order)
+    return ws.save(changes, ["LNV row", "Title", "Change", "Detail"], (10, 45, 22, 90), log_name=log_name)
 
 
 ARRANGE_COLUMNS = ("Main version row", "Main version title", "Row in the uploaded LNV")
 _ISRC = re.compile(r"[A-Z]{2}[A-Z0-9]{3}\d{7}")
-_sort_text = lambda t: re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", (t or "").lower())).strip()
+# letters and digits of any script kept (a Hindi album sorts by its words, after the Latin ones), the rest dropped
+_sort_text = lambda t: re.sub(r"\s+", " ", re.sub(r"[\W_]+", " ", (t or "").lower())).strip()
 
 
-def _arrange(ws, layout, last, uploaded, fam, changes):
+def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
     """The LNV in alphabetical order with each song's rows together: the songs A–Z by their main version's title,
-    the main version's row first, then the song's other rows A–Z. A song is one song name as step 2 groups it
+    the main version's row first, then the song's other rows A–Z. by="album": the albums A–Z (Movie name; rows with
+    none at the end), in each album its songs in that order. A song is one song name as step 2 groups it
     (review._family, a name only versions carry joined to the shorter one); its main version is the oldest DSP
     recording with no tag (review.families) – its row found by ISRC, else the row it is linked to – or, when the LNV
     has no row of it, the LNV's own oldest plain row of that name. Three columns after the last: the main version's row
@@ -680,6 +683,10 @@ def _arrange(ws, layout, last, uploaded, fam, changes):
     for k in sorted(groups, key=lambda k: (name(k), k)):
         m = main_of[k]
         order += sorted(groups[k], key=lambda y: (y is not m, _sort_text(y["title"]), y["row"]))
+    if by == "album":   # the same order inside each album; the albums A–Z, rows with no album last
+        at = {x["row"]: i for i, x in enumerate(order)}
+        album = lambda x: _sort_text(get(x["row"], "movie"))
+        order.sort(key=lambda x: (not album(x), album(x), at[x["row"]]))
     order += [x for x in rows if not x["title"]]   # rows with no title stay together at the end
     new_of = {x["row"]: n for n, x in enumerate(order, start=2)}
     ws.order = [x["row"] for x in order]
@@ -699,7 +706,9 @@ def _arrange(ws, layout, last, uploaded, fam, changes):
 
     renum = lambda text: re.sub(r"\b(rows?) (\d+)", lambda m: f"{m.group(1)} {new_of.get(int(m.group(2)), m.group(2))}", text)
     out = [[new_of.get(c[0], c[0]) if isinstance(c[0], int) else c[0], c[1], c[2], renum(c[3]) if isinstance(c[3], str) else c[3]] for c in changes]
-    out.insert(0, [None, "", "Sorted A–Z", "Rows in alphabetical order, each song's rows together, its main version first. "
+    out.insert(0, [None, "", "Sorted A–Z by album" if by == "album" else "Sorted A–Z",
+                   ("Rows by album A–Z (rows with no album last); in each album " if by == "album" else "Rows in alphabetical order, ")
+                   + "each song's rows together, its main version first. "
                    "'Main version row' and 'Main version title' name each song's main version; 'Row in the uploaded LNV' is the row "
                    "each one had before. Row numbers in this list are the new ones."])
     return out

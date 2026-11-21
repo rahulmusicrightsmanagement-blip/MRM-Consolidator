@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
-import { ChevronsUpDown, KeyRound, LayoutGrid, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Plus, Search, Sun, SunMoon, Users, X } from 'lucide-react'
+import { ChevronsUpDown, GitCompareArrows, KeyRound, LayoutGrid, LogOut, Menu, Moon, Plus, Search, Sun, SunMoon, Users, X } from 'lucide-react'
 import { CommandPalette } from './CommandPalette'
-import { Kbd } from './ui'
+import { Kbd, LockToggle } from './ui'
 import { useAuth } from '../lib/auth'
+import { useFlag, usePeek } from '../lib/peek'
 import versionFile from '../../../VERSION?raw'
 
 const VERSION = versionFile.trim()
@@ -20,13 +21,33 @@ function readTheme(): Theme {
   }
 }
 
-/** Sidebar (app navigation, plus the open client's steps in `side`) and a slim top bar with the trail. */
+/** The app's mark: three catalogues (the LNV, the Muso export, the IPRS report) merging into one checked master
+ *  sheet – the same drawing as the favicon. */
+export function LogoMark({ size = 28 }: { size?: number }) {
+  return (
+    <svg className="logo-mark" viewBox="0 0 32 32" width={size} height={size} aria-hidden>
+      <defs><linearGradient id="mrm-logo-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#4f46e5" /><stop offset="1" stopColor="#1e1b4b" /></linearGradient></defs>
+      <rect width="32" height="32" rx="9" fill="url(#mrm-logo-bg)" />
+      <g fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.3">
+        <path d="M5.5 9h3c3.6 0 4.6 7 8.2 7" stroke="#a5b4fc" />
+        <path d="M5.5 16h11.2" stroke="#e0e7ff" />
+        <path d="M5.5 23h3c3.6 0 4.6-7 8.2-7" stroke="#a5b4fc" />
+      </g>
+      <rect x="17.5" y="10" width="9.5" height="12" rx="2.2" fill="#fbbf24" />
+      <path d="M19.9 16.2l1.7 1.7 3.1-3.4" fill="none" stroke="#1e1b4b" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+/** Sidebar (app navigation, plus the open client's steps in `side`) and a slim top bar with the trail. The sidebar
+ *  closes by itself to a slim strip of icons and opens while the pointer is on it – or is locked open. */
 export function AppShell({ children, trail, side }: { children: ReactNode; trail?: ReactNode; side?: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(readTheme)
   const [palette, setPalette] = useState(false)
   const [open, setOpen] = useState(false)   // the sidebar on small screens
-  const [mini, setMini] = useState(() => { try { return localStorage.getItem('mrm-side-mini') === '1' } catch { return false } })
-  const fold = () => { setMini(!mini); try { localStorage.setItem('mrm-side-mini', mini ? '0' : '1') } catch { /* private mode */ } }
+  const [locked, setLocked] = useFlag('mrm-side-lock', false)
+  const peek = usePeek()
+  const shut = !locked && !peek.open   // the slim strip of icons
   const { pathname, search } = useLocation()
 
   useEffect(() => {
@@ -46,18 +67,15 @@ export function AppShell({ children, trail, side }: { children: ReactNode; trail
   useEffect(() => setOpen(false), [pathname, search])
 
   return (
-    <div className={`shell2 ${open ? 'nav-open' : ''} ${mini ? 'mini' : ''}`}>
-      <aside className="side" aria-label="Navigation">
+    <div className={`shell2 ${open ? 'nav-open' : ''} ${locked ? '' : 'auto'} ${shut ? 'mini' : ''} ${!locked && peek.open ? 'peek' : ''}`}>
+      <aside className="side" aria-label="Navigation" {...(locked ? {} : peek.handlers)}>
         <div className="side-top">
           <Link to="/" className="logo">
-            <span className="logo-mark" aria-hidden>
-              <svg viewBox="0 0 32 32" width="16" height="16"><path d="M12 22.5a3 3 0 1 1-2-2.83V9.5l11-2.5v12.5a3 3 0 1 1-2-2.83V10.6l-7 1.6z" fill="currentColor" /></svg>
-            </span>
+            <LogoMark />
             <span className="logo-text"><strong>MRM</strong><small>Consolidator</small></span>
           </Link>
           <button type="button" className="icon-btn side-close" onClick={() => setOpen(false)} aria-label="Close menu"><X size={18} /></button>
-          <button type="button" className="icon-btn side-fold" onClick={fold} title={mini ? 'Expand the sidebar' : 'Collapse the sidebar'} aria-label={mini ? 'Expand the sidebar' : 'Collapse the sidebar'}>
-            {mini ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button>
+          <LockToggle className="icon-btn side-fold" locked={locked} what="sidebar" toggle={() => { setLocked(!locked); peek.set(false) }} />
         </div>
         <button type="button" className="side-search" onClick={() => setPalette(true)} title="Search (Ctrl K)">
           <Search size={14} /><span className="lbl">Search</span><Kbd>Ctrl K</Kbd>
@@ -65,6 +83,8 @@ export function AppShell({ children, trail, side }: { children: ReactNode; trail
         <nav className="side-nav">
           <NavLink to="/" end title="Clients"><LayoutGrid size={16} /><span className="lbl">Clients</span></NavLink>
           <NavLink to="/clients/new" title="Add client"><Plus size={16} /><span className="lbl">Add client</span></NavLink>
+          {/* stage 2: the clients whose Muso vs LNV is completed, their stage 2 LNV against the IPRS report */}
+          <NavLink to="/iprs" title="LNV vs IPRS"><GitCompareArrows size={16} /><span className="lbl">LNV vs IPRS</span></NavLink>
         </nav>
         {side}
         <div className="side-foot">

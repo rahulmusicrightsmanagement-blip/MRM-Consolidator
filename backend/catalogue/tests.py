@@ -1244,6 +1244,46 @@ class DataCleanApiTests(TestCase):
         keys = set(Client.objects.get(pk=cid).clean_decisions.values_list("key", flat=True))
         self.assertEqual(keys, {"missing:INXY12300099"})
 
+    def test_typed_values_and_mapping_a_new_song_onto_an_lnv_row(self):
+        """v1.3: a value the reviewer typed goes into the downloaded LNV, said so in MRM changes; a lyricist picked
+        replaces the LNV's; a song not in the LNV linked to an LNV row by the reviewer counts as in the LNV (Songs);
+        each record carries its link."""
+        cid = self.client.post("/api/clients/", {"name": CLIENT}, content_type="application/json").json()["id"]
+        self.assertEqual(self._post(f"/api/clients/{cid}/master/", f"{self.tmp}/lnv.xlsx").status_code, 200)
+        self.assertEqual(self._post(f"/api/clients/{cid}/clean/", f"{self.tmp}/muso.xlsx").status_code, 200)
+        res = self.client.post(f"/api/clients/{cid}/clean/decisions/", {"quiet": True, "items": [
+            {"key": "pick:2:Film / album", "choice": "custom", "data": {"value": "Typed Film"}},
+            {"key": "pick:4:Lyricist", "choice": "muso", "data": {"value": ["Malik Varma"]}},
+            # "Brand New Hit" is not in the LNV: the reviewer maps it onto LNV row 6 as the same song
+            {"key": "link:INXY12300099", "choice": "same", "data": {"rows": [6]}},
+        ]}, content_type="application/json")
+        self.assertEqual(res.status_code, 200, res.content[:300])
+
+        step = self.client.get(f"/api/clients/{cid}/steps/?step=1").json()["step"]
+        hit = next(c for c in step["cases"] if c["title"] == "Brand New Hit")
+        self.assertEqual((hit["answer"]["choice"], hit["answer"]["rows"], hit["answer"]["by"]), ("same", [6], "you"))
+        from .engine import review
+        self.assertEqual(review._level(hit), "possible")   # listed under Songs, no longer under Not in the LNV
+        self.assertTrue(hit["muso"][0]["link"].startswith("https://open.spotify.com/track/"))
+        self.assertIn("link", hit["lnv"][0])
+
+        res = self.client.get(f"/api/clients/{cid}/steps/lnv/")
+        self.assertEqual(res.status_code, 200)
+        wb = openpyxl.load_workbook(io.BytesIO(res.content))
+        changes = [" ".join(str(c) for c in r if c is not None) for r in wb["MRM changes"].iter_rows(values_only=True)]
+        self.assertTrue(any("Typed Film – typed by the reviewer" in c for c in changes), changes)
+        self.assertTrue(any("Lyricist changed" in c and "Malik Varma" in c for c in changes), changes)
+        cells = [str(c) for r in wb.active.iter_rows(values_only=True) for c in r if c is not None]
+        self.assertIn("Typed Film", cells)
+        self.assertIn("Malik Varma", cells)
+        self.assertNotIn("Brand New Hit", cells)   # linked to row 6: not added as a new row
+
+    def test_lnv_link(self):
+        from .engine.steps import lnv_link
+        self.assertEqual(lnv_link({"website": "open.spotify.com/track/abc"}), "https://open.spotify.com/track/abc")
+        self.assertEqual(lnv_link({"website": "", "spotify_id": "2HNG9q8rXbnijbPTwCMgsb"}), "https://open.spotify.com/track/2HNG9q8rXbnijbPTwCMgsb")
+        self.assertEqual(lnv_link({"spotify_id": "not an id"}), "")
+
 
 class XlsxReaderTests(TestCase):
     """The fast reader gives what openpyxl gives, without walking the formatted empty cells."""
@@ -1423,6 +1463,66 @@ class StepsApiTests(TestCase):
         self.assertEqual(sum(body["counts"]["3"][k] for k in ("matched", "amend", "register")), 67)
         self.assertTrue(all(a["records"][0]["src"] == "LNV" and a["records"][1]["src"] == "IPRS" for a in three["amend"]))
         self.assertIsNone(body["counts"]["1"])   # no Muso export yet
+
+    def test_stage1_completed_makes_the_stage2_lnv(self):
+        """Muso vs LNV marked completed: its result (the stage 1 LNV) is kept as the stage 2 LNV, which IPRS is checked
+        against; a corrected one can be uploaded in its place. The stage 1 LNV downloads A–Z by song or by album."""
+        cid = self.client.post("/api/clients/", {"name": CLIENT}, content_type="application/json").json()["id"]
+        self._post(f"/api/clients/{cid}/master/", f"{self.tmp}/lnv.xlsx")
+        detail = self.client.get(f"/api/clients/{cid}/").json()
+        self.assertEqual(detail["journey"]["step"], 1)   # the LNV and the Muso export – no IPRS report asked for
+        self._post(f"/api/clients/{cid}/clean/", f"{self.tmp}/muso.xlsx")
+        journey = self.client.get(f"/api/clients/{cid}/").json()["journey"]
+        self.assertEqual((journey["step"], journey["stage1"], journey["lnv2"]), (2, None, None))
+        self.assertEqual(self.client.get(f"/api/clients/{cid}/stage2/").status_code, 404)
+
+        titles = lambda content: [r[1] for r in openpyxl.load_workbook(io.BytesIO(content)).worksheets[0].iter_rows(min_row=2, values_only=True) if r[1]]
+        by_song = self.client.get(f"/api/clients/{cid}/steps/lnv/?stage=1")
+        self.assertEqual(by_song.status_code, 200)
+        self.assertIn("LNV_stage1_", by_song["Content-Disposition"])
+        self.assertEqual(titles(by_song.content)[:2], ["Brand New Hit", "Dil Ki Baat"])
+        by_album = self.client.get(f"/api/clients/{cid}/steps/lnv/?stage=1&order=album")
+        self.assertIn("_by_album_", by_album["Content-Disposition"])
+        book = openpyxl.load_workbook(io.BytesIO(by_album.content))
+        head = [c.value for c in book.worksheets[0][1]]
+        albums = [r[head.index("Movie Name *")] for r in book.worksheets[0].iter_rows(min_row=2, values_only=True) if r[1]]
+        self.assertEqual(albums, sorted(albums, key=lambda a: (a or "~").lower()))
+        self.assertEqual(titles(by_album.content)[-1], "Some Other Song")   # Film X
+        self.assertEqual(next(book["MRM changes"].iter_rows(min_row=2, values_only=True))[2], "Sorted A–Z by album")
+
+        done = self.client.post(f"/api/clients/{cid}/stage1/", {"done": True}, content_type="application/json").json()
+        self.assertEqual(done["client"]["stage1"]["by"], "team@example.com")
+        self.assertEqual((done["journey"]["step"], done["journey"]["lnv2"]["origin"], done["journey"]["lnv2"]["stage"]), (3, "stage1", 2))
+        lnv2 = self.client.get(f"/api/clients/{cid}/stage2/")
+        self.assertEqual(lnv2.status_code, 200)
+        self.assertEqual(titles(lnv2.content), titles(by_song.content))
+        steps_now = self.client.get(f"/api/clients/{cid}/steps/?step=1").json()
+        self.assertEqual((steps_now["files"]["lnv2"]["origin"], steps_now["stage1"]["changed"]), ("stage1", False))
+        # step 2 still reads the LNV as uploaded
+        self.assertEqual(self.client.get(f"/api/clients/{cid}/steps/?row=4").json()["records"][0]["fields"]["Title"], "Dil Ki Baat")
+        # an answer given after completing: the stage 2 LNV does not have it
+        self.client.post(f"/api/clients/{cid}/clean/decisions/", {"items": [{"key": "pick:4:Year", "choice": "custom", "data": {"value": "1999"}}],
+                                                                  "quiet": True}, content_type="application/json")
+        self.assertTrue(self.client.get(f"/api/clients/{cid}/steps/?step=1").json()["stage1"]["changed"])
+        # no IPRS report yet: the final LNV is the stage 2 LNV
+        self.assertEqual(titles(self.client.get(f"/api/clients/{cid}/steps/lnv/").content), titles(lnv2.content))
+
+        # a corrected stage 2 LNV uploaded in its place; a file that is no LNV is refused
+        fixed = f"{self.tmp}/fixed.xlsx"
+        with open(fixed, "wb") as fh:
+            fh.write(lnv2.content)
+        up = self._post(f"/api/clients/{cid}/stage2/", fixed)
+        self.assertEqual(up.status_code, 200, up.content[:300])
+        self.assertEqual((up.json()["journey"]["lnv2"]["origin"], up.json()["journey"]["lnv2"]["name"]), ("upload", "fixed.xlsx"))
+        self.assertEqual(self._post(f"/api/clients/{cid}/stage2/", f"{self.tmp}/muso.xlsx").status_code, 422)
+        self.assertEqual(self.client.get(f"/api/clients/{cid}/stage2/")["Content-Disposition"], 'attachment; filename="fixed.xlsx"')
+
+        # opened again: back to step 2, the stage 2 LNV stays; a new LNV opens it again too
+        back = self.client.post(f"/api/clients/{cid}/stage1/", {"done": False}, content_type="application/json").json()
+        self.assertEqual((back["client"]["stage1"], back["journey"]["step"], back["journey"]["lnv2"]["name"]), (None, 2, "fixed.xlsx"))
+        self.client.post(f"/api/clients/{cid}/stage1/", {"done": True}, content_type="application/json")
+        self._post(f"/api/clients/{cid}/master/", f"{self.tmp}/lnv.xlsx")
+        self.assertIsNone(self.client.get(f"/api/clients/{cid}/").json()["client"]["stage1"])
 
     def test_map_and_title_through_the_api(self):
         """Step 2's map and title answers: saved, shown on the step (the mapped recording under the song it joined,

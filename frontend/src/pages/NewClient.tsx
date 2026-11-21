@@ -5,7 +5,7 @@ import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, Hash, ListCh
 import { AppShell } from '../components/AppShell'
 import { Button } from '../components/ui'
 import { api } from '../lib/api'
-import { fmtDate, today } from '../lib/client'
+import { fmtDate } from '../lib/client'
 import type { ClientDetail, ClientRef, ClientRow, DspInfo } from '../types'
 import { FileCard } from './client/Consolidate'
 import { hue, initials } from './Tracker'
@@ -34,23 +34,24 @@ export function Stepper({ steps, current, confirmed, onPick }: { steps: string[]
 
 const STEP_INFO = [
   'Name, IPI number, owner and due date',
-  'LNV, Muso export and IPRS report',
+  'The LNV and the Muso export',
 ]
 
 const addDays = (n: number) => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10) }
 const QUICK_DUE = [{ label: '1 week', days: 7 }, { label: '2 weeks', days: 14 }, { label: '1 month', days: 30 }]
 
-type Slot = 'lnv' | 'dsp' | 'iprs'
+type Slot = 'lnv' | 'dsp'
 const dspText = (d: DspInfo) => `${d.source} · ${(d.stats.rows ?? 0).toLocaleString()} rows`
 
-/** Add a client in one go: details → the three files (LNV, DSP export, IPRS report), then straight on to the consolidate steps.
+/** Add a client in one go: details → the two files (LNV, DSP export), then straight on to the consolidate steps. The IPRS
+ *  report is not asked for here: it comes in step 3, LNV vs IPRS, once Muso vs LNV is completed.
  *  Each step is saved at once and the client id is kept in the address, so a reload resumes where it stopped. */
 export default function NewClient() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const [step, setStep] = useState(1)
   const [client, setClient] = useState<ClientRef | null>(null)
-  const [detail, setDetail] = useState<ClientDetail | null>(null)
+  const [, setDetail] = useState<ClientDetail | null>(null)
   const [form, setForm] = useState({ name: '', ipi: '', owner: '', due_date: '', home_society: 'IPRS' })
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -62,12 +63,10 @@ export default function NewClient() {
 
   /** What each file box shows, from the client as saved. */
   const fromDetail = (d: ClientDetail) => {
-    const iprs = d.societies.find((x) => x.code === 'IPRS')?.report
     setSlots((x) => ({
       ...x,
       lnv: d.master ? { name: d.master.name, text: `${(d.master.stats.songs ?? 0).toLocaleString()} songs` } : x.lnv,
       dsp: d.clean ? { name: d.clean.name, text: dspText(d.clean) } : x.dsp,
-      iprs: iprs ? { name: `IPRS report ${fmtDate(iprs.report_date)}`, text: 'Report added' } : x.iprs,
     }))
   }
 
@@ -105,7 +104,7 @@ export default function NewClient() {
     } catch (err) { setError((err as Error).message) } finally { setBusy(false) }
   }
 
-  /** The LNV goes first: the export and the IPRS report are matched against it, so they wait for it. */
+  /** The LNV goes first: the export is matched against it, so it waits for it. */
   const master = useRef<Promise<unknown> | null>(null)
   const upload = async (slot: Slot, file: File) => {
     setSlot(slot, { busy: true, error: undefined, name: file.name })
@@ -116,16 +115,8 @@ export default function NewClient() {
         setDetail(d); setSlot('lnv', { text: `${(d.master?.stats.songs ?? 0).toLocaleString()} songs` })
       } else {
         await master.current
-        if (slot === 'dsp') {
-          const r = await api.uploadDsp(client!.id, file)
-          setSlot('dsp', { text: r.dsp ? dspText(r.dsp) : 'Read' })
-        } else {
-          if (!detail?.societies.some((x) => x.code === 'IPRS')) setDetail(await api.addSocieties(client!.id, ['IPRS']))
-          const run = detail?.societies.find((x) => x.code === 'IPRS')?.report?.id ?? (await api.startReport(client!.id, 'IPRS', today())).id
-          const r = await api.upload(run, 'iprs', file)
-          setSlot('iprs', { text: `${(r.result.iprs?.stats.works ?? 0).toLocaleString()} works` })
-          setDetail(await api.client(client!.id))
-        }
+        const r = await api.uploadDsp(client!.id, file)
+        setSlot('dsp', { text: r.dsp ? dspText(r.dsp) : 'Read' })
       }
       setSlot(slot, { busy: false })
     } catch (e) { setSlot(slot, { busy: false, error: (e as Error).message, name: undefined }) }
@@ -135,7 +126,15 @@ export default function NewClient() {
   const reachable = (n: number) => n === 1 || (n === 2 && !!client)
   const go = (n: number) => { if (reachable(n)) { setError(null); setStep(n) } }
   const has = (k: Slot) => !!slots[k]?.text && !slots[k]?.busy
-  const anyBusy = (['lnv', 'dsp', 'iprs'] as Slot[]).some((k) => slots[k]?.busy)
+  const anyBusy = (['lnv', 'dsp'] as Slot[]).some((k) => slots[k]?.busy)
+  // both files in (just added, or already there when the wizard is reopened): straight on to step 2, Muso vs LNV
+  const jumped = useRef(false)
+  const both = has('lnv') && has('dsp') && !anyBusy
+  useEffect(() => {
+    if (!client || !both || jumped.current) return
+    jumped.current = true
+    navigate(`/clients/${client.id}/consolidate?step=2`)
+  }, [client, both, navigate])
 
   if (resuming) return <AppShell trail={<span className="trail-name">Add client</span>}><div className="loading"><span className="spinner" />Loading…</div></AppShell>
 
@@ -151,7 +150,7 @@ export default function NewClient() {
           <ol>
             {STEPS.map((label, i) => {
               const n = i + 1
-              const done = n === 1 ? !!client : has('lnv') && (has('dsp') || has('iprs'))
+              const done = n === 1 ? !!client : has('lnv') && has('dsp')
               const open = reachable(n)
               return (
                 <li key={label} className={`${done ? 'done' : ''} ${n === step ? 'current' : ''}`}>
@@ -163,7 +162,7 @@ export default function NewClient() {
               )
             })}
             <li className="rail-next"><span className="rail-dot"><ListChecks size={14} /></span>
-              <span><b>Then</b><small>Muso & LNV · LNV vs IPRS · the final LNV</small></span></li>
+              <span><b>Then</b><small>Muso vs LNV · LNV vs IPRS (the IPRS report is added there) · the final LNV</small></span></li>
           </ol>
         </nav>
 
@@ -227,21 +226,20 @@ export default function NewClient() {
           {step === 2 && client && (
             <section className="card wizard-card">
               <div className="wizard-head"><span className="wizard-step">Step 2 of 2</span><h2>The client's files</h2>
-                <p className="muted">Drop the three files on their boxes – all at once is fine. The LNV is read first; the other two are matched against it.</p></div>
-              <div className="sc-files wizard-files">
+                <p className="muted">Drop the two files on their boxes – both at once is fine. The LNV is read first; the export is matched against it.
+                  The IPRS report is not needed now: it is added in LNV vs IPRS, once Muso vs LNV is completed.</p></div>
+              <div className="sc-files wizard-files two">
                 <FileCard tone="lnv" label="LNV" what="The client's LNV report (.xlsx)" file={slots.lnv?.name} text={slots.lnv?.text} busy={slots.lnv?.busy}
                   onFile={(f) => upload('lnv', f)} accept=".xlsx,.xlsm" />
                 <FileCard tone="dsp" label="Muso" what="Muso, Spotify or Apple Music export from MRM-Extractor" file={slots.dsp?.name} text={slots.dsp?.text}
                   busy={slots.dsp?.busy} onFile={(f) => upload('dsp', f)} disabled={!slots.lnv?.name} accept=".xlsx" />
-                <FileCard tone="iprs" label="IPRS" what="The client's IPRS works report" file={slots.iprs?.name} text={slots.iprs?.text}
-                  busy={slots.iprs?.busy} onFile={(f) => upload('iprs', f)} disabled={!slots.lnv?.name} accept=".xlsx,.xlsm,.csv" />
               </div>
-              {(['lnv', 'dsp', 'iprs'] as Slot[]).map((k) => slots[k]?.error && <div key={k} className="alert bad small"><b>{k === 'lnv' ? 'LNV' : k === 'dsp' ? 'Export' : 'IPRS'}:</b> {slots[k]!.error}</div>)}
+              {(['lnv', 'dsp'] as Slot[]).map((k) => slots[k]?.error && <div key={k} className="alert bad small"><b>{k === 'lnv' ? 'LNV' : 'Export'}:</b> {slots[k]!.error}</div>)}
               <div className="wizard-actions">
                 <Button variant="ghost" icon={<ArrowLeft size={15} />} onClick={() => go(1)}>Back</Button>
                 <Button className="later" disabled={anyBusy} onClick={() => navigate(`/clients/${client.id}`)}>Finish later</Button>
                 <Button variant="primary" disabled={!has('lnv') || anyBusy} onClick={() => navigate(`/clients/${client.id}/consolidate?step=2`)}>
-                  {anyBusy ? <span className="spinner small" /> : null}Start: Muso & LNV<ArrowRight size={15} /></Button>
+                  {anyBusy ? <span className="spinner small" /> : null}Start: Muso vs LNV<ArrowRight size={15} /></Button>
               </div>
             </section>
           )}
@@ -259,7 +257,7 @@ export default function NewClient() {
             <div><dt>Due</dt><dd className={form.due_date ? '' : 'muted'}>{form.due_date ? fmtDate(form.due_date) : 'No date'}</dd></div>
             <div><dt>LNV</dt><dd className={has('lnv') ? '' : 'muted'}>{has('lnv') ? slots.lnv!.text : 'Not added'}</dd></div>
             <div><dt>Export</dt><dd className={has('dsp') ? '' : 'muted'}>{has('dsp') ? slots.dsp!.text : 'Not added'}</dd></div>
-            <div><dt>IPRS</dt><dd className={has('iprs') ? '' : 'muted'}>{has('iprs') ? slots.iprs!.text : 'Not added'}</dd></div>
+            <div><dt>IPRS</dt><dd className="muted">In LNV vs IPRS</dd></div>
           </dl>
         </aside>
       </div>

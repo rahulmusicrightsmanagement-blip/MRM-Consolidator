@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { CloudUpload, Eye, EyeOff, GitCompareArrows, ListChecks, Lock, LogIn, Mail } from 'lucide-react'
 import { useAuth } from '../lib/auth'
+import { LogoMark } from '../components/AppShell'
 import versionFile from '../../../VERSION?raw'
 
 /** Email + password sign-in. New accounts are created by the super admin, so there is no sign-up. */
@@ -32,11 +33,7 @@ export default function Login() {
     } finally { setBusy(false) }
   }
 
-  const logo = (
-    <span className="logo-mark" aria-hidden>
-      <svg viewBox="0 0 32 32" width="20" height="20"><path d="M12 22.5a3 3 0 1 1-2-2.83V9.5l11-2.5v12.5a3 3 0 1 1-2-2.83V10.6l-7 1.6z" fill="currentColor" /></svg>
-    </span>
-  )
+  const logo = <LogoMark size={32} />
 
   return (
     <div className="login-page">

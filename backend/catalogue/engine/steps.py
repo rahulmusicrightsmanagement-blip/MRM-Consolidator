@@ -38,9 +38,18 @@ def _names(people):
 
 # ---------------------------------------------------------------- records: one source's view of a song
 
+def lnv_link(song):
+    """The LNV row's link: its website column (often a Spotify track), else its Spotify ID as a track link."""
+    site = str(song.get("website") or "").strip()
+    if site:
+        return site if re.match(r"https?://", site, re.I) else f"https://{site}"
+    sid = str(song.get("spotify_id") or "").strip()
+    return f"https://open.spotify.com/track/{sid}" if re.fullmatch(r"[A-Za-z0-9]{22}", sid) else ""
+
+
 def lnv_record(song):
     codes = [r["code"] for r in song.get("registrations", []) if r["society"] == "IPRS" and r["code"]]
-    return {"src": "LNV", "ref": f"Row {song['row']}", "row": song["row"], "fields": {
+    return {"src": "LNV", "ref": f"Row {song['row']}", "row": song["row"], "link": lnv_link(song), "fields": {
         "Title": song["title"], "Film / album": song.get("movie", ""), "Lyricist": _names(song.get("authors", [])),
         "Composer": _names(song.get("composers", [])), "Singer": _names(song.get("singers", []))[:6],
         "ISRC": song.get("isrcs", []), "ISWC": song.get("iswcs", []), "IPRS code": codes,
