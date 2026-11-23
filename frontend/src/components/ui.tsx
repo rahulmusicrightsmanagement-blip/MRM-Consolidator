@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
+import { saveBlob } from '../lib/files'
 import { useToast } from '../lib/toast'
 import {
   AlertTriangle, ArrowDown, ArrowUp, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDashed, CircleHelp,
@@ -129,14 +130,7 @@ export function FileButton({ url, className = '', size = 15, title, before, chil
       const res = await fetch(url, { credentials: 'same-origin' })
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? 'The file could not be prepared.')
       const name = /filename="?([^";]+)"?/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? 'download.xlsx'
-      const href = URL.createObjectURL(await res.blob())
-      // in the page while it is clicked, and the file kept a moment: Firefox and Safari drop a download whose link
-      // is not in the page or whose file is freed at once
-      const link = Object.assign(document.createElement('a'), { href, download: name, style: 'display:none' })
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      window.setTimeout(() => URL.revokeObjectURL(href), 60_000)
+      saveBlob(await res.blob(), name)
       toast(`${name} downloaded`, 'good')
     } catch (e) { toast((e as Error).message, 'bad') } finally { setBusy(false) }
   }

@@ -10,6 +10,7 @@ import Users from './pages/Users'
 import Account from './pages/Account'
 import Tracker from './pages/Tracker'
 import { ErrorPage } from './components/ErrorPage'
+import { HintLayer } from './components/HintLayer'
 import ClientLayout from './pages/client/ClientLayout'
 import ClientHome from './pages/client/ClientHome'
 import Consolidate from './pages/client/Consolidate'
@@ -19,6 +20,8 @@ import Tasks from './pages/client/Tasks'
 import Catalogue from './pages/client/Catalogue'
 import WorkPage from './pages/client/WorkPage'
 import IprsBoard from './pages/IprsBoard'
+import IpiList from './pages/IpiList'
+import Settings from './pages/Settings'
 
 /** Old /runs/:id links open that report inside its client. */
 function RunRedirect() {
@@ -40,6 +43,8 @@ const router = createBrowserRouter([{ errorElement: <ErrorPage />, children: [
     { path: '/', element: <Tracker /> },
     { path: '/clients/new', element: <NewClient /> },
     { path: '/iprs', element: <IprsBoard /> },
+    { path: '/ipi', element: <IpiList /> },
+    { path: '/settings', element: <Settings /> },
     {
       path: '/clients/:clientId',
       element: <ClientLayout />,
@@ -67,6 +72,7 @@ createRoot(document.getElementById('root')!).render(
     <ToastProvider>
       <AuthProvider>
         <RouterProvider router={router} />
+        <HintLayer />
       </AuthProvider>
     </ToastProvider>
   </StrictMode>,

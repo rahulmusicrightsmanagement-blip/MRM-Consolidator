@@ -113,7 +113,7 @@ function ClientNav({ base, name, journey }: { base: string; name: string; journe
       <nav className="side-nav">
         <NavLink to={`${base}/tasks`} title="Follow-up tasks"><ListChecks size={16} /><span className="lbl">Follow-up tasks</span></NavLink>
         <NavLink to={`${base}/catalogue`} title="Catalogue"><Library size={16} /><span className="lbl">Catalogue</span></NavLink>
-        <NavLink to={`${base}/tools`} className={({ isActive }) => isActive || pathname.includes('/societies/') ? 'active' : ''}><Wrench size={16} /><span className="lbl">More tools</span></NavLink>
+        <NavLink to={`${base}/tools`} title="The society workspaces and other tools." className={({ isActive }) => isActive || pathname.includes('/societies/') ? 'active' : ''}><Wrench size={16} /><span className="lbl">More tools</span></NavLink>
       </nav>
     </div>
   )

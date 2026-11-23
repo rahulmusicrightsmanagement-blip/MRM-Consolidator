@@ -315,3 +315,67 @@ class CleanDecision(models.Model):
 
     class Meta:
         unique_together = [("client", "key")]
+
+
+class IpiUpload(models.Model):
+    """One upload of the IPI / CAE member list (or the list cleared): what it changed. The newest id is the list's
+    version – the matches and names that used the list are worked out again when it changes."""
+    original_name = models.CharField(max_length=255, blank=True)
+    kind = models.CharField(max_length=10, default="upload")   # upload · replace (names not in the file removed) · clear
+    stats = models.JSONField(default=dict, blank=True)          # {"names", "members", "added", "updated", "unchanged", "removed", "kept"}
+    uploaded_by = models.CharField(max_length=254, blank=True)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+
+class IpiName(models.Model):
+    """One name of the IPI / CAE member list: a member's real name (PA), a pseudonym (PP) or a group name (PG), with its
+    IPI name number. key = <member>|<IPI name number> (or the name type and name when the list has no number)."""
+    key = models.CharField(max_length=120, unique=True)
+    member = models.CharField(max_length=40, db_index=True)    # the base number (I-…), else the list's own SR_NO
+    member_name = models.CharField(max_length=300)              # the member's PA name, as the screens show it
+    name = models.CharField(max_length=300)
+    type = models.CharField(max_length=4)                       # PA · PP · PG …
+    ipi = models.CharField(max_length=11, blank=True, db_index=True)
+    role = models.CharField(max_length=4, blank=True)           # C · A · CA · E …
+    internal_no = models.CharField(max_length=40, blank=True)
+    sr = models.CharField(max_length=20, blank=True)
+    added_in = models.ForeignKey(IpiUpload, related_name="+", null=True, on_delete=models.SET_NULL)
+    changed_in = models.ForeignKey(IpiUpload, related_name="+", null=True, on_delete=models.SET_NULL)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["member_name", "member", "type", "name"]
+
+
+class CleanChange(models.Model):
+    """One change a reviewer made to a song in Muso vs LNV, as the Undo section lists it: the songs it concerns, what it
+    did in plain words, and each decision it touched before and after. Undoing puts the "before" back; a later change
+    on the same decisions is undone with it. closed: made on a sheet replaced since – it can no longer be undone."""
+    client = models.ForeignKey(Client, related_name="clean_changes", on_delete=models.CASCADE)
+    songs = models.JSONField(default=list)     # [{"key", "title"}] – a song moved from A to B is listed under both
+    lines = models.JSONField(default=list)     # what changed, one short line each
+    keys = models.JSONField(default=list)      # the decisions it touched
+    items = models.JSONField(default=list)     # [{"key", "before": {"choice", "data"} | null, "after": … | null}]
+    by = models.CharField(max_length=254, blank=True)
+    at = models.DateTimeField(auto_now_add=True)
+    undone_at = models.DateTimeField(null=True, blank=True)
+    undone_by = models.CharField(max_length=254, blank=True)
+    closed = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["-id"]
+
+
+class Remark(models.Model):
+    """One entry of the Remark dropdown (Settings), shared by every user and client: why a song that is not in the LNV
+    is mapped to an exact or possible match. A song keeps its remark's id, so a name edited here is the name everywhere
+    – also in the Remark column of the next LNV download. Removed ones are not offered any more; songs keep them."""
+    name = models.CharField(max_length=120)
+    help = models.CharField(max_length=400, blank=True)   # what it means, shown under the name
+    position = models.PositiveIntegerField(default=0)
+    active = models.BooleanField(default=True)
+    updated_by = models.CharField(max_length=254, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["position", "id"]

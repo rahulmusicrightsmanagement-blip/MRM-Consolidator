@@ -47,16 +47,30 @@ def lnv_link(song):
     return f"https://open.spotify.com/track/{sid}" if re.fullmatch(r"[A-Za-z0-9]{22}", sid) else ""
 
 
+def _named(people, limit=None):
+    """Names as _names gives them, and beside each the CAE number the LNV holds for it ('' where none)."""
+    names, ipis = [], []
+    for p in people:
+        name = display_name(p["name"]) if isinstance(p, dict) else p
+        if name and name not in names:
+            names.append(name)
+            ipis.append((p.get("ipi") or "") if isinstance(p, dict) else "")
+    return (names[:limit], ipis[:limit]) if limit else (names, ipis)
+
+
 def lnv_record(song):
     codes = [r["code"] for r in song.get("registrations", []) if r["society"] == "IPRS" and r["code"]]
+    lyr, com = _named(song.get("authors", [])), _named(song.get("composers", []))
+    sing, pub = _named(song.get("singers", []), 6), _named(song.get("publishers", []), 3)
+    cae = {f: ids for f, (_, ids) in (("Lyricist", lyr), ("Composer", com), ("Singer", sing), ("Publisher", pub)) if any(ids)}
     return {"src": "LNV", "ref": f"Row {song['row']}", "row": song["row"], "link": lnv_link(song), "fields": {
-        "Title": song["title"], "Film / album": song.get("movie", ""), "Lyricist": _names(song.get("authors", [])),
-        "Composer": _names(song.get("composers", [])), "Singer": _names(song.get("singers", []))[:6],
+        "Title": song["title"], "Film / album": song.get("movie", ""), "Lyricist": lyr[0],
+        "Composer": com[0], "Singer": sing[0],
         "ISRC": song.get("isrcs", []), "ISWC": song.get("iswcs", []), "IPRS code": codes,
         "Year": song.get("release_year", ""), "Label": song.get("label", ""), "Length": song.get("duration", ""),
-        "Publisher": _names(song.get("publishers", []))[:3],
+        "Publisher": pub[0],
         "Alternate title": song.get("alt_title", ""), "Language": song.get("language", ""),
-    }}
+    }, **({"cae": cae} if cae else {})}
 
 
 def dsp_song_record(song, source):

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
-import { ChevronsUpDown, GitCompareArrows, KeyRound, LayoutGrid, LogOut, Menu, Moon, Plus, Search, Sun, SunMoon, Users, X } from 'lucide-react'
+import { ChevronsUpDown, GitCompareArrows, IdCard, KeyRound, LayoutGrid, LogOut, Menu, Moon, Plus, Search, Settings, Sun, SunMoon, Users, X } from 'lucide-react'
 import { CommandPalette } from './CommandPalette'
 import { Kbd, LockToggle } from './ui'
+import { WhatsNew } from './WhatsNew'
 import { useAuth } from '../lib/auth'
 import { useFlag, usePeek } from '../lib/peek'
 import versionFile from '../../../VERSION?raw'
@@ -44,6 +45,7 @@ export function LogoMark({ size = 28 }: { size?: number }) {
 export function AppShell({ children, trail, side }: { children: ReactNode; trail?: ReactNode; side?: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(readTheme)
   const [palette, setPalette] = useState(false)
+  const [news, setNews] = useState(false)   // the version was clicked: what changed
   const [open, setOpen] = useState(false)   // the sidebar on small screens
   const [locked, setLocked] = useFlag('mrm-side-lock', false)
   const peek = usePeek()
@@ -70,7 +72,7 @@ export function AppShell({ children, trail, side }: { children: ReactNode; trail
     <div className={`shell2 ${open ? 'nav-open' : ''} ${locked ? '' : 'auto'} ${shut ? 'mini' : ''} ${!locked && peek.open ? 'peek' : ''}`}>
       <aside className="side" aria-label="Navigation" {...(locked ? {} : peek.handlers)}>
         <div className="side-top">
-          <Link to="/" className="logo">
+          <Link to="/" className="logo" aria-label="MRM Consolidator: go to all your clients">
             <LogoMark />
             <span className="logo-text"><strong>MRM</strong><small>Consolidator</small></span>
           </Link>
@@ -85,11 +87,14 @@ export function AppShell({ children, trail, side }: { children: ReactNode; trail
           <NavLink to="/clients/new" title="Add client"><Plus size={16} /><span className="lbl">Add client</span></NavLink>
           {/* stage 2: the clients whose Muso vs LNV is completed, their stage 2 LNV against the IPRS report */}
           <NavLink to="/iprs" title="LNV vs IPRS"><GitCompareArrows size={16} /><span className="lbl">LNV vs IPRS</span></NavLink>
+          {/* the society's member list: every name of every client looked up in it */}
+          <NavLink to="/ipi" title="IPI / CAE list"><IdCard size={16} /><span className="lbl">IPI / CAE list</span></NavLink>
+          <NavLink to="/settings" title="Settings"><Settings size={16} /><span className="lbl">Settings</span></NavLink>
         </nav>
         {side}
         <div className="side-foot">
           {/* the app's version, just above the signed-in user */}
-          <div className="side-ver" title={`MRM-Consolidator v${VERSION}`}><span className="lbl">MRM-Consolidator</span><b>v{VERSION}</b></div>
+          <button type="button" className="side-ver" onClick={() => setNews(true)} title="The app’s version. Click to see what changed."><span className="lbl">MRM-Consolidator</span><b>v{VERSION}</b></button>
           <UserMenu theme={theme} onTheme={() => setTheme(NEXT[theme])} />
         </div>
       </aside>
@@ -104,9 +109,10 @@ export function AppShell({ children, trail, side }: { children: ReactNode; trail
           </nav>
         </header>
         <main className="page">{children}</main>
-        <footer className="app-footer"><b>MRM-Consolidator</b><span>Music Rights Management</span><span>·</span><span>v{VERSION}</span></footer>
+        <footer className="app-footer"><b>MRM-Consolidator</b><span>Music Rights Management</span><span>·</span><button type="button" className="foot-ver" onClick={() => setNews(true)} title="The app’s version. Click to see what changed.">v{VERSION}</button></footer>
       </div>
       <CommandPalette open={palette} onClose={() => setPalette(false)} />
+      <WhatsNew open={news} onClose={() => setNews(false)} />
     </div>
   )
 }
@@ -141,6 +147,7 @@ function UserMenu({ theme, onTheme }: { theme: Theme; onTheme: () => void }) {
         <div className="user-pop" role="menu">
           <div className="user-pop-head"><b>{label}</b>{user.name && <span className="muted small">{user.email}</span>}</div>
           {user.is_admin && <button type="button" role="menuitem" onClick={() => go('/users')}><Users size={15} />Users</button>}
+          <button type="button" role="menuitem" onClick={() => go('/settings')}><Settings size={15} />Settings</button>
           <button type="button" role="menuitem" onClick={() => go('/account')}><KeyRound size={15} />Change password</button>
           <button type="button" role="menuitem" onClick={onTheme}>
             {theme === 'light' ? <Sun size={15} /> : theme === 'dark' ? <Moon size={15} /> : <SunMoon size={15} />}

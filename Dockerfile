@@ -5,7 +5,7 @@ FROM node:24-slim AS frontend
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --fetch-retries=5 --fetch-timeout=120000
-COPY VERSION /app/VERSION
+COPY VERSION CHANGELOG.md /app/
 COPY frontend/ ./
 RUN npm run build
 

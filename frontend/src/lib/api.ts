@@ -1,12 +1,15 @@
 import type {
-  CleanChoice, CleanPayload, ClientDetail, SongRecord, StepsPayload, ClientRef, Role, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow,
+  ChangeT, CleanChoice, CleanPayload, ClientDetail, IpiPayload, RemarkT, SongForm, TypedData, SongRecord, StepsPayload, ClientRef, Role, ClientRow, EditChoice, FileKind, PairResult, RunPayload, RunSummary, TaskState, TaskT, User, VerifyResult, WorkDetail, WorkRow,
 } from '../types'
 
 export class ApiError extends Error {
   checks?: { label: string; passed: boolean; detail: string }[]
-  constructor(message: string, checks?: ApiError['checks']) {
+  /** what is wrong, per field of the form that was sent */
+  fields?: Record<string, string>
+  constructor(message: string, checks?: ApiError['checks'], fields?: ApiError['fields']) {
     super(message)
     this.checks = checks
+    this.fields = fields
   }
 }
 
@@ -30,7 +33,7 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   const data = await res.json().catch(() => ({}))
   if (res.status === 401 && data.auth === 'required') window.dispatchEvent(new Event(SIGNED_OUT_EVENT))
   if (res.status === 403 && !data.error) throw new ApiError('This page was open too long – reload it and try again.')
-  if (!res.ok) throw new ApiError(data.error || `Request failed (${res.status})`, data.checks)
+  if (!res.ok) throw new ApiError(data.error || `Request failed (${res.status})`, data.checks, data.fields)
   return data as T
 }
 
@@ -45,8 +48,12 @@ export type MasterEditIn = { master_row: number; field: string; internal_no: str
 
 export type CleanDecisionIn = {
   key: string; choice: CleanChoice | null
-  data?: { keep?: number | string; row?: number; rows?: number[]; excluded?: number[]; type?: string; cover?: string; a?: string; b?: string; songs?: string[]; name?: string; value?: string | string[]; to?: number; title?: string; from?: string }
+  data?: { keep?: number | string; row?: number; rows?: number[]; excluded?: number[]; type?: string; cover?: string; a?: string; b?: string; songs?: string[]; name?: string; value?: string | string[]; to?: number | string; title?: string; from?: string; ipis?: string[]; also?: number[]; remark?: number | null }
+  /** for the Undo section: the songs it concerns, what it did in plain words; items with one group are one change */
+  log?: ChangeLog
 }
+export type ChangeLog = { group?: string; songs?: { key: string; title: string }[]; text: string; minor?: boolean }
+export type ListSheet = { name: string; header: string[]; rows: (string | number)[][] }
 
 export interface TaskPatch { state?: TaskState; owner?: string; due_date?: string | null; note?: string }
 
@@ -139,6 +146,37 @@ export const api = {
     form.append('file', file)
     return request<ClientDetail>(`/api/clients/${clientId}/stage2/`, { method: 'POST', body: form })
   },
+  /** The Undo section: every change made to a song in Muso vs LNV; undone (with the later ones on the same decisions), or made again. */
+  changes: (clientId: number) => request<{ changes: ChangeT[] }>(`/api/clients/${clientId}/changes/`).then((d) => d.changes),
+  undo: (clientId: number, ids: number[]) => request<{ undone: number[]; changes: ChangeT[] }>(`/api/clients/${clientId}/changes/`, send({ undo: ids })),
+  redo: (clientId: number, id: number) => request<{ changes: ChangeT[] }>(`/api/clients/${clientId}/changes/`, send({ redo: id })),
+  /** Add a song by typing it: the LNV's fields, and the song saved (key: an earlier one corrected). */
+  songForm: (clientId: number) => request<SongForm>(`/api/clients/${clientId}/songs/`),
+  saveSong: (clientId: number, data: TypedData, log: ChangeLog, key?: string) => request<{ key: string }>(`/api/clients/${clientId}/songs/`, send({ data, log, key })),
+  /** How the IPI / CAE list has a name. */
+  ipiLookup: (name: string) => request<{ found: { name: string; ipi: string } | null }>(`/api/ipi/lookup/?${new URLSearchParams({ name })}`).then((d) => d.found),
+  /** The Remark dropdown's list (Settings), one for every user and client. */
+  remarks: () => request<{ remarks: RemarkT[] }>('/api/remarks/').then((d) => d.remarks),
+  addRemark: (name: string, help: string) => request<{ remarks: RemarkT[] }>('/api/remarks/', send({ name, help })).then((d) => d.remarks),
+  updateRemark: (id: number, patch: { name?: string; help?: string; active?: boolean; move?: -1 | 1 }) => request<{ remarks: RemarkT[] }>(`/api/remarks/${id}/`, send(patch, 'PATCH')).then((d) => d.remarks),
+  removeRemark: (id: number) => request<{ remarks: RemarkT[] }>(`/api/remarks/${id}/`, { method: 'DELETE' }).then((d) => d.remarks),
+  /** A list of the review screen as Excel. */
+  listFile: async (clientId: number, name: string, sheets: ListSheet[]) => {
+    const res = await fetch(`/api/clients/${clientId}/lists/`, { ...send({ name, sheets }), credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': decodeURIComponent(csrfToken()) } })
+    if (!res.ok) throw new ApiError((await res.json().catch(() => null))?.error ?? 'The file could not be prepared.')
+    return { name: /filename="?([^";]+)"?/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? `${name}.xlsx`, blob: await res.blob() }
+  },
+  /** The IPI / CAE list: its summary and uploads, and one page of members (search, filter). */
+  ipi: (q = '', show: IpiShow = 'all', page = 1) => request<IpiPayload>(`/api/ipi/?${new URLSearchParams({ q, show, page: String(page) })}`),
+  /** A member list uploaded: new names added, changed ones updated – replace also removes the names it does not have. */
+  uploadIpi: (file: File, replace = false) => {
+    const form = new FormData()
+    form.append('file', file)
+    if (replace) form.append('replace', '1')
+    return request<IpiPayload>('/api/ipi/', { method: 'POST', body: form })
+  },
+  clearIpi: () => request<IpiPayload>('/api/ipi/', { method: 'DELETE' }),
   /** The IPRS report, added in LNV vs IPRS: the society is added and its report opened when needed. */
   uploadIprs: async (clientId: number, file: File, run?: number | null) => {
     if (!run) {
@@ -152,3 +190,4 @@ export const api = {
 }
 
 export type LnvOrder = 'song' | 'album'
+export type IpiShow = 'all' | 'new' | 'updated'

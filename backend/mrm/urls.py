@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.urls import path, re_path
 
-from catalogue import accounts, views
+from catalogue import accounts, ipilist, remarks, views
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -11,6 +11,10 @@ urlpatterns = [
     path("api/auth/password/", accounts.change_password),
     path("api/users/", accounts.users),
     path("api/users/<int:user_id>/", accounts.user_detail),
+    path("api/ipi/", ipilist.ipi_list),
+    path("api/ipi/lookup/", ipilist.lookup),
+    path("api/remarks/", remarks.remarks),
+    path("api/remarks/<int:remark_id>/", remarks.remark),
     path("api/clients/", views.clients),
     path("api/clients/<int:client_id>/", views.client_detail),
     path("api/clients/<int:client_id>/master/", views.client_master),
@@ -21,6 +25,9 @@ urlpatterns = [
     path("api/clients/<int:client_id>/stage2/", views.client_stage2),
     path("api/clients/<int:client_id>/clean/", views.client_clean),
     path("api/clients/<int:client_id>/clean/decisions/", views.clean_decisions),
+    path("api/clients/<int:client_id>/changes/", views.client_changes),
+    path("api/clients/<int:client_id>/songs/", views.client_songs),
+    path("api/clients/<int:client_id>/lists/", views.client_lists),
     path("api/clients/<int:client_id>/clean/rows/", views.clean_rows),
     path("api/clients/<int:client_id>/clean/export/", views.clean_export),
     path("api/clients/<int:client_id>/societies/", views.client_societies),

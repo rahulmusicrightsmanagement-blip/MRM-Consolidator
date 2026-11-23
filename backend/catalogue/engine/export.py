@@ -7,6 +7,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from . import typed
 from .dataclean import VERSION_RE, person_key, phonetic, same_people, title_key
 from .iprs import SHARE_KEYS
 from .master import read_layout
@@ -209,13 +210,75 @@ DSP_FIELDS = {"ISRC": "isrc", "Release year": "release_year", "Duration": "durat
 DSP_SLOTS = {"Singers": "singers", "Lyricists": "authors", "Composers": "composers"}
 
 
-def _put_names(ws, layout, row, group, names, fill):
+def _put_names(ws, layout, row, group, names, fill, ipis=()):
+    """Names into a contributor group's empty slots – with the CAE number of each one the IPI / CAE list knows."""
     slots = layout["slots"].get(group, [])
     for n, name in enumerate(names[:len(slots)]):
         _put(ws, row, slots[n]["name"], name, fill)
+        if n < len(ipis) and ipis[n]:
+            _put(ws, row, slots[n]["cae"], _cae(ipis[n]), fill)
         if group == "singers":
             _put(ws, row, slots[n]["role"], "S", fill)
     return len(names) > len(slots)
+
+
+def _cae(ipi):
+    """An IPI name number as the LNV writes its CAE numbers: a plain number (513185379), no leading zeros."""
+    digits = re.sub(r"\D", "", str(ipi or ""))
+    return int(digits) if digits else None
+
+
+# The LNV's contributor groups and the step 2 field each one is
+IPI_GROUPS = {"authors": "Lyricist", "composers": "Composer", "singers": "Singer", "publishers": "Publisher"}
+
+
+def _listed(dsp, names, hints=frozenset()):
+    """Names (a DSP song's, going into the LNV) as the IPI / CAE list has them, and their IPIs."""
+    index = (dsp or {}).get("ipi")
+    if not index or not names:
+        return list(names), []
+    new, ids, _ = index.names(list(names), (), hints)
+    return new, ids
+
+
+def _ipi_names(ws, layout, dsp):
+    """The LNV's own names as the IPI / CAE list has them: a member's pseudonym or another spelling becomes the PA name
+    (an LNV name is found by its CAE number first), and a slot with no CAE number gets the member's IPI (yellow). Not
+    in a field where the reviewer chose the value – the LNV's own included. Names the list does not know stay."""
+    from .normalize import norm_ipi
+    index = dsp.get("ipi")
+    if not index:
+        return []
+    kept = {(int(r), f) for r, f in dsp.get("kept", [])}
+    groups = {g: layout["slots"].get(g, []) for g in IPI_GROUPS}
+    title_col = layout["fields"].get("title")
+    changes = []
+    for row in range(2, len(ws.rows) + 1):
+        cells = ws.rows[row - 1]
+        at = lambda c: clean_text(cells[c]) if c < len(cells) else ""
+        present = {g: [(sl, at(sl["name"]), norm_ipi(cells[sl["cae"]]) if sl["cae"] < len(cells) and cells[sl["cae"]] not in (None, "") else "")
+                       for sl in slots if at(sl["name"])] for g, slots in groups.items()}
+        if not any(present.values()):
+            continue
+        hints = index.hints([c for ps in present.values() for _, _, c in ps if c])
+        title = at(title_col) if title_col is not None else ""
+        for g, field in IPI_GROUPS.items():
+            if (row, field) in kept:
+                continue
+            for sl, name, cae in present[g]:
+                r = index.resolve(name, cae, hints)
+                if not r:
+                    continue
+                renamed, numbered = r["name"] != name, not cae and bool(r["ipi"])
+                if renamed:
+                    _put(ws, row, sl["name"], r["name"], FILLED_FILL)
+                if numbered:
+                    _put(ws, row, sl["cae"], _cae(r["ipi"]), FILLED_FILL)
+                if renamed or numbered:
+                    changes.append([row, title, f"{field} – IPI / CAE list",
+                                    (f"{name} → {r['name']}" if renamed else name) + (f" (IPI {r['ipi']} added)" if numbered else "")
+                                    + " – the member's name in the IPI / CAE list"])
+    return changes
 
 
 def lnv_update(master_path, fills, adds, repeats, source):
@@ -227,21 +290,28 @@ PICK_FIELDS = {"Title": "title", "Film / album": "movie", "Year": "release_year"
 PICK_SLOTS = {"Lyricist": "authors", "Composer": "composers", "Singer": "singers", "Publisher": "publishers"}
 
 
-def _replace_names(ws, layout, row, group, names, fill):
+def _replace_names(ws, layout, row, group, names, fill, ipis=None):
     """The names of one contributor group replaced: a slot keeps its IPI only while it holds the same person; slots
-    left over are emptied."""
+    left over are emptied. ipis (names from the IPI / CAE list): each slot gets its name's IPI as its CAE number."""
     from .dataclean import person_key
     slots = layout["slots"].get(group, [])
     for n, slot in enumerate(slots):
         old = clean_text(ws.cell(row, slot["name"] + 1).value)
         new = names[n] if n < len(names) else ""
-        if person_key(old) == person_key(new):
+        ipi = (ipis[n] if ipis and n < len(ipis) else "") or ""
+        if person_key(old) == person_key(new) and (ipis is None or old == new):
+            if ipi and not clean_text(ws.cell(row, slot["cae"] + 1).value):
+                ws.cell(row, slot["cae"] + 1).value = _cae(ipi)
+                ws.cell(row, slot["cae"] + 1).fill = fill
             continue
         cell = ws.cell(row, slot["name"] + 1)
         cell.value = new or None
         cell.fill = fill
         for k in ("cae", "joshua"):
             ws.cell(row, slot[k] + 1).value = None
+        if ipi:
+            ws.cell(row, slot["cae"] + 1).value = _cae(ipi)
+            ws.cell(row, slot["cae"] + 1).fill = fill
         if group == "singers":
             ws.cell(row, slot["role"] + 1).value = "S" if new else None
     return len(names) > len(slots)
@@ -260,7 +330,7 @@ def _picks(ws, layout, dsp):
             slots = layout["slots"].get(PICK_SLOTS[field], [])
             old = ", ".join(x for x in (clean_text(ws.cell(row, sl["name"] + 1).value) for sl in slots) if x)
             title = title_of(row)
-            more = _replace_names(ws, layout, row, PICK_SLOTS[field], values, FILLED_FILL)
+            more = _replace_names(ws, layout, row, PICK_SLOTS[field], values, FILLED_FILL, p.get("ipis") if "ipis" in p else None)
             new = ", ".join(values) + (" (not all fit the LNV's slots)" if more else "")
         else:
             col = fields.get(PICK_FIELDS.get(field))
@@ -278,7 +348,9 @@ def _picks(ws, layout, dsp):
 def _dsp_changes(ws, layout, dsp):
     """Step 1's answers on the LNV's own rows: blank fields the DSP fills (yellow – never over a value the LNV, or
     IPRS just now, has), and rows entered twice marked (orange – never deleted)."""
-    fields, changes = layout["fields"], _picks(ws, layout, dsp)
+    # the LNV's names as the IPI / CAE list has them first: a value the reviewer chose (picks) is written over them
+    fields, changes = layout["fields"], _ipi_names(ws, layout, dsp)
+    changes += _picks(ws, layout, dsp)
     title_of = lambda row: clean_text(ws.cell(row, fields["title"] + 1).value) if "title" in fields else ""
     for f in dsp.get("fills", []):
         row, field, value = f["row"], f["field"], f["value"]
@@ -286,7 +358,10 @@ def _dsp_changes(ws, layout, dsp):
             slots = layout["slots"].get(DSP_SLOTS[field], [])
             if any(clean_text(ws.cell(row, sl["name"] + 1).value) for sl in slots):
                 continue
-            if _put_names(ws, layout, row, DSP_SLOTS[field], [v.strip() for v in value.split(",") if v.strip()], FILLED_FILL):
+            names, ipis = _listed(dsp, [v.strip() for v in value.split(",") if v.strip()], _row_hints(ws, layout, row, dsp))
+            if names != [v.strip() for v in value.split(",") if v.strip()]:
+                value = ", ".join(names) + f" (the IPI / CAE list's names for {value})"
+            if _put_names(ws, layout, row, DSP_SLOTS[field], names, FILLED_FILL, ipis):
                 value += " (not all fit the LNV's slots)"
         else:
             col = fields.get(DSP_FIELDS.get(field))
@@ -301,17 +376,27 @@ def _dsp_changes(ws, layout, dsp):
     return changes
 
 
-def _write_dsp_song(ws, layout, row, song, sn, extra=None):
-    """One DSP song (or one version of it) as a new LNV row."""
+def _row_hints(ws, layout, row, dsp):
+    """The IPI / CAE list's members an LNV row names by CAE number: they decide a name two members share."""
+    from .normalize import norm_ipi
+    index = (dsp or {}).get("ipi")
+    if not index:
+        return frozenset()
+    return index.hints([norm_ipi(ws.cell(row, sl["cae"] + 1).value) for g in IPI_GROUPS for sl in layout["slots"].get(g, [])
+                        if ws.cell(row, sl["cae"] + 1).value not in (None, "")])
+
+
+def _write_dsp_song(ws, layout, row, song, sn, extra=None, dsp=None):
+    """One DSP song (or one version of it) as a new LNV row – its names as the IPI / CAE list has them."""
     fields = layout["fields"]
     values = {"sn": sn, "title": song["title"], "isrc": (song.get("isrcs") or [""])[0], "movie": song.get("album", ""),
               "release_year": (song.get("year") or "")[:4], "duration": song.get("duration", ""), "label": song.get("label", ""),
               **(extra or {})}
     for field, value in values.items():
         _put(ws, row, fields.get(field), value, ADDED_FILL)
-    _put_names(ws, layout, row, "authors", song.get("lyricists", []), ADDED_FILL)
-    _put_names(ws, layout, row, "composers", song.get("composers", []), ADDED_FILL)
-    _put_names(ws, layout, row, "singers", song.get("singers", []), ADDED_FILL)
+    for group, key in (("authors", "lyricists"), ("composers", "composers"), ("singers", "singers")):
+        names, ipis = _listed(dsp, song.get(key, []))
+        _put_names(ws, layout, row, group, names, ADDED_FILL, ipis)
 
 
 ORIGINAL_COLUMNS = {"original_work": "Original Work", "original_movie": "Original Movie / Album"}
@@ -326,6 +411,21 @@ def _original_columns(ws, layout):
             last += 1
             fields[field] = last
             _put(ws, 1, last, header, ADDED_FILL)
+
+
+REMARK_COLUMN = "Remark"
+
+
+def _remark_column(ws, why, uploaded):
+    """The LNV's last column: why a song was mapped, in the dropdown's own words. An LNV that has it already (an earlier
+    download, uploaded again) keeps it where it is – with the remarks of now."""
+    head = {c: clean_text(v.value) for c, v in enumerate(ws[1], start=1)}
+    head.update({c: clean_text(v) for (r, c), v in ws.values.items() if r == 1})
+    col = next((c for c, h in sorted(head.items()) if h == REMARK_COLUMN), None) or max([c for c, h in head.items() if h] + [0]) + 1
+    _put(ws, 1, col - 1, REMARK_COLUMN, ADDED_FILL)
+    for r, ns in why.items():
+        if ns:
+            _put(ws, r, col - 1, "; ".join(ns), ADDED_FILL if r > uploaded else FILLED_FILL)
 
 
 def _version_of(v):
@@ -564,8 +664,15 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
         if r["key"] in plan:
             changes += _write_fill_row(ws, iprs_blocks, last, plan[r["key"]])
     added = {}   # song key -> its new row, for the versions naming it
+    why = {int(r): list(ns) for r, ns in ((dsp or {}).get("remarks") or {}).items()}   # row -> its remarks
+
+    def remark(row, names):
+        for x in names or ():
+            if x not in why.setdefault(row, []):
+                why[row].append(x)
     versions = (dsp or {}).get("versions") or {}
-    if versions.get("rows") or versions.get("named") or any(s.get("origin") for s in (dsp or {}).get("adds", [])):
+    if versions.get("rows") or versions.get("named") or any(s.get("origin") for s in (dsp or {}).get("adds", [])) \
+            or any(t.get("original") for t in (dsp or {}).get("typed", [])):
         _original_columns(ws, layout)
     for song in (dsp or {}).get("adds", []):
         if "original" in song:   # the song's row holds its original only; each version gets a row of its own below
@@ -575,15 +682,17 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
         twin = next((w for w in added_works if _same_new_song(song, w)), None)
         if twin:
             added[song["key"]] = iprs_rows[twin["internal_no"]]
+            remark(added[song["key"]], song.get("remark"))
             changes.append([None, song["title"], "Not added twice", f"Also new from {dsp['source']}; added once, from IPRS work {twin['internal_no']}"])
             continue
         last += 1
         sn += 1
         added[song["key"]] = last
+        remark(last, song.get("remark"))
         g = song.get("origin")
         _write_dsp_song(ws, layout, last, song, sn,
                         {"version": "MOD", "original_work": g["title"], "original_movie": g["album"], "language": g.get("language", "")} if g
-                        else {"version": "ORI"} if "original" in song else None)
+                        else {"version": "ORI"} if "original" in song else None, dsp=dsp)
         changes.append([last, song["title"], "Added recording" if g else "Added song",
                         (f"A new recording of '{g['title']}' (row {g['row']}); " if g else "Not in the LNV; ") + f"from {dsp['source']}"
                         + (f" (ISRC {song['isrcs'][0]})" if song.get("isrcs") else "")])
@@ -599,19 +708,39 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
         o = v["original"]
         twin = next((w for w in added_works if _same_new_version(v, w)), None)
         if twin:
+            remark(iprs_rows[twin["internal_no"]], v.get("remark"))
             changes.append([None, v["title"], "Not added twice", f"Also new from {dsp['source']}; added once, from IPRS work {twin['internal_no']}"])
             continue
         last += 1
         sn += 1
+        remark(last, v.get("remark"))
         if o.get("add"):
             o = {**o, "row": added.get(o["add"])}
         _write_dsp_song(ws, layout, last, v, sn, {"version": "MOD", "language": o.get("language", ""),
-                                                  "original_work": o["title"], "original_movie": o["album"]})
+                                                  "original_work": o["title"], "original_movie": o["album"]}, dsp=dsp)
         changes.append([last, v["title"], "Added version", f"{_version_of({**v, 'original': o})}; not in the LNV; from {dsp['source']}"
                         + (f" (ISRC {v['isrcs'][0]})" if v.get("isrcs") else "")])
 
+    header = [c.value for c in ws[1]]
+    for t in (dsp or {}).get("typed", []):
+        last += 1
+        sn += 1
+        o = t.get("original")
+        if o and o.get("add"):
+            o = {**o, "row": added.get(o["add"])}
+        typed.write(ws, layout, header, last, sn, t["data"], o, _put, ADDED_FILL, _cae)
+        changes.append([last, t["data"]["title"], "Added song (typed)", "Typed by the reviewer" + (f", added to '{o['title']}'" + (f" (row {o['row']})" if o.get("row") else "") if o else "")
+                        + f" (ISRC {t['data']['isrc']})"])
+        if arrange is not None and t.get("family"):
+            arrange = {**arrange, "rows": {**(arrange.get("rows") or {}), last: t["family"]}}
+
+    for r, ns in sorted(why.items()):
+        if ns:
+            changes.append([r, clean_text(ws.cell(r, layout["fields"]["title"] + 1).value), "Remark", "; ".join(ns)])
     if arrange is not None:
         changes = _arrange(ws, layout, last, uploaded, arrange, changes, by=order)
+    if dsp:
+        _remark_column(ws, why, uploaded)
     return ws.save(changes, ["LNV row", "Title", "Change", "Detail"], (10, 45, 22, 90), log_name=log_name)
 
 
@@ -634,6 +763,7 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
     fields = layout["fields"]
     get = lambda r, f: clean_text(ws.cell(r, fields[f] + 1).value) if f in fields else ""
     joins, mains = fam.get("joins") or {}, fam.get("mains") or {}
+    moved_rows, moved_isrcs = fam.get("rows") or {}, fam.get("isrcs") or {}
 
     def key_of(title):
         k = _family(title) if title else None
@@ -643,7 +773,12 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
     rows = []
     for r in range(2, last + 1):
         title = get(r, "title")
-        rows.append({"row": r, "title": title, "key": key_of(title), "isrcs": set(_ISRC.findall(get(r, "isrc").upper())),
+        isrcs = set(_ISRC.findall(get(r, "isrc").upper()))
+        # a song the reviewer added to another sits under that song's name, whatever its title
+        key = moved_rows.get(r) or (next((moved_isrcs[i] for i in sorted(isrcs) if i in moved_isrcs), None) if r > uploaded else None)
+        while key in joins:
+            key = joins[key]
+        rows.append({"row": r, "title": title, "key": key or key_of(title), "fixed": bool(key), "isrcs": isrcs,
                      "year": (get(r, "release_year") or "")[:4]})
     # a name only the LNV's versions carry joins the shorter name it starts with ('Maula Mere Maula Anwar Flip'), as
     # step 2 does for the DSP's
@@ -653,7 +788,7 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
         base = next((b for b in reversed(names) if 8 <= len(b) < len(k) and k.startswith(b)), None)
         if base and k not in mains and xs and all(VERSION_RE.search(x["title"]) for x in xs):
             for x in xs:
-                x["key"] = base
+                x["key"] = x["key"] if x["fixed"] else base
     by_isrc = {}
     for x in rows:
         for i in x["isrcs"]:
@@ -775,9 +910,28 @@ def catalogue_workbook(client, works):
 
 
 # ---- Data clean -------------------------------------------------------------
+def list_workbook(sheets):
+    """A list of the review screen as Excel – the rows as the screen counts them, one sheet per list. Text stays text:
+    a title that starts with "=" is not a formula."""
+    wb = _new_book()
+    used = set()
+    for s in sheets:
+        name = re.sub(r"[\[\]:*?/\\]", "-", str(s["name"]))[:31] or "List"
+        while name.lower() in used:
+            name = name[:28] + f" {len(used)}"
+        used.add(name.lower())
+        ws = _sheet(wb, name, s["header"], s["rows"])
+        for line in ws.iter_rows(min_row=2):
+            for cell in line:
+                if isinstance(cell.value, str) and cell.data_type == "f":
+                    cell.data_type = "s"
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+    return _bytes(wb)
+
+
 CLEAN_CHOICES = {"duplicate": "Duplicate", "different": "Not the same", "owner": "ISRC belongs to one row",
                  "neither": "Neither row", "same": "Same", "fix": "Fix in LNV", "ok": "OK as is", "add": "Add to LNV",
-                 "not_ours": "Not our work", "accept": "Accept", "reject": "Reject", "none": "Not in LNV"}
+                 "not_ours": "Not our work", "deleted": "Deleted", "accept": "Accept", "reject": "Reject", "none": "Not in LNV"}
 CREDIT_LABELS = {"writer": "Client is a writer", "shared": "Other composers credited too", "medley": "Medley / mashup",
                  "performer": "Client not credited as writer"}
 

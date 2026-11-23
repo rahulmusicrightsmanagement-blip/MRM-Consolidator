@@ -25,4 +25,4 @@ if [ -f CHANGELOG.md ]; then
 else
   printf '# MRM changelog\n\n%s' "$entry" > CHANGELOG.md
 fi
-echo "MRM-Consolidator $new"
+echo "MRM-Consolidator $new  (write its short points for the What's new box: frontend/src/lib/whatsNew.ts)"

@@ -1,5 +1,17 @@
 # MRM changelog
 
+## 1.6.1 – 2026-11-23 (patch)
+- Not in the LNV: Map to existing ISRC / song (exact and possible matches of the Muso list and the LNV list) beside Not the client's, with a Remark dropdown saying why; the remarks are one list for every user, added and edited in the new Settings page; the LNV gets a Remark column at its end with the very words of the dropdown; a mapped song always gets its own LNV row naming the row it was mapped to, also a cover of the same name and film a medley, and while that match is not checked yet; sidebar: the icon pointed at is the one opened (its items moved up as it opened, so the click went to the item below)
+
+## 1.6.0 – 2026-11-23 (minor)
+- Rest the pointer 5 seconds on a button, mark or label for a two-line explanation; the title is changed right in the Title row (its own row is gone); every list downloads as Excel (exact matches, possible matches, left to check, checked, Not in the LNV, needs an answer, New row, Deleted songs, Only in the LNV, or all in one file); Add a song to a song – chosen from the sheet (exact, possible, not in the LNV) or typed with every LNV field; Undo section: each song's changes, undone one by one or together; counts in step: one tick moves one match from to check to checked, and one wrong LNV row can be turned down by itself; What's new box, opened once per version and from the version number
+
+## 1.5.1 – 2026-11-23 (patch)
+- Possible matches as two tables of equal columns, scrolled across by default like the exact matches: the Muso versions against the main version, then the LNV rows against the main version (Y scroll keeps the cards); a Delete song button of its own on every match, no longer inside Not a match, saying which LNV rows its matches leave; the counts are in the list dropdown only (Songs with exact and possible, Not in the LNV, New row, Deleted songs) in place of the count cards; How it adds up counts new rows and deleted songs too
+
+## 1.5.0 – 2026-11-21 (minor)
+- New IPI / CAE list section: upload the society's member list (updated with every new upload) – every singer, composer, lyricist and publisher in Muso vs LNV is looked up in it and shown under the member's PA name (RK as Ram Krishna; LNV names by their CAE number), with an IPI List choice beside LNV, Muso and Customise in each field's dropdown, and the stage 1 LNV takes the PA names; New row and Deleted songs lists beside Songs and Not in the LNV – songs sent to a new row or deleted (Delete in Songs and in Not in the LNV) map back to their exact or possible match; possible matches scroll one below another (Y) or side by side (X)
+
 ## 1.4.1 – 2026-11-20 (patch)
 - Every field's pencil and Keep button sit at the same place in each cell; only the pencil opens the box to type (ready to type, with ✓ and ✕), clicking the value no longer does
 
