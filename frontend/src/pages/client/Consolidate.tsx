@@ -132,7 +132,7 @@ export default function Consolidate() {
         <>
           {!f.lnv || !f.dsp ? <Empty>This step needs the LNV and the {src} export – <button type="button" className="rv-link-btn" onClick={() => go(1)}>add them in step 1</button>.</Empty>
             : !shown ? <Wait />
-              : <SongReview d={shown as Step1} save={(items) => save(() => api.mergeSave(clientId, items))} stage1={data.stage1} complete={complete} />}
+              : <SongReview d={shown as Step1} save={(items) => save(() => api.mergeSave(clientId, items))} act={save} stage1={data.stage1} complete={complete} />}
         </>
       )}
       {step === 3 && (
@@ -249,6 +249,7 @@ function Final({ data, clientId, go }: { data: StepsPayload; clientId: number; g
             <li><b>{n(c1.adding)}</b> new songs are added to the LNV</li>
             {c1.versions_new > 0 && <li><b>{n(c1.versions_new)}</b> versions (remix, lofi …) get rows of their own, with their original song and film in two new columns</li>}
             <li><b>{n(c1.not_ours)}</b> songs are left out – not the client's writing</li>
+            {(c1.deleted ?? 0) > 0 && <li><b>{n(c1.deleted)}</b> songs deleted by you – nothing of them goes into the LNV</li>}
             {c1.undecided > 0 && <li><b>{n(c1.undecided)}</b> new songs have no answer yet, so they are not added</li>}
           </ul> : <p className="muted">Needs the {src} export.</p>}
         </section>

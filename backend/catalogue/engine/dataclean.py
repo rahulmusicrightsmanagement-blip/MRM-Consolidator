@@ -464,7 +464,9 @@ class People:
         self.crew = set()   # names the DSP sheet lists as producers / engineers, never as an LNV writer (match())
         self.pubs = dict(rules.get("pubs", {}))          # publisher keys that are one company ("big" -> "super")
         self.groups = {person_key(g): members for g, members in GROUPS.items()}
-        self.client_keys = client_keys
+        # the client under the name an alias turns them into (a pseudonym the IPI / CAE list or the reviewer maps onto
+        # the real name) is still the client
+        self.client_keys = set(client_keys) | {self.aliases[k] for k in client_keys if k in self.aliases}
         self.client_words = {w for k in client_keys for w in k.split()}
         self._client = {}
 
@@ -681,6 +683,22 @@ def _version_rows(s, cands, lnv, by_row, answers=None):
     return used
 
 
+def _apart(rows, original, moved):
+    """A plain recording the reviewer mapped onto a song of the same name and film / album (a cover, an adaptation) is
+    not the original: it gets a row of its own, as every mapped recording does. One sharing the original's ISRC is the
+    very recording and stays with it."""
+    home = [i for i in original["rows"] if i not in moved]
+    if not home:
+        return original, []
+    isrcs = {t for i in home for t in rows[i]["isrcs"]}
+    out = OrderedDict()
+    for i in original["rows"]:
+        if i in moved and not set(rows[i]["isrcs"]) & isrcs:
+            out.setdefault(rows[i]["isrcs"][0] if rows[i]["isrcs"] else f"row{i}", []).append(i)
+    gone = {i for xs in out.values() for i in xs}
+    return _part(rows, [i for i in original["rows"] if i not in gone], original["type"]), [_part(rows, xs, REISSUE) for xs in out.values()]
+
+
 def _recordings(rows, idxs, people):
     """A song's recordings (rows sharing an ISRC), each with its own credits: an LNV row is compared with one
     recording at a time, never with the names of every version pooled."""
@@ -714,6 +732,16 @@ def _dsp_songs(rows, people, groups, lyricist_keys=frozenset(), moved=frozenset(
         if original and moved and set(original["rows"]) <= moved and any(not set(x["rows"]) <= moved for x in parts):
             # a plain recording mapped onto a song of versions only stays a recording of its own (a re-release)
             original, parts = None, parts + [{**original, "type": REISSUE}]
+        elif original and moved and set(original["rows"]) & moved:
+            original, out = _apart(rows, original, moved)
+            parts = parts + out
+        if moved:   # a mapped recording that is no version by itself (a medley) has a row of its own too
+            held = {i for x in [original, *parts] if x for i in x["rows"]}
+            left = OrderedDict()
+            for i in idxs:
+                if i in moved and i not in held:
+                    left.setdefault(rows[i]["isrcs"][0] if rows[i]["isrcs"] else f"row{i}", []).append(i)
+            parts = parts + [_part(rows, xs, MEDLEY if is_medley(rows[xs[0]]["title"]) else version_type(rows[xs[0]]["title"])) for xs in left.values()]
         isrcs = list(OrderedDict.fromkeys(t for i in idxs for t in rows[i]["isrcs"]))
         lyricists = list(OrderedDict((person_key(x), x) for i in idxs for x in rows[i]["lyricists"]).values())
         composers = list(OrderedDict((person_key(x), x) for i in idxs for x in rows[i]["composers"]).values())
@@ -1023,6 +1051,7 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
     groups: the DSP songs from step 1 (songmerge.songs); without them, only rows sharing an ISRC and writers are one."""
     aliases, links = aliases or {}, links or {}
     versions = {k[2:]: v for k, v in links.items() if k.startswith("V:")}   # the reviewer's answers on version rows
+    offs = {k[2:]: set(v["rows"]) for k, v in links.items() if k.startswith("O:")}   # LNV rows the reviewer said a song is not
     people = People(aliases, _client_keys(master["songs"], client_name), rules)
     publishers = any(r.get("publishers") for r in dsp["rows"])   # a sheet without publishers cannot be checked on them
     lnv = _lnv_songs(master, people)
@@ -1089,6 +1118,7 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
         # and checked under "already in the LNV"); and while an LNV row with the plain title is there, a remix /
         # lofi … row is not the song's own row either
         taken = _version_rows(s, cands, lnv, by_row, versions)
+        cands = [c for c in cands if c["row"] not in offs.get(s["key"], ())]
         # A song of versions only ('Toh Phir Aao - Rain Version', 'Humdard LOFI'): its main version is the song's own
         # recording – when the LNV has it, the song is in the LNV (not a new song with its one recording already there)
         if not s.get("original") and s["parts"] and s["parts"][0]["lnv_row"]:
@@ -1133,7 +1163,10 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
                     c["confirmed"] = True
                     lnv_links[by_row[c["row"]]].append((si, c))
                 tie()
-                matched.append({"song": si, "links": chosen, "confirmed": True})
+                # the rows that were on screen beside the one chosen stay there until they are answered too
+                rows = {c["row"] for c in chosen}
+                also = [known[r] for r in decided.get("also", []) if r in known and r not in rows and known[r]["rec"].get("level")]
+                matched.append({"song": si, "links": chosen, "confirmed": True, "also": also})
                 continue
         # The rule (_level): the same credits and ISRC are the same song – the app links it; the same ISRC or the
         # same credits alone may be – the reviewer decides; anything else is another song
@@ -1296,12 +1329,21 @@ def _song_brief(s):
             "recheck": s.get("recheck", [])}
 
 
-def lnv_versions(result, master_songs):
+def lnv_versions(result, master_songs, moves=None):
     """What the answers add to the LNV beside the songs themselves. A song in the LNV (or added to it) keeps its
     original on its own row; each of its versions the LNV does not have becomes a row of its own naming the original
     work and its film / album ("rows"), and LNV rows that already are one of its versions get that name too ("named").
-    A version row added for a song the LNV does not have names the song's added row ("add": the song's key)."""
+    A version row added for a song the LNV does not have names the song's added row ("add": the song's key).
+    moves (songmerge.moves): a recording the reviewer mapped onto an LNV row names that row – also while the song it
+    joined is not answered yet."""
     by_row = {s["row"]: s for s in master_songs}
+
+    def chosen(part):
+        m = next((moves[x] for x in part.get("sheet") or () if x in (moves or {})), None)
+        row = by_row.get(m.get("row")) if m and isinstance(m.get("row"), int) else None
+        # the row still holds the song it was mapped to (a newer LNV has other rows)
+        return {"title": row["title"], "album": row.get("movie", ""), "row": row["row"], "add": None, "language": row.get("language", "")} \
+            if row and title_key(row["title"]) == title_key(m.get("title") or "") else None
     choice = lambda item: (item.get("decision") or {}).get("choice")
     homes = [(m["song"], [l["row"] for l in m["links"]]) for m in result["matched"]]
     homes += [(c["song"], (c["decision"].get("data") or {}).get("rows", [])) for c in result["check"] if choice(c) == "same"]
@@ -1335,8 +1377,39 @@ def lnv_versions(result, master_songs):
             if seen & set(p["isrcs"]):
                 continue
             seen.update(p["isrcs"])
-            rows.append({**p, "lyricists": song["lyricists"], "composers": song["composers"], "original": original})
+            rows.append({**p, "lyricists": song["lyricists"], "composers": song["composers"], "original": chosen(p) or original})
+    open_ = [c["song"] for c in result["check"] if choice(c) != "same"] + [m for m in result["missing"] if choice(m) is None]
+    for song in open_:
+        for p in song.get("parts", []) if moves else ():
+            o = None if p["lnv_row"] or seen & set(p["isrcs"]) else chosen(p)
+            if o:
+                seen.update(p["isrcs"])
+                rows.append({**p, "lyricists": song["lyricists"], "composers": song["composers"], "original": o})
     return {"rows": rows, "named": named}
+
+
+def place_remarks(result, versions, adds, remarks):
+    """Each song's remark where the song lands in the LNV: {LNV row: [names]} for the rows it is linked to, and "remark"
+    on the rows it gets. remarks: {a recording's ISRC, else "#<sheet row>": name}. Returns (rows, versions, adds)."""
+    of = lambda part: list(OrderedDict.fromkeys(
+        remarks[k] for k in [*(part.get("isrcs") or ()), *(f"#{x}" for x in part.get("sheet") or ())] if k in remarks))
+    rows = {}
+
+    def put(row, names):
+        rows.setdefault(row, [])
+        rows[row] += [x for x in names if x not in rows[row]]
+    choice = lambda item: (item.get("decision") or {}).get("choice")
+    homes = [(m["song"], [l["row"] for l in m["links"]]) for m in result["matched"]]
+    homes += [(c["song"], (c["decision"].get("data") or {}).get("rows", [])) for c in result["check"] if choice(c) == "same"]
+    for song, links in homes:
+        for r in links if song.get("original") else ():
+            put(r, of(song["original"]))
+        for p in song.get("parts", []):
+            if p["lnv_row"]:
+                put(p["lnv_row"], of(p))
+    new_versions = {**versions, "rows": [{**v, "remark": of(v)} for v in versions.get("rows", [])]}
+    new_adds = [{**m, "remark": of(m["original"])} if m.get("original") else m for m in adds]
+    return {r: ns for r, ns in rows.items() if ns}, new_versions, new_adds
 
 
 TITLE_MODES = {"main": "the main version's title", "muso": "the DSP title", "lnv": "the LNV title", "custom": "a title typed by the reviewer"}
@@ -1663,7 +1736,7 @@ def _report(lnv, songs, matched, check, unmatched, lnv_links, people, dsp, name_
                     "flagged": any(x["flags"] for x in c["candidates"])} for c in check]
     check_items.sort(key=lambda c: (not c["flagged"], -c["candidates"][0]["points"], -c["song"]["popularity"]))
     matched_items = [{"key": "link:" + songs[m["song"]]["key"], "song": song(m["song"]), "confirmed": m["confirmed"],
-                      "links": [with_lnv(x) for x in m["links"]], "auto": next((x["auto"] for x in m["links"] if x.get("auto")), None),
+                      "links": [with_lnv(x) for x in m["links"]], "also": [with_lnv(x) for x in m.get("also", [])], "auto": next((x["auto"] for x in m["links"] if x.get("auto")), None),
                       "notes": [f for x in m["links"] for f in x.get("notes", [])],
                       "unchecked": not m["confirmed"] and any(x.get("unchecked") for x in m["links"])} for m in matched]
     matched_items.sort(key=lambda m: -m["song"]["popularity"])
@@ -1740,6 +1813,10 @@ def learned(decisions):
         elif key.startswith(("link:", "version:")) and d["choice"] in ("same", "none"):
             rows = [int(r) for r in (d.get("data") or {}).get("rows", [])]
             links[key[5:] if key.startswith("link:") else "V:" + key] = {"choice": d["choice"], "rows": rows}
+            if key.startswith("link:") and (d.get("data") or {}).get("also"):
+                links[key[5:]]["also"] = [int(r) for r in d["data"]["also"]]
+        elif key.startswith("off:") and d["choice"] == "rows":
+            links["O:" + key[4:]] = {"choice": "off", "rows": sorted(int(r) for r in (d.get("data") or {}).get("rows", []))}
     for k in list(parent):
         aliases[k] = find(k)
     return aliases, links

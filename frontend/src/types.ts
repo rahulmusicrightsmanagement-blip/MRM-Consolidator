@@ -456,7 +456,7 @@ export interface User {
 
 /* ---------- data clean (step 1: today's LNV against one DSP sheet) ---------- */
 
-export type CleanChoice = 'ignore' | 'keep' | 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none' | 'accepted' | 'rejected' | 'pending' | 'set' | 'muso' | 'join' | 'main' | 'lnv' | 'custom'
+export type CleanChoice = 'ignore' | 'keep' | 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none' | 'accepted' | 'rejected' | 'pending' | 'set' | 'muso' | 'join' | 'main' | 'lnv' | 'custom' | 'deleted' | 'ipi' | 'rows' | 'typed'
 export interface CleanDecisionT { choice: CleanChoice; data?: { keep?: number | string; row?: number; rows?: number[] }; auto?: boolean; why?: string }
 export type CreditKind = 'writer' | 'shared' | 'medley' | 'performer'
 
@@ -515,6 +515,11 @@ export interface SongRecord {
 export type CaseKind = 'names' | 'versions' | 'isrc' | 'check' | 'missing' | 'left_out' | 'twice'
 export interface CaseRecord extends SongRecord {
   id?: number; sheet_rows?: number[]; in?: boolean
+  /** The names as the IPI / CAE list has them (the member's PA name for a pseudonym or another spelling), per field –
+   *  only where they differ from what the file wrote – with each name's IPI */
+  ipi?: Record<string, { names: string[]; ids: string[] }>
+  /** An LNV record's CAE numbers, beside its names */
+  cae?: Record<string, string[]>
   /** Where this DSP recording goes in the LNV: the song's own row (original), or a version's row – lnv_row when the LNV has it */
   part?: 'original' | 'version'; lnv_row?: number | null
   /** Mapped by the reviewer onto this (exactly matched) song: the song it came from, and the LNV row it joined */
@@ -534,11 +539,13 @@ export interface CaseRecord extends SongRecord {
   } | null
 }
 export interface CaseAnswer {
-  /** Song cases: the DSP song's key; choice same (rows) · add · not_ours */
+  /** Song cases: the DSP song's key; choice same (rows) · add · not_ours · deleted (the reviewer deleted the song) */
   song?: string
   /** LNV-twice cases: the decision key; choice duplicate/owner (keep) · different/neither */
   key?: string
   choice: string | null; rows?: number[]; keep?: number | null; by: 'app' | 'you' | null; why?: string
+  /** the other LNV rows that were on screen when it was linked: still shown, still to check */
+  also?: number[]
   /** saved earlier as a new song, but an LNV row now passes the same-song rule: asked again so it is not added twice */
   recheck?: boolean
 }
@@ -549,6 +556,12 @@ export interface ReviewCase {
   /** step 1's merge items this song is made of: each one's recordings (ids) and answer */
   merge: { key: string; status: 'pending' | 'accepted' | 'rejected'; by: 'app' | 'you'; items: { key: string; ids: number[]; status: string }[] } | null
   muso: CaseRecord[]; lnv: CaseRecord[]; answer: CaseAnswer; done: boolean
+  /** Sent out of its match by the reviewer (a new row, deleted): the LNV rows it was matched to – to map it back */
+  was?: CaseRecord[]
+  /** LNV rows the reviewer said this song is not */
+  off?: number[]
+  /** Added by the reviewer to another song: it sits under that song's name (to: that song's key) */
+  joined?: { to: string; title: string; from: string; was?: string | null }
   /** Linked surely by the app, never asked: listed only under the match tabs */
   auto?: boolean
   /** Song cases: the LNV row an added song becomes */
@@ -574,7 +587,15 @@ export interface Step1 {
     versions_new: number; versions_named: number
     /** values taken from the DSP over the LNV's own */
     picks: number
+    /** songs the reviewer deleted · typed */
+    deleted?: number; typed?: number
   }
+  /** why a song is mapped: a recording (its ISRC, else "#" and its sheet row) -> its remark · the dropdown's choices */
+  remarks?: Record<string, { id: number | null; name: string }>; remark_list?: RemarkChoice[]
+  /** Songs the reviewer typed ("Add a song"): each a new LNV row under the song it was added to */
+  typed?: TypedSong[]
+  /** The IPI / CAE list the names were looked up in (none uploaded: absent) */
+  ipi?: { version: number; members: number }
   /** "pick:<row>:<field>" -> the DSP value the reviewer chose over the LNV's */
   picks: Record<string, string | string[]>
   /** recording id -> the title the reviewer chose for it in the LNV: main · muso · lnv · custom */
@@ -603,3 +624,36 @@ export interface StepsPayload {
   counts: { '1': Step1['counts'] | null; '3': Step3['counts'] | null }
   step: Step1 | Step3 | null
 }
+
+/* ---------- the IPI / CAE list ---------- */
+
+export interface IpiUploadT { id: number; name: string; kind: 'upload' | 'replace' | 'clear'; by: string; at: string
+  stats: { names?: number; members?: number; added?: number; updated?: number; unchanged?: number; removed?: number; kept?: number; total?: number } }
+export interface IpiNameT { name: string; type: string; ipi: string; role: string; internal_no: string; new: boolean; updated: boolean }
+export interface IpiMemberT { member: string; name: string; ipi: string; role: string; names: IpiNameT[]; new: boolean; updated: boolean }
+export interface IpiPayload {
+  summary: { version: number; names: number; members: number; types: Record<string, number>; latest: IpiUploadT | null; uploads: IpiUploadT[] }
+  members: IpiMemberT[]; total: number; page: number; pages: number; q: string; show: string
+  upload?: IpiUploadT
+}
+
+/* ---------- songs typed by the reviewer, and the change log ---------- */
+
+export interface TypedPerson { name: string; ipi: string; joshua?: string; perf?: number | string; mech?: number | string }
+export interface TypedData {
+  title: string; album: string; isrc: string; links: string[]; to: string; to_title: string
+  people: Record<'composers' | 'authors' | 'singers' | 'publishers', TypedPerson[]>; more: Record<string, string>
+}
+export interface TypedSong { key: string; data: TypedData; record: CaseRecord; family: string | null; to: string; to_title: string; rows: number[]; add: string | null }
+export interface SongForm { more: { key: string; label: string }[]; slots: Record<string, number> }
+export interface ChangeT {
+  id: number; songs: { key: string; title: string }[]; lines: string[]; by: string; at: string; closed: boolean
+  undone_at: string | null; undone_by: string
+  /** later changes on the same decisions: undone with it */
+  with: number[]
+}
+
+/* ---------- remarks (Settings) ---------- */
+
+export interface RemarkChoice { id: number; name: string; help: string }
+export interface RemarkT extends RemarkChoice { active: boolean; by: string; at: string }

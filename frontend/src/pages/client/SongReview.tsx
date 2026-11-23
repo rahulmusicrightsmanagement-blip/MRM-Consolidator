@@ -1,21 +1,31 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, ListMusic, Search, Undo2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, Download, Link2, ListMusic, Plus, Search, Trash2, Undo2, X } from 'lucide-react'
 import { ConfirmDialog, Dropdown, Guide, LockToggle } from '../../components/ui'
 import { useFlag, usePeek } from '../../lib/peek'
 import type { CleanDecisionIn } from '../../lib/api'
 import { useClient } from '../../lib/client'
 import { useToast } from '../../lib/toast'
-import type { CaseKind, CaseRecord, ReviewCase, Stage1Done, Step1, TitleMode } from '../../types'
+import { api } from '../../lib/api'
+import type { CaseKind, CaseRecord, ReviewCase, Stage1Done, Step1, TitleMode, TypedSong } from '../../types'
 import { list, n, norm } from './Block'
 import { Act, Block, Compare, Kbd, Legend, LnvCard, LnvRowDetails, MainCard, MapDialog, Part, SHOW, TitleSection, VersionDetails, VersionList,
   differs, targetsOf, useKeys, useStored, value } from './CaseParts'
 import type { Col, Spot, Target, TitleLine } from './CaseParts'
-import { FamilyView, NO_PENDING, SaveBar, familiesOf, inFamilies, openOf, pendingCount, pendingItems, songTargets, stripSaved, toCheck } from './Families'
+import { logContext, songRef, withLog } from './changeLog'
+import { FamilyView, NO_PENDING, SaveBar, TypedCard, checkedIn, familiesOf, inFamilies, openOf, pendingCount, pendingItems, stripSaved, toCheck } from './Families'
 import type { Family, Pending } from './Families'
-import { PICK_SHOWN, draftOf, itemsOf, keyOf, matchOf, pickKey, ready } from './reviewModel'
+import { PICK_SHOWN, draftOf, isDeleted, isNewRow, itemsOf, keyOf, matchOf, pickKey, ready } from './reviewModel'
 import type { Choice, Draft } from './reviewModel'
 import { CompleteBar, Stage1Download } from './LnvStages'
+import { EACH, LIST_NAMES, listCount, sheetsOf } from './lists'
+import type { ListId, Lists } from './lists'
+import { MapTo, RemarkPick } from './MapTo'
+import { remarkItems, remarkOf } from './remarkModel'
+import { UndoView } from './UndoView'
+import { AddSong } from './AddSong'
+import { saveBlob } from '../../lib/files'
 
 export { useStored }
 
@@ -39,7 +49,7 @@ function verdict(c: ReviewCase, d: Draft) {
   if (c.kind === 'names') return d.choice === 'same' ? 'Same person' : d.choice === 'different' ? 'Two people' : 'Needs you'
   if (c.kind === 'twice') return d.choice === 'different' ? 'Different songs' : d.rows.length ? `Keep row ${d.rows[0]}` : 'Needs you'
   if (d.choice === 'same') return `Row ${d.rows.join(', ')}`
-  return d.choice === 'add' ? 'Add to LNV' : d.choice === 'not_ours' ? 'Skip' : 'Needs you'
+  return d.choice === 'add' ? 'Add to LNV' : d.choice === 'not_ours' ? 'Skip' : d.choice === 'deleted' ? 'Deleted' : 'Needs you'
 }
 
 /** What a saved answer puts into the LNV sheet, in one line – for the Saved tab. */
@@ -56,18 +66,24 @@ function effect(c: ReviewCase, d: Draft, source: string) {
     return `Linked to LNV row ${d.rows.join(' + ')}${fills ? ` · ${fills} blank${fills > 1 ? 's' : ''} filled from ${source}` : ''}${picks ? ` · ${picks} value${picks > 1 ? 's' : ''} changed (${source}'s or typed)` : ''}${more}`
   }
   if (d.choice === 'add') return (c.origin ? `New LNV row naming row ${c.origin.row} “${value(c.origin.fields.Title)}” as its original` : 'New LNV row') + more
+  if (d.choice === 'deleted') return 'Deleted – nothing of it goes into the LNV' + (c.was?.length ? ` (it was matched to LNV row ${c.was.map((r) => r.row).join(', ')})` : '')
   return d.choice === 'not_ours' ? "Not added – not the client's song" : ''
 }
 
-type Section = 'songs' | 'new'
+/** The lists of step 2: the LNV match by song name (Songs), the songs no LNV row matches (Not in the LNV), the songs
+ *  the reviewer sent to a new row (New row) and the songs they deleted (Deleted songs) – the last two map back. */
+type Section = 'songs' | 'new' | 'newrow' | 'deleted'
+const SECTION: Record<Section, string> = { songs: 'Songs', new: 'Not in the LNV', newrow: 'New row', deleted: 'Deleted songs' }
 type Sort = 'az' | 'za' | 'most' | 'exact' | 'possible' | 'todo'
 const SORTS: [Sort, string][] = [['az', 'A → Z'], ['za', 'Z → A'], ['most', 'Most matches first'], ['exact', 'Most exact matches first'],
   ['possible', 'Most possible matches first'], ['todo', 'Most left to check first']]
 /** One line of the list: a song name with every song it holds (f), one song or question (c), or the LNV-only songs. */
-type Item = { id: string; f?: Family; c?: ReviewCase; lnvOnly?: boolean }
+type Item = { id: string; f?: Family; c?: ReviewCase; t?: TypedSong; lnvOnly?: boolean }
 
-export default function SongReview({ d, save, stage1, complete }: {
+export default function SongReview({ d, save: rawSave, act, stage1, complete }: {
   d: Step1; save: (items: CleanDecisionIn[]) => Promise<boolean>
+  /** a save of another kind (a typed song, an undo), then the step loaded again */
+  act: (work: () => Promise<unknown>) => Promise<boolean>
   /** step 2 marked completed (its LNV is the stage 2 LNV) – and marking it so, or opening it again */
   stage1: Stage1Done | null; complete: (done: boolean) => Promise<boolean>
 }) {
@@ -87,6 +103,15 @@ export default function SongReview({ d, save, stage1, complete }: {
   const [selectedId, setSelectedId] = useState<string | null>(() => { try { return localStorage.getItem(placeKey) } catch { return null } })
   const pickSection = (s: Section) => { setView('review'); setSection(s); setSelectedId(null) }
 
+  const families = useMemo(() => familiesOf(d.cases, d.typed), [d])
+  const familyOf = useMemo(() => new Map(families.flatMap((f) => f.cases.map((c) => [c.id, f] as const))), [families])
+  // every save says what it did, in plain words, for the Undo section
+  const ctx = useMemo(() => logContext(d, familyOf), [d, familyOf])
+  const ctxRef = useRef(ctx)
+  ctxRef.current = ctx
+  const rawRef = useRef(rawSave)
+  rawRef.current = rawSave
+  const save = useCallback((items: CleanDecisionIn[]) => rawRef.current(withLog(items, ctxRef.current)), [])
   // ---- the queue: ticks, values and titles save themselves a moment after the last change, or at once with Save
   const [pending, setPending] = useState<Pending>(NO_PENDING)
   const [flushing, setFlushing] = useState(false)
@@ -120,14 +145,13 @@ export default function SongReview({ d, save, stage1, complete }: {
     }
   }, [])
 
-  const families = useMemo(() => familiesOf(d.cases), [d])
-  const familyOf = useMemo(() => new Map(families.flatMap((f) => f.cases.map((c) => [c.id, f] as const))), [families])
-  const loose = useMemo(() => d.cases.filter((c) => c.kind !== 'names' && c.kind !== 'twice' && !inFamilies(c)), [d])
+  const typed = useMemo(() => d.typed ?? [], [d])
+  const loose = useMemo(() => d.cases.filter((c) => c.kind !== 'names' && c.kind !== 'twice' && !inFamilies(c) && !isNewRow(c) && !isDeleted(c)), [d])
+  const newRows = useMemo(() => d.cases.filter(isNewRow), [d])
+  const deleted = useMemo(() => d.cases.filter(isDeleted), [d])
   const others = useMemo(() => d.cases.filter((c) => c.kind === 'names' || c.kind === 'twice'), [d])
   // the songs the app matched exactly: what a recording can be mapped onto
   const targets = useMemo(() => targetsOf(d.cases, (c) => matchOf(c) === 'exact'), [d])
-  // every exact and possible match in Songs: what a "Not in the LNV" song can be mapped onto
-  const mapTargets = useMemo(() => songTargets(families), [families])
 
   // answered here, before the next load shows it – by song (keyOf), since an answer can move a song to another case
   const [done, setDone] = useState<Record<string, boolean>>({})
@@ -139,8 +163,12 @@ export default function SongReview({ d, save, stage1, complete }: {
   }, [d])
   const isDone = (c: ReviewCase) => done[keyOf(c)] ?? c.done
   // the Saved tab: every answer the reviewer gave, newest first – this session's at once, before the reload
-  const [view, setView] = useState<'review' | 'saved'>('review')
+  const [view, setView] = useState<'review' | 'saved' | 'undo'>('review')
   const showSaved = () => { void commit(); setView('saved') }
+  // the Undo section, at the song it was opened from
+  const [undoSong, setUndoSong] = useState<string | null>(null)
+  const showUndo = (song: string | null) => { void commit(); setUndoSong(song); setView('undo') }
+  const [editing, setEditing] = useState<TypedSong | null>(null)   // a typed song being corrected from New row
   const [savedAt, setSavedAt] = useState<Record<string, { draft: Draft; at: number }>>({})
   const saved = useMemo(() => d.cases
     .filter((c) => keyOf(c) in savedAt || isDone(c))
@@ -170,14 +198,19 @@ export default function SongReview({ d, save, stage1, complete }: {
       const os = others.filter((c) => (!s || hit(c)) && keep(c.id, !isDone(c))).sort((a, b) => byTitle(a.title, b.title))
       return [...fs.map((f): Item => ({ id: f.id, f })), ...os.map((c): Item => ({ id: c.id, c }))]
     }
+    if (section === 'newrow' || section === 'deleted') {   // answered, every one: nothing is left to check there
+      const cs = (section === 'newrow' ? newRows : deleted).filter((c) => !s || hit(c)).sort((a, b) => byTitle(a.title, b.title)).map((c): Item => ({ id: c.id, c }))
+      const ts = section === 'newrow' ? typed.filter((t) => !s || norm(Object.values(t.record.fields).flat().join(' ')).includes(s)) : []
+      return [...cs, ...ts.sort((a, b) => byTitle(a.data.title, b.data.title)).map((t): Item => ({ id: t.key, t }))]
+    }
     const cs = loose.filter((c) => (!s || hit(c)) && keep(c.id, !isDone(c))).sort((a, b) => byTitle(a.title, b.title))
     return [...cs.map((c): Item => ({ id: c.id, c })), ...(!s && show === 'all' && d.lnv_only.length ? [{ id: 'lnv_only', lnvOnly: true }] : [])]
-  }, [d, q, section, show, sort, selectedId, done, pending, families, loose, others])   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [d, q, section, show, sort, selectedId, done, pending, families, loose, others, newRows, deleted, typed])   // eslint-disable-line react-hooks/exhaustive-deps
 
   const sel = shown.find((x) => x.id === selectedId) ?? shown[0] ?? null
   const at = sel ? shown.indexOf(sel) : -1
   const go = (delta: number) => { const x = shown[at + delta]; if (x) setSelectedId(x.id) }
-  const open = (x: Item) => !x.lnvOnly && (x.f ? left(x.f) > 0 : !isDone(x.c!))
+  const open = (x: Item) => !x.lnvOnly && !x.t && (x.f ? left(x.f) > 0 : !isDone(x.c!))
   const next = (from: ReviewCase) => {
     const after = shown.slice(at + 1).concat(shown.slice(0, at))
     const x = after.find((y) => y.c?.id !== from.id && open(y))
@@ -217,7 +250,7 @@ export default function SongReview({ d, save, stage1, complete }: {
   const openCase = (c: ReviewCase) => {
     const f = familyOf.get(c.id)
     setView('review'); setQ(''); setShow('all')
-    setSection(f || c.kind === 'names' || c.kind === 'twice' ? 'songs' : 'new')
+    setSection(f || c.kind === 'names' || c.kind === 'twice' ? 'songs' : isDeleted(c) ? 'deleted' : isNewRow(c) ? 'newrow' : 'new')
     setSelectedId(f ? f.id : c.id)
   }
   // the song list: closes by itself to a slim strip (it opens while the pointer is on it) – or locked open beside the song
@@ -230,6 +263,35 @@ export default function SongReview({ d, save, stage1, complete }: {
   useKeys({ w: lockList, '/': () => { if (!listLock) listPeek.set(true); searchRef.current?.focus() }, '?': () => setHelp((h) => !h) })
   const lockBtn = <LockToggle className="sm-nav wide-btn" locked={listLock} what="song list" toggle={lockList} label={<span>{listLock ? 'List locked' : 'Lock list'}</span>} />
   const sorts = section === 'songs' ? SORTS : SORTS.slice(0, 2)
+  // the step's numbers: exact and possible matches (one per LNV row, and how many are not ticked yet), songs to answer
+  const tot = families.reduce((a, f) => {
+    const o = openOf(pending, f)
+    return { ...a, exact: a.exact + f.exact.length, possible: a.possible + f.possible.length, exactLeft: a.exactLeft + o.exact, possibleLeft: a.possibleLeft + o.possible, checked: a.checked + checkedIn(pending, f) }
+  }, { exact: 0, possible: 0, exactLeft: 0, possibleLeft: 0, checked: 0, newLeft: loose.filter((c) => !isDone(c)).length })
+  const sizeOf: Record<Section, number> = { songs: families.length, new: loose.length, newrow: newRows.length + typed.length, deleted: deleted.length }
+  const matchCounts = (
+    <span className="ls-sub"><i className="exact">Exact match {n(tot.exact)}{tot.exactLeft ? ` (${n(tot.exactLeft)} to check)` : ''}</i>
+      <i className="possible">Possible match {n(tot.possible)}{tot.possibleLeft ? ` (${n(tot.possibleLeft)} to check)` : ''}</i>
+      <i className="checked">Checked {n(tot.checked)}</i></span>
+  )
+  // the lists as Excel: the rows the counts count, with the answers waiting saved first
+  const lists: Lists = { families, loose, newRows, deleted, isDone, d, p: pending }
+  const [preparing, setPreparing] = useState<ListId | null>(null)
+  const listFile = async (id: ListId) => {
+    setPreparing(id)
+    try {
+      if (!(await commit())) throw new Error('The latest changes could not be saved – try again.')
+      const file = await api.listFile(clientId, LIST_NAMES[id], sheetsOf(lists, id))
+      saveBlob(file.blob, file.name)
+      toast(`${file.name} downloaded`, 'good')
+    } catch (e) { toast((e as Error).message, 'bad') } finally { setPreparing(null) }
+  }
+  // "Which songs": how many each choice lists in the open list
+  const showCount = (k: 'all' | 'todo' | 'done') => {
+    const open = section === 'songs' ? families.filter((f) => left(f) > 0).length + others.filter((c) => !isDone(c)).length : loose.filter((c) => !isDone(c)).length
+    const all = section === 'songs' ? families.length + others.length : loose.length
+    return k === 'all' ? all : k === 'todo' ? open : all - open
+  }
   const sortShown = sorts.some(([id]) => id === sort) ? sort : 'az'
 
   return (
@@ -241,6 +303,7 @@ export default function SongReview({ d, save, stage1, complete }: {
         <button type="button" className={view === 'review' ? 'on' : ''} onClick={() => setView('review')}>Review songs<span>{n(d.cases.filter((c) => !c.auto && !isDone(c)).length)} open</span></button>
         <button type="button" className={`rv-view-saved ${view === 'saved' ? 'on' : ''}`} onClick={showSaved} title="Every saved answer and what it puts into the LNV">
           <Check size={14} />Saved to the LNV<span key={saved.length} className="rv-bump">{n(saved.length)}</span></button>
+        <button type="button" className={`rv-view-undo ${view === 'undo' ? 'on' : ''}`} onClick={() => showUndo(null)} title="Every change, song by song – undo any of them"><Undo2 size={14} />Undo</button>
         <SaveBar count={count} busy={flushing} flush={() => { void commit() }} />
         <Steps steps={[
           { label: progress.needs ? `Answer ${n(progress.needs)} song${progress.needs > 1 ? 's' : ''}` : 'Every doubt answered', left: progress.needs,
@@ -251,30 +314,26 @@ export default function SongReview({ d, save, stage1, complete }: {
         ]} />
       </div>
 
-      {/* how many matches the whole step holds: exact and possible (one per LNV row) and the songs not in the LNV */}
-      {view === 'review' && (() => {
-        const t = families.reduce((a, f) => {
-          const o = openOf(pending, f)
-          return { exact: a.exact + f.exact.length, possible: a.possible + f.possible.length, exactLeft: a.exactLeft + o.exact, possibleLeft: a.possibleLeft + o.possible }
-        }, { exact: 0, possible: 0, exactLeft: 0, possibleLeft: 0 })
-        const newLeft = loose.filter((c) => !isDone(c)).length
-        const by = (s: Sort) => { pickSection('songs'); setSort(s) }
-        return (
-          <div className="rv-totals" aria-label="Matches in this step">
-            <button type="button" className="rv-total exact" onClick={() => by('exact')} title="Show the songs with the most exact matches first">
-              <span className="rv-total-label">Exact match</span><b>{n(t.exact)}</b>
-              <small>{t.exactLeft ? `${n(t.exactLeft)} to check` : 'all checked'}</small></button>
-            <button type="button" className="rv-total possible" onClick={() => by('possible')} title="Show the songs with the most possible matches first">
-              <span className="rv-total-label">Possible match</span><b>{n(t.possible)}</b>
-              <small>{t.possibleLeft ? `${n(t.possibleLeft)} to check` : 'all checked'}</small></button>
-            <button type="button" className="rv-total new" onClick={() => pickSection('new')} title={`${d.source} songs no LNV row matches`}>
-              <span className="rv-total-label">Not in the LNV</span><b>{n(loose.length)}</b>
-              <small>{newLeft ? `${n(newLeft)} need an answer` : 'all answered'}</small></button>
-            <span className="rv-total-note muted">One match is one LNV row; <b>{n(families.length)}</b> song names in Songs.
-              <button type="button" className="rv-text-btn rv-sum-btn" onClick={() => setSumOpen(!sumOpen)} aria-expanded={sumOpen}>{sumOpen ? 'Hide how it adds up' : 'How it adds up'}</button></span>
-          </div>
-        )
-      })()}
+      {/* the four lists in one dropdown, the only place that gives their counts: exact and possible matches (one per LNV
+          row), Not in the LNV, New row, Deleted songs – on screen whether the song list is open or not */}
+      {view === 'review' && (
+        <div className="rv-lists">
+          <Dropdown className="rv-list-dd" label="Which list" value={section} onChange={pickSection} menuWidth={400}
+            shown={<span className="ls-shown"><b>{SECTION[section]}</b><span className="ls-n">{n(sizeOf[section])}</span>{section === 'songs' && matchCounts}</span>}
+            options={[
+              { value: 'songs', label: <ListOpt name="Songs" count={sizeOf.songs} />, hint: matchCounts },
+              { value: 'new', label: <ListOpt name="Not in the LNV" count={sizeOf.new} />, hint: tot.newLeft ? `${n(tot.newLeft)} need an answer` : 'All answered' },
+              { value: 'newrow', label: <ListOpt name="New row" count={sizeOf.newrow} />, hint: 'Sent to a new row – each maps back to its match', sep: true },
+              { value: 'deleted', label: <ListOpt name="Deleted songs" count={sizeOf.deleted} />, hint: 'Nothing of them goes into the LNV – each maps back' },
+            ]} />
+          <Dropdown<ListId> className="rv-dl" label="Download a list as Excel" value={'' as ListId} onChange={(id) => void listFile(id)} menuWidth={340}
+            shown={preparing ? <><span className="spinner small-dark" />Preparing…</> : <><Download size={15} />Download Excel</>}
+            options={[...EACH.map((id) => ({ value: id as ListId, label: <ListOpt name={LIST_NAMES[id]} count={listCount(lists, id)} />, disabled: !listCount(lists, id) || !!preparing })),
+              { value: 'all', label: LIST_NAMES.all, hint: 'One file, each list on a sheet of its own', sep: true, disabled: !!preparing }]} />
+          <span className="rv-total-note muted">One match is one LNV row.
+            <button type="button" className="rv-text-btn rv-sum-btn" onClick={() => setSumOpen(!sumOpen)} aria-expanded={sumOpen}>{sumOpen ? 'Hide how it adds up' : 'How it adds up'}</button></span>
+        </div>
+      )}
 
       {view === 'review' && d.wins.length > 0 && <Wins wins={d.wins} source={d.source} save={save} />}
 
@@ -283,40 +342,36 @@ export default function SongReview({ d, save, stage1, complete }: {
         const matched = families.reduce((t, f) => t + f.cases.length, 0)
         return (
           <p className="rv-sum">
-            <b>How it adds up:</b> {d.source} has <b>{n(matched + loose.length)} songs</b> – <b>{n(matched)}</b> match an LNV row and sit under <b>{n(families.length)} song
-            names</b> in Songs, <b>{n(loose.length)}</b> match none (Not in the LNV); <b>{n(d.counts.needs)}</b> still need your answer, “to check” counts the matches
+            <b>How it adds up:</b> {d.source} has <b>{n(matched + loose.length + newRows.length + deleted.length)} songs</b> – <b>{n(matched)}</b> match an LNV row and sit under <b>{n(families.length)} song
+            names</b> in Songs, <b>{n(loose.length)}</b> match none (Not in the LNV){newRows.length > 0 && <>, <b>{n(newRows.length)}</b> sent to a new row</>}{deleted.length > 0 && <>, <b>{n(deleted.length)}</b> deleted</>}{typed.length > 0 && <> (and <b>{n(typed.length)}</b> typed by you)</>}; <b>{n(d.counts.needs)}</b> still need your answer, “to check” counts the matches
             not ticked yet, and Other questions ({n(others.length)}) are name spellings and LNV rows entered twice.
           </p>
         )
       })()}
 
-      {view === 'saved' ? <SavedView saved={saved} d={d} open={openCase} undo={(c) => answer(c, null, false)} flush={() => commit()} /> :
+      {view === 'undo' ? <UndoView key={undoSong ?? ''} song={undoSong} flush={() => commit()} act={act} version={d} /> : view === 'saved' ? <SavedView saved={saved} d={d} open={openCase} undo={(c) => answer(c, null, false)} flush={() => commit()} /> :
       <div className={`sm-review ${listLock ? 'locked' : 'auto'} ${!listLock && listPeek.open ? 'peek' : ''}`}>
         <div className="sm-dock" {...(listLock ? {} : listPeek.handlers)}>
         {!listLock && (
           <button type="button" className="sm-rail" onClick={listPeek.toggle} aria-expanded={listPeek.open}
             title="The song list – point at it to open it; lock it to keep it open (W)">
-            <ListMusic size={17} /><span className="sm-rail-text">{section === 'songs' ? 'Songs' : 'Not in the LNV'}</span><b>{n(shown.length)}</b>
+            <ListMusic size={17} /><span className="sm-rail-text">{SECTION[section]}</span><b>{n(shown.length)}</b>
           </button>
         )}
         <div className="sm-list">
           <div className="sm-list-head">
             <div className="sm-list-top">
               <label className="cs-search sm-search"><Search size={15} /><input ref={searchRef} value={q} onChange={(e) => setQ(e.target.value)}
-                placeholder={section === 'songs' ? 'Search in Songs: song, writer, ISRC, LNV row…' : 'Search in Not in the LNV…'} /></label>
+                placeholder={section === 'songs' ? 'Search in Songs: song, writer, ISRC, LNV row…' : `Search in ${SECTION[section]}…`} /></label>
               <LockToggle className="icon-btn" locked={listLock} what="song list" toggle={lockList} />
             </div>
             {help && <div className="rv-keys"><span><Kbd>↑</Kbd><Kbd>↓</Kbd> move</span><span><Kbd>Enter</Kbd> accept</span><span><Kbd>S</Kbd> same</span><span><Kbd>N</Kbd> add</span><span><Kbd>X</Kbd> not the client's</span><span><Kbd>M</Kbd> map to a song</span><span><Kbd>U</Kbd> undo</span><span><Kbd>/</Kbd> search</span><span><Kbd>W</Kbd> lock the list</span></div>}
-            <div className="rv-tabs rv-match">
-              <button type="button" className={section === 'songs' ? 'on' : ''} onClick={() => pickSection('songs')} title="Songs the LNV has – exact and possible matches, by song name">Songs<span>{n(families.length)}</span></button>
-              <button type="button" className={section === 'new' ? 'on' : ''} onClick={() => pickSection('new')} title={`${d.source} songs no LNV row matches`}>Not in the LNV<span>{n(loose.length)}</span></button>
-            </div>
             <div className="rv-list-tools">
-              <Dropdown className="rv-dd" label="Which songs" value={show} onChange={(v) => { setShow(v); setSelectedId(null) }} options={[
-                { value: 'all', label: 'Show all', hint: section === 'songs' ? 'Every song name' : 'Every song not in the LNV' },
-                { value: 'todo', label: section === 'songs' ? 'Left to check' : 'Needs an answer', hint: section === 'songs' ? 'A match not ticked yet' : 'No answer saved yet' },
-                { value: 'done', label: section === 'songs' ? 'All checked' : 'Done', hint: section === 'songs' ? 'Every match ticked' : 'Answered' },
-              ]} />
+              {(section === 'songs' || section === 'new') && <Dropdown className="rv-dd" label="Which songs" value={show} onChange={(v) => { setShow(v); setSelectedId(null) }} options={[
+                { value: 'all', label: <ListOpt name="Show all" count={showCount('all')} />, hint: section === 'songs' ? 'Every song name' : 'Every song not in the LNV' },
+                { value: 'todo', label: <ListOpt name={section === 'songs' ? 'Left to check' : 'Needs an answer'} count={showCount('todo')} />, hint: section === 'songs' ? 'A match not ticked yet' : 'No answer saved yet' },
+                { value: 'done', label: <ListOpt name={section === 'songs' ? 'All checked' : 'Done'} count={showCount('done')} />, hint: section === 'songs' ? 'Every match ticked' : 'Answered' },
+              ]} />}
               <Dropdown className="rv-dd" label="Order" value={sortShown} onChange={setSort} options={sorts.map(([id, label]) => ({ value: id, label }))} />
               {section === 'new' && confirmable > 0 && (
                 <button type="button" className="btn sm" onClick={() => setAsking(true)} title="Accept the app's answer on every song shown that has one">
@@ -325,9 +380,11 @@ export default function SongReview({ d, save, stage1, complete }: {
             </div>
           </div>
           <div className="sm-list-items">
-            {!shown.length ? <p className="sm-list-none">{q ? <>Nothing matches in {section === 'songs' ? 'Songs' : 'Not in the LNV'}.<br />
+            {!shown.length ? <p className="sm-list-none">{q ? <>Nothing matches in {SECTION[section]}.<br />
               <button type="button" className="btn sm" onClick={() => pickSection(section === 'songs' ? 'new' : 'songs')}>Search {section === 'songs' ? 'Not in the LNV' : 'Songs'}</button></>
-              : show === 'todo' ? 'Nothing left to check here.' : 'Nothing here.'}</p>
+              : section === 'newrow' ? <>No song sent to a new row yet.<br /><small>“Not a match → New row in the LNV” in Songs, or “Add to the LNV”, puts a song here.</small></>
+                : section === 'deleted' ? <>No song deleted.<br /><small>“Delete” on a song in Songs or Not in the LNV puts it here.</small></>
+                  : show === 'todo' ? 'Nothing left to check here.' : 'Nothing here.'}</p>
               : shown.map((x, i) => {
                 const on = sel?.id === x.id
                 if (x.lnvOnly) return (
@@ -348,6 +405,11 @@ export default function SongReview({ d, save, stage1, complete }: {
                     </button>
                   )
                 }
+                if (x.t) return (
+                  <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => pick(x.id)}>
+                    <span className="sm-item-text"><b>{x.t.data.title}</b><small>Typed by you · in “{x.t.to_title}”</small></span><Check size={15} strokeWidth={2.5} className="rv-done" />
+                  </button>
+                )
                 const c = x.c!
                 const v = verdict(c, draftOf(c))
                 return (
@@ -356,9 +418,11 @@ export default function SongReview({ d, save, stage1, complete }: {
                     <button type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => pick(x.id)}>
                       <span className="sm-item-text">
                         <b>{c.title}</b>
-                        <small>{c.answer.recheck && !isDone(c) && <span className="rv-recheck">Check again · </span>}{c.kind === 'versions' ? '' : `${KIND[c.kind].label}${c.muso.length > 1 ? ' · ' : ''}`}{c.muso.length > 1 ? `${c.muso.length} versions` : ''}{v !== 'Needs you' && <> · <span className="rv-verdict">{v}</span></>}</small>
+                        {section === 'newrow' || section === 'deleted'
+                          ? <small>{c.was?.length ? <>Was LNV row {c.was.map((r) => r.row).join(', ')}</> : 'Not in the LNV'}{c.muso.length > 1 ? ` · ${c.muso.length} versions` : ''}</small>
+                          : <small>{c.answer.recheck && !isDone(c) && <span className="rv-recheck">Check again · </span>}{c.kind === 'versions' ? '' : `${KIND[c.kind].label}${c.muso.length > 1 ? ' · ' : ''}`}{c.muso.length > 1 ? `${c.muso.length} versions` : ''}{v !== 'Needs you' && <> · <span className="rv-verdict">{v}</span></>}</small>}
                       </span>
-                      {isDone(c) && <Check size={15} strokeWidth={2.5} className="rv-done" />}
+                      {section === 'deleted' ? <Trash2 size={15} className="rv-gone" /> : isDone(c) && <Check size={15} strokeWidth={2.5} className="rv-done" />}
                     </button>
                   </Fragment>
                 )
@@ -367,15 +431,22 @@ export default function SongReview({ d, save, stage1, complete }: {
         </div>
         </div>
         {sel?.lnvOnly ? <LnvOnly d={d} />
+          : sel?.t ? <div className="sm-detail rv-case"><div className="sm-detail-top"><div className="sm-detail-nav"><h3>{sel.t.data.title}</h3><span className="grow" />{lockBtn}</div>
+            <p className="rv-why">A song you typed: a new LNV row under “{sel.t.to_title}”.</p></div>
+            <div className="rv-scroll"><TypedCard t={sel.t} busy={flushing} edit={() => setEditing(sel.t!)} remove={() => { const t = sel.t!; void commit([{ key: t.key, choice: null }]).then((ok) => { if (ok) toast(`“${t.data.title}” is removed – Undo brings it back`, 'good') }) }}>
+              {families.some((f) => f.typed.includes(sel.t!)) && <button type="button" className="btn sm" onClick={() => { const f = families.find((y) => y.typed.includes(sel.t!))!; pickSection('songs'); setShow('all'); setSelectedId(f.id) }}>Open “{sel.t.to_title}”</button>}</TypedCard></div></div>
           : sel?.f ? <FamilyView key={sel.f.id} f={sel.f} d={d} p={pending} set={setPending} pos={at + 1} total={shown.length} prev={() => go(-1)} next={() => go(1)}
-            wideBtn={lockBtn} targets={targets} commit={commit} toast={toast} />
+            wideBtn={lockBtn} targets={targets} commit={commit} toast={toast} families={families} loose={loose} act={act} showUndo={showUndo} />
           : sel?.c ? <CaseView key={`${sel.c.id}-${sel.c.done}-${JSON.stringify(sel.c.answer)}-${sel.c.merge?.status}-${sel.c.muso.length}`} c={sel.c} source={d.source} done={isDone(sel.c)} picks={d.picks} savedCount={saved.length} showSaved={showSaved}
-            titles={d.titles ?? {}} targets={targets} mapTargets={mapTargets} mapped={(all, t) => { toast(`${all ? 'Every version' : 'The version'} now belongs to “${t.title}” (LNV row ${t.row})`, 'good'); if (all && sel.c) next(sel.c) }}
+            titles={d.titles ?? {}} d={d} p={pending} families={families} targets={targets} mapped={(all, t) => { toast(`${all ? 'Every version' : 'The version'} now belongs to “${t.title}”${t.row != null ? ` (LNV row ${t.row})` : ''}`, 'good'); if (all && sel.c) next(sel.c) }}
             linked={(t) => toast(`“${sel.c!.title}” is now the same song as LNV row ${t.row} “${t.title}” – it is under Songs`, 'good')}
+            toast={toast} showUndo={() => showUndo(songRef(sel.c!, familyOf.get(sel.c!.id)).key)}
             pos={at + 1} total={shown.length} prev={() => go(-1)} next={() => go(1)} possible={matchOf(sel.c) === 'possible'} answer={(draft) => answer(sel.c!, draft)} last={last} undoLast={undoLast} save={save}
             wideBtn={lockBtn} />
             : <div className="sm-detail sm-detail-none muted">Nothing to show.</div>}
       </div>}
+      {editing && families[0] && <AddSong f={families.find((f) => f.typed.some((t) => t.key === editing.key)) ?? families[0]} families={families} loose={loose} d={d} p={pending} edit={editing} commit={commit} act={act}
+        close={() => setEditing(null)} done={(t) => toast(t, 'good')} />}
       <ConfirmDialog open={asking} tone="primary" title={`Accept the app's answer on ${n(confirmable)} songs?`} confirmLabel="Accept all" onCancel={() => setAsking(false)}
         onConfirm={() => { confirmShown(); setAsking(false) }}>
         <p>They all move to Done. You can still open any one of them there and change it.</p>
@@ -383,6 +454,9 @@ export default function SongReview({ d, save, stage1, complete }: {
     </section>
   )
 }
+
+/** A list's name in a dropdown, its count beside it. */
+const ListOpt = ({ name, count }: { name: string; count: number }) => <span className="ls-opt"><span>{name}</span><b>{n(count)}</b></span>
 
 /** The step's three moves in order – answer the doubts, confirm the app's answers, download – the current one marked. */
 function Steps({ steps }: { steps: { label: string; left: number; title: string; go: () => void }[] }) {
@@ -468,6 +542,7 @@ function landsOf(c: ReviewCase, d: Draft, rows: number[], near: boolean, isIn: (
   return c.muso.map((r, i): Land => {
     if (!isIn(r)) return { i, r, tone: 'off', to: 'Its own song', note: 'kept separate – it is answered on its own' }
     if (d.choice === 'not_ours') return { i, r, tone: 'off', to: 'Not added', note: "not the client's song" }
+    if (d.choice === 'deleted') return { i, r, tone: 'off', to: 'Deleted', note: 'nothing of it goes into the LNV' }
     if (r.part === 'version') {
       if (r.lnv_row) return { i, r, tone: 'have', row: r.lnv_row, to: `LNV row ${r.lnv_row}`, note: 'this version is already there – nothing added' }
       return ours ? { i, r, tone: 'new', to: 'New row', note: `a ${r.version ?? 'version'} row naming ${ours} as its original` }
@@ -509,16 +584,18 @@ function MergePlan({ lands, source, openVersion, openRow }: { lands: Land[]; sou
   )
 }
 
-function CaseView({ c, source, done, pos, total, prev, next, possible, answer, last, undoLast, wideBtn, save, picks, savedCount, showSaved, titles, targets, mapTargets, mapped, linked }: {
+function CaseView({ c, source, done, pos, total, prev, next, possible, answer, last, undoLast, wideBtn, save, picks, savedCount, showSaved, titles, d, p, families, targets, mapped, linked, toast, showUndo }: {
   c: ReviewCase; source: string; done: boolean; pos: number; total: number; prev: () => void; next: () => void
   possible: boolean; answer: (d: Draft | null) => void; last: { c: ReviewCase; text: string } | null; undoLast: () => void; wideBtn: ReactNode
   save: (items: CleanDecisionIn[]) => Promise<boolean>; picks: Record<string, string | string[]>; savedCount: number; showSaved: () => void
-  titles: Step1['titles']; targets: Target[]; mapped: (all: boolean, t: Target) => void
-  /** the exact and possible matches in Songs, and what to say once the song is linked to one */
-  mapTargets: Target[]; linked: (t: Target) => void
+  titles: Step1['titles']; targets: Target[]; mapped: (all: boolean, t: { title: string; row?: number }) => void
+  /** the step and its song names: what "Map to existing ISRC / song" offers, and the remarks */
+  d: Step1; p: Pending; families: Family[]; linked: (t: { row: number; title: string }) => void
+  toast: (text: string, tone?: 'good' | 'bad') => void
+  showUndo: () => void
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(c, picks))
-  const [mapSong, setMapSong] = useState(false)   // "Map to a song in the LNV": the popup is open
+  const [mapSong, setMapSong] = useState(false)   // "Map to existing ISRC / song": the popup is open
   const [opened, setOpened] = useState<number | null>(null)   // the version whose details are open
   const [openedRow, setOpenedRow] = useState<number | null>(null)   // the LNV row whose details are open
   const [mapping, setMapping] = useState<CaseRecord | null>(null)   // the recording being mapped onto an exact match
@@ -540,7 +617,22 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   const isSame = () => { if (names) act('same') }
   const different = () => { if (names || twice) act('different') }
   const mapToSong = () => { if (!names && !twice) setMapSong(true) }
-  useKeys({ enter: confirm, a: confirm, s: names ? isSame : same, n: add, x: skip, m: mapToSong, d: different, r: apart, u: () => { if (done) answer(null); else undoLast() }, arrowdown: next, j: next, arrowup: prev, k: prev })
+  const [deleting, setDeleting] = useState(false)   // "Delete song" waits for a yes
+  const del = () => { if (!names && !twice) setDeleting(true) }
+  const gone = isDeleted(c), sentNew = isNewRow(c)
+  const remarkNow = remarkOf(d, c.muso.filter((r) => r.in))
+  const remarkHelp = remarkNow && remarkNow !== 'mixed' ? d.remark_list?.find((r) => r.id === remarkNow.id)?.help : ''
+  /** Back where the app had it: its exact or possible match (or Not in the LNV, for a song no LNV row matched). */
+  const restore = () => {
+    answer(null)
+    toast(c.was?.length ? `“${c.title}” is back to its match – LNV row ${c.was.map((r) => r.row).join(', ')} (under Songs)` : `“${c.title}” is back under Not in the LNV`, 'good')
+  }
+  const mapBack = (row: number) => {
+    answer({ ...draft, choice: 'same', rows: [row] })
+    toast(`“${c.title}” is mapped back to LNV row ${row} – it is under Songs`, 'good')
+  }
+  useKeys({ enter: confirm, a: confirm, s: names ? isSame : same, n: add, x: skip, m: mapToSong, d: different, r: apart, delete: del,
+    u: () => { if (done) answer(null); else undoLast() }, arrowdown: next, j: next, arrowup: prev, k: prev })
 
   const toggleIn = (id: number) => setDraft({ ...draft, in: draft.in.includes(id) ? draft.in.filter((x) => x !== id) : [...draft.in, id] })
   const pick = (row: number) => {
@@ -548,7 +640,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
     const rows = draft.rows.includes(row) ? draft.rows.filter((x) => x !== row) : [...draft.rows, row]
     setDraft({ ...draft, rows, choice: rows.length ? 'same' : null })
   }
-  const adding = draft.choice === 'add' || draft.choice === 'not_ours'
+  const adding = draft.choice === 'add' || draft.choice === 'not_ours' || draft.choice === 'deleted'
   const updates = adding ? [] : c.updates.filter((u) => sameRows.includes(u.row))
   const toggleUpdate = (key: string) => setDraft({ ...draft, reject: draft.reject.includes(key) ? draft.reject.filter((k) => k !== key) : [...draft.reject, key] })
   const kept = updates.filter((u) => !draft.reject.includes(u.key)).length
@@ -569,6 +661,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
     : draft.choice === 'same' ? `LNV row ${draft.rows.join(' + ')} ${kept ? `gets ${kept} blank detail${kept > 1 ? 's' : ''} filled from ${source}` : 'stays as it is'}.${versionsLine}`
       : draft.choice === 'add' ? (c.origin ? `A new row is added, naming LNV row ${c.origin.row} “${value(c.origin.fields.Title)}” (${value(c.origin.fields['Film / album'])}) as its original.` : 'A new row is added to the LNV.') + versionsLine
         : draft.choice === 'not_ours' ? "Nothing goes into the LNV – not the client's song."
+          : draft.choice === 'deleted' ? 'Deleted – nothing of this song goes into the LNV. Put it back to its match, map it to a song, or add it as a new row.'
           : c.origin ? `A new recording of LNV row ${c.origin.row}: add it as a row of its own naming that original, or skip it.`
           : near ? `No LNV row is the same recording or the same work. Tick one only if ${source}'s data is wrong.`
             : c.lnv.length > 1 ? 'Tick the LNV row this song is, or add it as a new song.'
@@ -632,6 +725,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
           <h3>{c.title}</h3>
           {done && <span className="rv-done-name"><Check size={13} />Done</span>}
           <span className="grow" />
+          <button type="button" className="btn sm" onClick={showUndo} title="The changes made to this song – undo any of them"><Undo2 size={14} />Undo</button>
           <span className="muted rv-pos">{n(pos)} of {n(total)}</span>
           <button type="button" className="sm-nav" disabled={pos <= 1} onClick={prev} title="Previous (↑)"><ArrowLeft size={15} /></button>
           <button type="button" className="sm-nav" disabled={pos >= total} onClick={next} title="Next (↓)"><ArrowRight size={15} /></button>
@@ -654,6 +748,42 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
             <>In <b>⑤ Titles</b> pick each recording's LNV title, or map it to an exact match.</>,
             <><b>Saved to the LNV</b> lists every answer and has the download.</>,
           ]} />
+          {(gone || sentNew) && (
+            <div className={`rv-out ${gone ? 'del' : 'new'}`} role="status">
+              <span className="rv-out-icon">{gone ? <Trash2 size={18} /> : <Plus size={18} />}</span>
+              <div className="grow">
+                <b>{gone ? 'Deleted song' : 'Sent to a new row'}</b>
+                <p>{gone ? 'Nothing of it goes into the LNV.' : `It goes into the LNV as a new row${c.muso.length > 1 ? ', its other versions with rows of their own' : ''}.`}
+                  {c.was?.length ? <> It was the {c.was.length > 1 ? 'match of LNV rows' : 'match of LNV row'} {c.was.map((r) => r.row).join(', ')} – put it back, or map it to another exact or possible match.</> : null}</p>
+              </div>
+              <div className="rv-out-btns">
+                <button type="button" className="btn sm primary" onClick={restore}><Undo2 size={14} />{c.was?.length ? 'Back to its match' : gone ? 'Restore' : 'Back to Not in the LNV'}</button>
+                <button type="button" className="btn sm" onClick={mapToSong}><Link2 size={14} />Map to existing ISRC / song…</button>
+                {gone ? <button type="button" className="btn sm" onClick={add}><Plus size={14} />Add as a new row</button>
+                  : <button type="button" className="btn sm danger" onClick={del}><Trash2 size={14} />Delete song</button>}
+              </div>
+            </div>
+          )}
+          {!!c.was?.length && (gone || sentNew) && (
+            <Block n={<Undo2 size={13} />} title={`Its match before (${c.was.length})`} note="The LNV rows the app had matched it to – map it back to one: the same song as that row.">
+              <div className="cv-cards">{c.was.map((r) => (
+                <div key={r.row} className="rv-was">
+                  <LnvCard r={r} main={main} badge={`LNV row ${r.row}`} open={() => setOpenedRow(r.row!)} />
+                  <button type="button" className="btn sm primary rv-was-btn" onClick={() => mapBack(r.row!)}><Link2 size={14} />Map back – same song as LNV row {r.row}</button>
+                </div>
+              ))}</div>
+            </Block>
+          )}
+          {/* why it is mapped: the remark, and the way to the song it belongs to */}
+          <section className="rm-box" aria-label="Remark">
+            <div className="rm-head"><h4>Remark</h4><p>Why this song is mapped to an exact or possible match. It goes into the LNV’s Remark column, word for word.</p></div>
+            <div className="rm-line">
+              <RemarkPick d={d} now={remarkOf(d, c.muso.filter(isIn))} pick={(r) => { void save(remarkItems(c.muso.filter(isIn), r)) }} />
+              <button type="button" className="btn" onClick={mapToSong}><Link2 size={15} />Map to an exact / possible match…</button>
+              <Link className="rm-set" to="/settings">Edit the list in Settings</Link>
+            </div>
+            {remarkHelp && <small className="rm-help">{remarkHelp}</small>}
+          </section>
           <Legend source={source} />
           <Block n={1} title="Main version" note={!main.version || main.version === 'Original'
             ? `${source}'s original – the oldest recording with no remix, lofi or other tag. Everything below is compared with it.`
@@ -752,19 +882,23 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
 
           <Block n={5} title="Titles in the LNV" note={`For each recording: the title it gets in the LNV and where that title comes from. Pick one, type your own, or map the recording to a song the app matched exactly.`}>
             <TitleSection lines={titleLines} titles={titles} source={source} save={save} map={setMapping}
-              closed={draft.choice === 'not_ours' ? "Not the client's song – no title goes into the LNV." : undefined} />
+              closed={draft.choice === 'not_ours' ? "Not the client's song – no title goes into the LNV." : draft.choice === 'deleted' ? 'Deleted – no title goes into the LNV.' : undefined} />
           </Block>
         </>}
       </div>
 
       {mapping && <MapDialog c={c} rec={mapping} recs={c.muso.filter(isIn)} targets={targets} source={source} save={save}
         close={() => setMapping(null)} done={mapped} />}
-      {mapSong && main && <MapDialog c={c} rec={main} recs={c.muso.filter(isIn)} targets={mapTargets} source={source} save={save}
-        close={() => setMapSong(false)} done={mapped} link={(t) => { linked(t); answer({ ...draft, choice: 'same', rows: [t.row] }) }} />}
+      {mapSong && main && <MapTo c={c} recs={c.muso.filter(isIn)} families={families} d={d} p={p} save={save} close={() => setMapSong(false)} done={mapped}
+        same={(row, title) => { linked({ row, title }); answer({ ...draft, choice: 'same', rows: [row] }) }} />}
 
       {opened !== null && c.muso[opened] && <VersionDetails r={c.muso[opened]} main={main} at={opened} total={c.muso.length} source={source} go={setOpened} close={() => setOpened(null)} />}
 
-      {openedRow !== null && <LnvRowDetails row={openedRow} rows={caseRows} go={setOpenedRow} close={() => setOpenedRow(null)} />}
+      {openedRow !== null && <LnvRowDetails row={openedRow} rows={[...caseRows, ...(c.was ?? []).map((r) => r.row!)]} go={setOpenedRow} close={() => setOpenedRow(null)} />}
+      <ConfirmDialog open={deleting} title={`Delete “${c.title}”?`} confirmLabel="Delete" onCancel={() => setDeleting(false)}
+        onConfirm={() => { setDeleting(false); act('deleted'); toast(`“${c.title}” deleted – under “Deleted songs” now, from where it maps back`, 'good') }}>
+        <p>Nothing of this song – {c.muso.length} {source} recording{c.muso.length === 1 ? '' : 's'} – goes into the LNV: no link, no new row. It is listed under <b>Deleted songs</b>, from where you can put it back to its exact or possible match.</p>
+      </ConfirmDialog>
 
       {/* the answer – always on screen */}
       <div className="rv-bar">
@@ -785,11 +919,12 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
               {c.lnv.length > 0 && (!near || sameRows.length > 0) && <Act on={onSame} k="S" onClick={same} disabled={!sameRows.length}>{sameRows.length ? `Same song as row ${sameRows.join(' + ')}` : 'Tick an LNV row above'}</Act>}
               <Act on={draft.choice === 'add'} k="N" onClick={add}>{c.lnv.length && !near ? 'New song – add to LNV' : 'Add to the LNV'}</Act>
               <Act on={draft.choice === 'not_ours'} k="X" onClick={skip}>Not the client's</Act>
-              <Act k="M" onClick={mapToSong}>Map to a song in the LNV…</Act>
+              <Act k="M" onClick={mapToSong}>Map to existing ISRC / song…</Act>
+              <Act on={draft.choice === 'deleted'} k="Del" onClick={del}>Delete song</Act>
               {merging && <button type="button" className="rv-text-btn" onClick={apart}>Keep separate<Kbd>R</Kbd></button>}
             </>
           )}
-          {done && <button type="button" className="rv-text-btn" onClick={() => answer(null)}><Undo2 size={14} />Undo<Kbd>U</Kbd></button>}
+          {done && <button type="button" className="rv-text-btn" onClick={() => answer(null)}><Undo2 size={14} />{gone ? 'Restore' : 'Undo'}<Kbd>U</Kbd></button>}
           {!done && last && last.c.id !== c.id && <button type="button" className="rv-text-btn rv-last" onClick={undoLast} title="Take this answer back"><Undo2 size={14} /><span>Saved {last.c.title}: {last.text}</span><b>Undo</b><Kbd>U</Kbd></button>}
           {savedCount > 0 && <button type="button" className="rv-text-btn" onClick={showSaved} title="Every answer you saved and what it puts into the LNV"><Check size={14} />Saved {n(savedCount)}</button>}
         </div>
@@ -837,6 +972,7 @@ function SavedView({ saved, d, open, undo, flush }: {
     ['linked', 'Linked to an LNV row', (x: Draft, c: ReviewCase) => x.choice === 'same' && c.kind !== 'twice'],
     ['added', 'Added as new LNV rows', (x: Draft) => x.choice === 'add'],
     ['skipped', "Not the client's – nothing added", (x: Draft) => x.choice === 'not_ours'],
+    ['deleted', 'Deleted songs – nothing goes into the LNV', (x: Draft) => x.choice === 'deleted'],
     ['other', 'Names and LNV duplicates', (_: Draft, c: ReviewCase) => c.kind === 'names' || c.kind === 'twice'],
   ] as const
   const s = norm(q)

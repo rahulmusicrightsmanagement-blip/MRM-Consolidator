@@ -36,7 +36,7 @@ export function creditsDiff(r: CaseRecord, main: CaseRecord) {
 }
 
 /** One numbered part of the song's screen: what it shows and what to do with it, in plain words. */
-export function Block({ n: num, title, note, side, children }: { n: number; title: ReactNode; note?: ReactNode; side?: ReactNode; children: ReactNode }) {
+export function Block({ n: num, title, note, side, children }: { n: ReactNode; title: ReactNode; note?: ReactNode; side?: ReactNode; children: ReactNode }) {
   return (
     <section className="cv-block">
       <header className="cv-head">

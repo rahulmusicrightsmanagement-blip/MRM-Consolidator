@@ -16,13 +16,13 @@ The rule for "the same song": the same writers (lyricists and composers, as peop
 (dataclean.work_check). An LNV row that fails it is shown as the closest row, never linked by the app.
 
 Answers are the decisions the screens already use: "merge:<item>" (songmerge), "link:<song>" (same rows | none),
-"missing:<song>" (add | not_ours) and "dup:" / "isrc:" for LNV rows. A case is done when the reviewer answered each of
+"missing:<song>" (add | not_ours | deleted) and "dup:" / "isrc:" for LNV rows. A case is done when the reviewer answered each of
 its parts.
 """
 import re
 from collections import OrderedDict
 
-from . import dataclean, songmerge
+from . import dataclean, songmerge, typed
 from .steps import _names, _user, lnv_record
 
 KIND_HELP = {
@@ -91,14 +91,19 @@ def _candidate(rec, c):
 
 def _lnv_part(kind, item, rec):
     """The LNV side of a song: ranked LNV records, and the answer – the reviewer's, else the app's.
-    answer.choice: same (rows) · add · not_ours · None (not answered, no app answer)."""
+    answer.choice: same (rows) · add · not_ours · deleted (the reviewer deleted the song: nothing of it goes into the
+    LNV) · None (not answered, no app answer)."""
     song = item["song"]["key"] if kind != "missing" else item["song_key"]
     if kind == "matched":
         d = _user(item)
         rows = [l["row"] for l in item["links"]]
         recs = [_candidate(rec, l) for l in item["links"]]
         if d:
-            return recs, {"song": song, "choice": "same", "rows": d["data"].get("rows") or rows, "by": "you"}
+            # the other rows on screen when it was linked: still shown, still to check
+            also = item.get("also") or []
+            return recs + [_candidate(rec, c) for c in also], {
+                "song": song, "choice": "same", "rows": d["data"].get("rows") or rows, "by": "you",
+                **({"also": [c["row"] for c in also]} if also else {})}
         return recs, {"song": song, "choice": "same", "rows": rows, "by": "app", "why": item.get("auto") or "Same writers and publisher"}
     if kind == "check":
         d = _user(item)
@@ -179,7 +184,7 @@ def families(cases):
     the shorter name it starts with, and each name's main version – its oldest recording with no tag. The songs that
     match the LNV choose it; a name only songs not in the LNV hold gets one from them. Returns {"joins": {key: the key
     it joined}, "mains": {key: {"title", "isrcs", "year", "rows"}}} – rows: the LNV rows the main version is linked to."""
-    songs = [c for c in cases if c["kind"] not in ("names", "twice") and c["answer"].get("choice") != "not_ours"]
+    songs = [c for c in cases if c["kind"] not in ("names", "twice") and c["answer"].get("choice") not in ("not_ours", "deleted")]
     out_of = lambda c: c["answer"].get("choice") == "add" and c["answer"].get("by") == "you"
     matched = [c for c in songs if not out_of(c) and _level(c) != "new"]
 
@@ -190,16 +195,18 @@ def families(cases):
                 by.setdefault(c["family"], []).append(c)
         return by
     by, joins = group(matched), {}
+    # a song the reviewer added to another never makes or unmakes a name, nor becomes its main version
+    own = lambda cs: [c for c in cs if not c.get("joined")] or cs
     tagged = lambda c: all(r.get("version") and r["version"] not in PLAIN for r in c["muso"] if r.get("in"))
     keys = sorted(by, key=len)
     for k in reversed(keys):
         base = next((x for x in reversed(keys) if 8 <= len(x) < len(k) and k.startswith(x) and x in by), None)
-        if base and all(tagged(c) for c in by[k]):
+        if base and all(tagged(c) for c in own(by[k])):
             by[base] += by.pop(k)
             joins[k] = base
 
     def main_of(cs):
-        recs = [(r, c) for c in cs for r in c["muso"] if r.get("in")]
+        recs = [(r, c) for c in own(cs) for r in c["muso"] if r.get("in")]
         if not recs:
             return None
         r, c = sorted(recs, key=lambda x: (plainness(x[0]["fields"].get("Title"), x[0].get("version")), x[0]["fields"].get("Year") or "9999"))[0]
@@ -213,7 +220,55 @@ def families(cases):
             k = joins[k]
         if k not in mains and (m := main_of(cs)):
             mains[k] = m
-    return {"joins": joins, "mains": mains}
+    # where a song added to another goes: its LNV rows, and the new rows its recordings get (by ISRC)
+    rows, isrcs = {}, {}
+    for c in songs:
+        if c.get("joined") or str(c.get("family") or "").startswith("one:"):
+            k = c["family"]
+            while k in joins:
+                k = joins[k]
+            rows.update({r: k for r in (c["answer"].get("rows") or []) if c["answer"].get("choice") == "same"})
+            rows.update({v["row"]: k for v in c.get("in_lnv") or [] if v["answer"] != "none"})
+            isrcs.update({i: k for r in c["muso"] for i in r["fields"].get("ISRC") or []})
+    return {"joins": joins, "mains": mains, "rows": rows, "isrcs": isrcs}
+
+
+def join_songs(cases, decisions):
+    """Songs the reviewer added to another song ("family:<song>" = join, data.to: that song's key): they sit under its
+    name – with their own LNV rows, which stay theirs. Sets family and joined on the cases."""
+    by = {c["answer"]["song"]: c for c in cases if (c.get("answer") or {}).get("song")}
+    to = {k[7:]: str((d.get("data") or {}).get("to") or "") for k, d in decisions.items() if k.startswith("family:") and d.get("choice") == "join"}
+
+    def root(k):
+        seen = set()
+        while k in to and k not in seen:
+            seen.add(k)
+            k = to[k]
+        return k
+    for k in to:
+        src, dst = by.get(k), by.get(root(k))
+        if not src or not dst or src is dst:
+            continue
+        # a name of one song only (a medley has none): its own, so that the two share one
+        dst["family"] = dst.get("family") or f"one:{dst['answer']['song']}"
+        src["joined"] = {"to": dst["answer"]["song"], "title": dst["title"], "from": src["title"], "was": src.get("family")}
+        src["family"] = dst["family"]
+
+
+def typed_songs(cases, decisions):
+    """The songs the reviewer typed, each with the song name it was added to and that song's place in the LNV."""
+    by = {c["answer"]["song"]: c for c in cases if (c.get("answer") or {}).get("song")}
+    out = []
+    for key, d in sorted(decisions.items()):
+        if not key.startswith("song:") or d.get("choice") != "typed":
+            continue
+        data = d.get("data") or {}
+        c = by.get(data.get("to"))
+        a = (c or {}).get("answer") or {}
+        out.append({"key": key, "data": data, "record": typed.record(data), "family": (c or {}).get("family") or (f"one:{data.get('to')}" if c else None),
+                    "to": data.get("to"), "to_title": c["title"] if c else data.get("to_title", ""),
+                    "rows": list(a.get("rows") or []) if a.get("choice") == "same" else [], "add": a.get("song") if a.get("choice") == "add" else None})
+    return out
 
 
 def _taken_why(item, source):
@@ -382,7 +437,8 @@ def build(dsp, analysis, decisions, clean, master):
             "muso": muso, "lnv": lnv, "answer": answer, "new_row": _new_row(song),
             "updates": _updates(fills_by_row, answer["rows"]),
             "in_lnv": _in_lnv(song, rec, recording, rid_of, isrcs_of, set(shown)),
-            "done": "pending" not in statuses and answer["by"] == "you",
+            # a song the reviewer deleted needs nothing more, its versions' question included
+            "done": ("pending" not in statuses or answer.get("choice") == "deleted") and answer["by"] == "you",
         })
 
     for e, (kind, item, members) in enumerate(entries):
@@ -446,6 +502,20 @@ def build(dsp, analysis, decisions, clean, master):
         if key.startswith("name:") and key not in asked and (d.get("data") or {}).get("a"):
             cases.append(_name_case(key, d["data"]["a"], d["data"].get("b", ""), d["data"].get("songs", []), 0, d, source))
 
+    # a song the reviewer sent out of its match (a new row, deleted): the LNV rows it was matched to, to map it back
+    for c in cases:
+        song = (c.get("answer") or {}).get("song")
+        d = decisions.get(f"link:{song}") if song else None
+        if d and d.get("choice") == "none" and c["answer"].get("choice") in ("add", "deleted", "not_ours"):
+            rows = [r for r in dict.fromkeys(int(x) for x in (d.get("data") or {}).get("rows") or []) if r in songs_by_row]
+            if rows:
+                c["was"] = [rec(r) for r in rows[:6]]
+    for c in cases:   # the LNV rows the reviewer said a song is not: one more is added to them
+        d = decisions.get(f"off:{c['answer'].get('song')}") if c["answer"].get("song") else None
+        if d:
+            c["off"] = (d.get("data") or {}).get("rows") or []
+    join_songs(cases, decisions)
+    added = typed_songs(cases, decisions)
     cases.sort(key=lambda c: (c["done"], ORDER[c["kind"]], -len(c["muso"]), -c.get("popularity", 0), c["title"].lower()))
     asked_cases = [c for c in cases if not c.get("auto")]
     linked = {r for c in clean["matched"] for r in [l["row"] for l in c["links"]]} \
@@ -465,14 +535,17 @@ def build(dsp, analysis, decisions, clean, master):
                    "undecided": sum(1 for m in clean["missing"] if not choice(m)),
                    "fills": sum(1 for f in clean["fills"] if (f.get("decision") or {}).get("choice") == "accept"),
                    "filled_rows": len({f["row"] for f in clean["fills"] if (f.get("decision") or {}).get("choice") == "accept"}),
-                   "picks": sum(1 for k in decisions if k.startswith("pick:")),
+                   "picks": sum(1 for k, d in decisions.items() if k.startswith("pick:") and d.get("choice") != "lnv"),
+                   # songs the reviewer deleted: nothing of them goes into the LNV (listed under Deleted songs)
+                   "deleted": sum(1 for m in clean["missing"] if choice(m) == "deleted"),
+                   "typed": len(added),   # songs the reviewer typed: each a new row
                    "versions_new": len(versions["rows"]), "versions_named": len(versions["named"]),
                    "lnv": len(master["songs"]), "lnv_only": len(lnv_only),
                    "cases": len(asked_cases), "open": sum(1 for c in asked_cases if not c["done"]),
                    # open cases the app has no answer for: the real doubts
                    "needs": sum(1 for c in asked_cases if not c["done"] and c["answer"].get("choice") is None),
                    "kinds": {k: sum(1 for c in asked_cases if c["kind"] == k) for k in ORDER}},
-        "cases": cases, "lnv_only": lnv_only,
+        "cases": cases, "lnv_only": lnv_only, "typed": added,
         # values the reviewer took from the DSP over the LNV's own ("pick:<row>:<field>")
         "picks": {k: (d.get("data") or {}).get("value") for k, d in decisions.items() if k.startswith("pick:")},
         # the title the reviewer chose for a recording (its id): mode main · muso · lnv · custom, and the title itself

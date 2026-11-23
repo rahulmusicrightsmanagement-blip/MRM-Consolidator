@@ -1,13 +1,14 @@
 {
   "name": "frontend",
   "private": true,
-  "version": "1.4.1",
+  "version": "1.6.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node tests/run.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.52.0",
