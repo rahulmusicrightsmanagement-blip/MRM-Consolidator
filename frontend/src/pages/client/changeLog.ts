@@ -3,6 +3,8 @@ import type { ReviewCase, Step1 } from '../../types'
 import { list, n } from './Block'
 import type { Family } from './Families'
 import { remarkKey } from './remarkModel'
+import { labelOf, rawOf } from './editModel'
+import type { CaseRecord } from '../../types'
 import { keyOf } from './reviewModel'
 
 /** Each decision the screens save, in plain words and with the songs it concerns – for the Undo section. No React here:
@@ -12,7 +14,7 @@ export type SongRef = { key: string; title: string }
 type Known = { c: ReviewCase; s: SongRef }
 export type LogContext = {
   source: string; titles: Map<string, SongRef>
-  song: Map<string, Known>; row: Map<number, SongRef>; rec: Map<number, Known & { title: string; from?: string }>
+  song: Map<string, Known>; row: Map<number, SongRef>; rec: Map<number, Known & { title: string; from?: string; r: CaseRecord }>
   ver: Map<string, Known & { title: string; row: number }>; part: Map<string, Known & { text?: string }>
   typed: Map<string, { title: string; s: SongRef }>
   remark: Map<string, Known & { title: string; id: number }>
@@ -33,12 +35,17 @@ export function logContext(d: Step1, familyOf: Map<string, Family>): LogContext 
     for (const u of c.updates) x.part.set(u.key, { c, s, text: `${u.field} of LNV row ${u.row}` })
     for (const r of c.muso) if (r.id != null) {
       const title = list(r.fields.Title)[0] ?? c.title
-      x.rec.set(r.id, { c, s, title, from: r.moved?.from })
+      x.rec.set(r.id, { c, s, title, from: r.moved?.from, r })
       x.remark.set(remarkKey(r), { c, s, title, id: r.id })
     }
     for (const v of c.in_lnv ?? []) { x.ver.set(v.key, { c, s, title: list(v.muso.fields.Title)[0] ?? c.title, row: v.row }); x.row.set(v.row, s) }
     for (const r of c.lnv) if (r.row != null && (familyOf.has(c.id) || !x.row.has(r.row))) x.row.set(r.row, s)
     if (!x.titles.has(c.title)) x.titles.set(c.title, s)
+  }
+  // a recording mapped away: its old song is where it is put back from
+  for (const m of d.moved ?? []) {
+    const k = x.rec.get(m.id)
+    if (k && !k.from) x.rec.set(m.id, { ...k, from: m.title })
   }
   for (const t of d.typed ?? []) {
     const s = (t.to && x.song.get(t.to)?.s) || { key: t.key, title: t.to_title }
@@ -66,7 +73,17 @@ export function describe(it: CleanDecisionIn, batch: CleanDecisionIn[], x: LogCo
       const text = it.choice === 'add' ? 'Sent to a new row' : it.choice === 'deleted' ? 'Deleted' : it.choice === 'not_ours' ? 'Marked “Not the client’s”' : 'Answer taken back'
       return answer(rest, text, it.choice === null && !!(has(`link:${rest}`)?.choice || has(`off:${rest}`)?.choice))
     }
-    case 'off': return answer(rest, it.choice ? `${rowsText(it.data?.rows)} ${(it.data?.rows?.length ?? 0) > 1 ? 'are' : 'is'} not this song` : 'LNV rows said not to be this song: taken back')
+    case 'off': {
+      const sent = has(`missing:${rest}`)?.choice   // the rows turned down one by one go with the song's answer
+      return answer(rest, it.choice ? `${rowsText(it.data?.rows)} ${(it.data?.rows?.length ?? 0) > 1 ? 'are' : 'is'} not this song${it.data?.then === 'add' ? ' – a new row if no other match is it' : ''}` : 'LNV rows said not to be this song: taken back', !it.choice && !!sent)
+    }
+    case 'muso': {
+      const [id, ...f] = rest.split(':')
+      const r = x.rec.get(Number(id)), field = f.join(':')
+      const was = r ? rawOf(r.r, field).join(', ') : ''
+      const t = `${x.source} ${labelOf(field).toLowerCase()} of “${short(r?.title ?? '')}”`
+      return { group: it.key, songs: refs(r?.s ?? OTHER), text: it.choice ? `${t} corrected: “${short(list(it.data?.value).join(', ')) || 'blank'}” (file: “${short(was) || 'blank'}”)` : `${t}: back to the file’s “${short(was) || 'blank'}”` }
+    }
     case 'merge': case 'fill': {
       const k = x.part.get(it.key)
       const text = kind === 'merge' ? 'Versions joined or kept apart' : `${k?.text ?? 'A blank field'} ${it.choice === 'reject' ? 'left blank' : `filled from ${x.source}`}`
@@ -75,9 +92,9 @@ export function describe(it: CleanDecisionIn, batch: CleanDecisionIn[], x: LogCo
     }
     case 'pick': {
       const [row, ...f] = rest.split(':')
-      const s = x.row.get(Number(row)), field = f.join(':')
-      const who = it.choice === 'lnv' ? 'the LNV’s' : it.choice === 'ipi' ? 'the IPI List’s' : it.choice === 'muso' ? `${x.source}’s` : 'typed'
-      const text = it.choice ? `${field} of LNV row ${row}: ${who} “${short(list(it.data?.value).join(', '))}”` : `${field} of LNV row ${row}: choice taken back`
+      const s = x.row.get(Number(row)), field = labelOf(f.join(':'))
+      const who = it.choice === 'lnv' && !list(it.data?.value).length ? 'left blank' : it.choice === 'lnv' ? 'the LNV’s' : it.choice === 'ipi' ? 'the IPI List’s' : it.choice === 'muso' ? `${x.source}’s` : 'typed'
+      const text = it.choice ? `${field} of LNV row ${row}: ${who}${list(it.data?.value).length ? ` “${short(list(it.data?.value).join(', '))}”` : ''}` : `${field} of LNV row ${row}: choice taken back`
       // values cleared because the song left its match go with that answer
       const owner = batch.find((b) => b.key.startsWith('link:') && b.choice !== 'same' && x.song.get(b.key.slice(5))?.c.lnv.some((r) => r.row === Number(row)))
       return !it.choice && owner ? answer(owner.key.slice(5), text, true) : { group: it.key, songs: refs(s ?? OTHER), text }

@@ -132,7 +132,7 @@ export default function Consolidate() {
         <>
           {!f.lnv || !f.dsp ? <Empty>This step needs the LNV and the {src} export – <button type="button" className="rv-link-btn" onClick={() => go(1)}>add them in step 1</button>.</Empty>
             : !shown ? <Wait />
-              : <SongReview d={shown as Step1} save={(items) => save(() => api.mergeSave(clientId, items))} act={save} stage1={data.stage1} complete={complete} />}
+              : <SongReview d={shown as Step1} save={(items, hold) => save(() => api.mergeSave(clientId, items, hold))} act={save} stage1={data.stage1} complete={complete} />}
         </>
       )}
       {step === 3 && (

@@ -362,7 +362,7 @@ export interface ClientMetrics {
   review: number
   latest_report: RunSummary | null
 }
-export interface ClientRow extends ClientRef, ClientMetrics { report_count: number }
+export interface ClientRow extends ClientRef, ClientMetrics { report_count: number; last_song?: { title: string; at: string; by: string } | null }
 export interface ClientDetail extends ClientMetrics {
   client: ClientRef
   reports: RunSummary[]
@@ -520,6 +520,13 @@ export interface CaseRecord extends SongRecord {
   ipi?: Record<string, { names: string[]; ids: string[] }>
   /** An LNV record's CAE numbers, beside its names */
   cae?: Record<string, string[]>
+  /** A DSP record's fields the reviewer corrected: what the sheet itself has in them */
+  edited?: Record<string, string | string[]>
+  /** An LNV record: the ISRCs its cell gets besides its own (each ISRC on one row only), the release date and the link
+   *  that fill a blank one, and the text a cell holds that is no ISRC (never written over) */
+  isrc_add?: string[]; date_add?: string; link_add?: string; isrc_text?: string
+  /** An LNV record that was on screen when the song was begun and that the match no longer offers: still to answer */
+  kept?: boolean
   /** Where this DSP recording goes in the LNV: the song's own row (original), or a version's row – lnv_row when the LNV has it */
   part?: 'original' | 'version'; lnv_row?: number | null
   /** Mapped by the reviewer onto this (exactly matched) song: the song it came from, and the LNV row it joined */
@@ -558,8 +565,11 @@ export interface ReviewCase {
   muso: CaseRecord[]; lnv: CaseRecord[]; answer: CaseAnswer; done: boolean
   /** Sent out of its match by the reviewer (a new row, deleted): the LNV rows it was matched to – to map it back */
   was?: CaseRecord[]
-  /** LNV rows the reviewer said this song is not */
-  off?: number[]
+  /** LNV rows the reviewer said this song is not – still shown, answered, beside its other matches; off_then "add": a
+   *  new row once no other row is it */
+  off?: number[]; off_lnv?: CaseRecord[]; off_then?: string | null
+  /** Its versions were on screen when the reviewer began the song: they stay there until each is answered */
+  begun?: boolean
   /** Added by the reviewer to another song: it sits under that song's name (to: that song's key) */
   joined?: { to: string; title: string; from: string; was?: string | null }
   /** Linked surely by the app, never asked: listed only under the match tabs */
@@ -570,7 +580,9 @@ export interface ReviewCase {
   updates: { key: string; row: number; field: string; value: string; more: number; accept: boolean; by: 'app' | 'you' }[]
   /** The song's versions the LNV already has, each beside its LNV row; answer: same (right) · none (not this
    *  version – added as a new row) · null (the app's match) */
-  in_lnv?: { key: string; type: string; row: number; muso: CaseRecord; lnv: CaseRecord; isrc: boolean; album: boolean; year: boolean; answer: 'same' | 'none' | null }[]
+  in_lnv?: { key: string; type: string; row: number; muso: CaseRecord; lnv: CaseRecord; isrc: boolean; album: boolean; year: boolean; answer: 'same' | 'none' | null
+    /** the reviewer gave its LNV row to this other recording: shown until it is answered too */
+    taken?: string }[]
   /** "Same person?" cases: the two spellings and songs they keep apart */
   names?: { a: string; b: string; songs: string[] }
   /** A song not in the LNV that is a new recording of an LNV work: that row (named as its original in the new row);
@@ -578,6 +590,8 @@ export interface ReviewCase {
   origin?: (CaseRecord & { sure: boolean }) | null
 }
 export type TitleMode = 'main' | 'muso' | 'lnv' | 'custom'
+export interface MovedOut { id: number; family: string; title: string; to_title: string; row?: number | null; level?: 'exact' | 'possible'; muso: CaseRecord; lnv: CaseRecord[] }
+export interface LastUpdate { key: string; title: string; at: string; by: string; what: string }
 export interface Step1 {
   source: string
   counts: {
@@ -596,6 +610,10 @@ export interface Step1 {
   typed?: TypedSong[]
   /** The IPI / CAE list the names were looked up in (none uploaded: absent) */
   ipi?: { version: number; members: number }
+  /** Recordings mapped onto another song: their old song name shows them, answered, until it is all checked */
+  moved?: MovedOut[]
+  /** Last updated: the songs changed last, newest first – and when each song was last changed (by song key) */
+  updates?: { last: LastUpdate[]; songs: Record<string, string> }
   /** "pick:<row>:<field>" -> the DSP value the reviewer chose over the LNV's */
   picks: Record<string, string | string[]>
   /** recording id -> the title the reviewer chose for it in the LNV: main · muso · lnv · custom */

@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, Download, Link2, ListMusic, Plus, Search, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight, CircleCheck, CircleDot, Circle, Clock, Download, Link2, ListMusic, Plus, Search, Trash2, Undo2, X } from 'lucide-react'
 import { ConfirmDialog, Dropdown, Guide, LockToggle } from '../../components/ui'
 import { useFlag, usePeek } from '../../lib/peek'
 import type { CleanDecisionIn } from '../../lib/api'
@@ -14,8 +14,13 @@ import { Act, Block, Compare, Kbd, Legend, LnvCard, LnvRowDetails, MainCard, Map
   differs, targetsOf, useKeys, useStored, value } from './CaseParts'
 import type { Col, Spot, Target, TitleLine } from './CaseParts'
 import { logContext, songRef, withLog } from './changeLog'
-import { FamilyView, NO_PENDING, SaveBar, TypedCard, checkedIn, familiesOf, inFamilies, openOf, pendingCount, pendingItems, stripSaved, toCheck } from './Families'
-import type { Family, Pending } from './Families'
+import { FamilyView, NO_PENDING, SaveBar, STATUS, StatusChip, TypedCard, checkedIn, familiesOf, holdsOf, inFamilies, openOf, pendingCount, pendingItems, progressOf, stripSaved, toCheck } from './Families'
+import type { Family, Holds, Pending, Status } from './Families'
+import { MusoContext } from './EditParts'
+import type { MusoEditing } from './EditParts'
+import { editItem, labelOf, rawOf, typedText } from './editModel'
+import { LastUpdated } from './LastUpdated'
+import { whenText } from './when'
 import { PICK_SHOWN, draftOf, isDeleted, isNewRow, itemsOf, keyOf, matchOf, pickKey, ready } from './reviewModel'
 import type { Choice, Draft } from './reviewModel'
 import { CompleteBar, Stage1Download } from './LnvStages'
@@ -74,14 +79,16 @@ function effect(c: ReviewCase, d: Draft, source: string) {
  *  the reviewer sent to a new row (New row) and the songs they deleted (Deleted songs) – the last two map back. */
 type Section = 'songs' | 'new' | 'newrow' | 'deleted'
 const SECTION: Record<Section, string> = { songs: 'Songs', new: 'Not in the LNV', newrow: 'New row', deleted: 'Deleted songs' }
-type Sort = 'az' | 'za' | 'most' | 'exact' | 'possible' | 'todo'
+type Sort = 'az' | 'za' | 'most' | 'exact' | 'possible' | 'todo' | 'updated'
+/** Which songs of a list: every one, those with a match left to check (not started, partly checked), those all checked. */
+type Show = 'all' | 'todo' | 'new' | 'part' | 'done'
 const SORTS: [Sort, string][] = [['az', 'A → Z'], ['za', 'Z → A'], ['most', 'Most matches first'], ['exact', 'Most exact matches first'],
-  ['possible', 'Most possible matches first'], ['todo', 'Most left to check first']]
+  ['possible', 'Most possible matches first'], ['todo', 'Most left to check first'], ['updated', 'Last updated first']]
 /** One line of the list: a song name with every song it holds (f), one song or question (c), or the LNV-only songs. */
 type Item = { id: string; f?: Family; c?: ReviewCase; t?: TypedSong; lnvOnly?: boolean }
 
 export default function SongReview({ d, save: rawSave, act, stage1, complete }: {
-  d: Step1; save: (items: CleanDecisionIn[]) => Promise<boolean>
+  d: Step1; save: (items: CleanDecisionIn[], hold?: Holds) => Promise<boolean>
   /** a save of another kind (a typed song, an undo), then the step loaded again */
   act: (work: () => Promise<unknown>) => Promise<boolean>
   /** step 2 marked completed (its LNV is the stage 2 LNV) – and marking it so, or opening it again */
@@ -95,7 +102,7 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
   const [asking, setAsking] = useState(false)   // "Accept all" waits for a yes
   // two lists: the songs of the LNV match (by song name) and the songs not in the LNV
   const [section, setSection] = useState<Section>('songs')
-  const [show, setShow] = useState<'all' | 'todo' | 'done'>('all')
+  const [show, setShow] = useState<Show>('all')
   const [sort, setSortState] = useState<Sort>(() => { try { return (localStorage.getItem('mrm-sort') as Sort) || 'az' } catch { return 'az' } })
   const setSort = (s: Sort) => { setSortState(s); try { localStorage.setItem('mrm-sort', s) } catch { /* private mode */ } }
   // the song the reviewer was on is still open when they come back
@@ -103,7 +110,7 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
   const [selectedId, setSelectedId] = useState<string | null>(() => { try { return localStorage.getItem(placeKey) } catch { return null } })
   const pickSection = (s: Section) => { setView('review'); setSection(s); setSelectedId(null) }
 
-  const families = useMemo(() => familiesOf(d.cases, d.typed), [d])
+  const families = useMemo(() => familiesOf(d.cases, d.typed, d.moved), [d])
   const familyOf = useMemo(() => new Map(families.flatMap((f) => f.cases.map((c) => [c.id, f] as const))), [families])
   // every save says what it did, in plain words, for the Undo section
   const ctx = useMemo(() => logContext(d, familyOf), [d, familyOf])
@@ -111,7 +118,10 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
   ctxRef.current = ctx
   const rawRef = useRef(rawSave)
   rawRef.current = rawSave
-  const save = useCallback((items: CleanDecisionIn[]) => rawRef.current(withLog(items, ctxRef.current)), [])
+  const famRef = useRef(families)
+  famRef.current = families
+  // (with the matches on screen of the songs answered: they stay until each of them is answered)
+  const save = useCallback((items: CleanDecisionIn[]) => rawRef.current(withLog(items, ctxRef.current), holdsOf(items, famRef.current)), [])
   // ---- the queue: ticks, values and titles save themselves a moment after the last change, or at once with Save
   const [pending, setPending] = useState<Pending>(NO_PENDING)
   const [flushing, setFlushing] = useState(false)
@@ -187,15 +197,19 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
   const shown: Item[] = useMemo(() => {
     const s = norm(q)
     const hit = (c: ReviewCase) => norm(c.title).includes(s) || [...c.muso, ...c.lnv].some((r) => norm(`${r.ref} ${Object.values(r.fields).flat().join(' ')}`).includes(s))
-    // a search stays inside the open list; the song on screen stays listed until another is picked
-    const keep = (id: string, open: boolean) => id === selectedId || show === 'all' || (show === 'todo') === open
+    // a search stays inside the open list; the song on screen stays listed until another is picked – and a song stays
+    // under "Left to check" until its last match is answered
+    const fits = (st: Status) => show === 'all' || (show === 'todo' ? st !== 'done' : show === 'new' ? st === 'todo' : st === show)
+    const keep = (id: string, st: Status) => id === selectedId || fits(st)
+    const ofCase = (c: ReviewCase): Status => isDone(c) ? 'done' : 'todo'
+    const at = (id: string) => d.updates?.songs[id] ?? ''
     const byTitle = (a: string, b: string) => sort === 'za' ? b.localeCompare(a) : a.localeCompare(b)
     if (section === 'songs') {
       const score = (f: Family) => sort === 'most' ? f.exact.length + f.possible.length : sort === 'exact' ? f.exact.length
         : sort === 'possible' ? f.possible.length : sort === 'todo' ? left(f) : 0
-      const fs = families.filter((f) => (!s || norm(f.title).includes(s) || f.cases.some(hit)) && keep(f.id, left(f) > 0))
-        .sort((a, b) => score(b) - score(a) || byTitle(a.title, b.title))
-      const os = others.filter((c) => (!s || hit(c)) && keep(c.id, !isDone(c))).sort((a, b) => byTitle(a.title, b.title))
+      const fs = families.filter((f) => (!s || norm(f.title).includes(s) || f.cases.some(hit)) && keep(f.id, progressOf(pending, f).status))
+        .sort((a, b) => sort === 'updated' ? at(b.id).localeCompare(at(a.id)) || byTitle(a.title, b.title) : score(b) - score(a) || byTitle(a.title, b.title))
+      const os = others.filter((c) => (!s || hit(c)) && keep(c.id, ofCase(c))).sort((a, b) => byTitle(a.title, b.title))
       return [...fs.map((f): Item => ({ id: f.id, f })), ...os.map((c): Item => ({ id: c.id, c }))]
     }
     if (section === 'newrow' || section === 'deleted') {   // answered, every one: nothing is left to check there
@@ -203,7 +217,7 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
       const ts = section === 'newrow' ? typed.filter((t) => !s || norm(Object.values(t.record.fields).flat().join(' ')).includes(s)) : []
       return [...cs, ...ts.sort((a, b) => byTitle(a.data.title, b.data.title)).map((t): Item => ({ id: t.key, t }))]
     }
-    const cs = loose.filter((c) => (!s || hit(c)) && keep(c.id, !isDone(c))).sort((a, b) => byTitle(a.title, b.title))
+    const cs = loose.filter((c) => (!s || hit(c)) && keep(c.id, ofCase(c))).sort((a, b) => byTitle(a.title, b.title))
     return [...cs.map((c): Item => ({ id: c.id, c })), ...(!s && show === 'all' && d.lnv_only.length ? [{ id: 'lnv_only', lnvOnly: true }] : [])]
   }, [d, q, section, show, sort, selectedId, done, pending, families, loose, others, newRows, deleted, typed])   // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -275,6 +289,18 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
       <i className="checked">Checked {n(tot.checked)}</i></span>
   )
   // the lists as Excel: the rows the counts count, with the answers waiting saved first
+  // ---- last updated: the song to go on from, whichever list it is in now
+  const updates = d.updates ?? { last: [], songs: {} }
+  const whereIs = (key: string): (() => void) | null => {
+    const f = families.find((x) => x.id === key)
+    if (f) return () => { setView('review'); setQ(''); setShow('all'); setSection('songs'); setSelectedId(f.id) }
+    const c = d.cases.find((x) => x.kind !== 'names' && x.kind !== 'twice' && songRef(x, familyOf.get(x.id)).key === key)
+    if (c) return () => openCase(c)
+    const q = others.find((x) => songRef(x).key === key)
+    return q ? () => openCase(q) : null
+  }
+  // ---- how far the song names are: what is pending and what is done, at a glance
+  const states = families.reduce((t, f) => { const x = progressOf(pending, f); t[x.status] += 1; t.matches += x.total; t.answered += x.done; return t }, { todo: 0, part: 0, done: 0, matches: 0, answered: 0 })
   const lists: Lists = { families, loose, newRows, deleted, isDone, d, p: pending }
   const [preparing, setPreparing] = useState<ListId | null>(null)
   const listFile = async (id: ListId) => {
@@ -287,10 +313,11 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
     } catch (e) { toast((e as Error).message, 'bad') } finally { setPreparing(null) }
   }
   // "Which songs": how many each choice lists in the open list
-  const showCount = (k: 'all' | 'todo' | 'done') => {
-    const open = section === 'songs' ? families.filter((f) => left(f) > 0).length + others.filter((c) => !isDone(c)).length : loose.filter((c) => !isDone(c)).length
+  const showCount = (k: Show) => {
+    const openQ = section === 'songs' ? others.filter((c) => !isDone(c)).length : loose.filter((c) => !isDone(c)).length
+    const open = section === 'songs' ? states.todo + states.part + openQ : openQ
     const all = section === 'songs' ? families.length + others.length : loose.length
-    return k === 'all' ? all : k === 'todo' ? open : all - open
+    return k === 'all' ? all : k === 'todo' ? open : k === 'new' ? open - states.part : k === 'part' ? states.part : all - open
   }
   const sortShown = sorts.some(([id]) => id === sort) ? sort : 'az'
 
@@ -335,11 +362,34 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
         </div>
       )}
 
+      {/* one line: how far the songs are, and the song changed last */}
+      <div className="rv-strip">
+      {/* pending and completed, at a glance: each part opens its songs */}
+      {view === 'review' && section === 'songs' && families.length > 0 && (
+        <div className="pg" role="group" aria-label="Progress of the songs">
+          {(['todo', 'part', 'done'] as const).map((k) => {
+            const Icon = k === 'done' ? CircleCheck : k === 'part' ? CircleDot : Circle
+            const id: Show = k === 'todo' ? 'new' : k
+            return (
+              <button key={k} type="button" className={`pg-item ${k} ${show === id ? 'on' : ''}`} aria-pressed={show === id} onClick={() => { setShow(show === id ? 'all' : id); setSelectedId(null) }}
+                title={k === 'todo' ? 'No match of these songs is answered yet' : k === 'part' ? 'Some matches of these songs are answered, others still to check' : 'Every match of these songs is answered'}>
+                <Icon size={15} /><span>{STATUS[k]}</span><b>{n(states[k])}</b><small>{k === 'todo' ? 'not started' : k === 'part' ? 'in progress' : 'completed'}</small>
+              </button>
+            )
+          })}
+          <span className="pg-bar" role="img" aria-label={`${n(states.answered)} of ${n(states.matches)} matches answered`} title={`${n(states.answered)} of ${n(states.matches)} matches answered`}>
+            <i className="done" style={{ width: `${(100 * states.done) / families.length}%` }} /><i className="part" style={{ width: `${(100 * states.part) / families.length}%` }} /></span>
+          <span className="muted pg-note">{n(states.answered)} of {n(states.matches)} matches answered</span>
+        </div>
+      )}
+      <LastUpdated last={updates.last} has={(k) => !!whereIs(k)} open={(k) => whereIs(k)?.()} nameOf={(k) => families.find((f) => f.id === k)?.title} />
+      </div>
+
       {view === 'review' && d.wins.length > 0 && <Wins wins={d.wins} source={d.source} save={save} />}
 
       {/* how the numbers add up, in one line */}
       {view === 'review' && sumOpen && (() => {
-        const matched = families.reduce((t, f) => t + f.cases.length, 0)
+        const matched = families.reduce((t, f) => t + f.cases.filter(inFamilies).length, 0)
         return (
           <p className="rv-sum">
             <b>How it adds up:</b> {d.source} has <b>{n(matched + loose.length + newRows.length + deleted.length)} songs</b> – <b>{n(matched)}</b> match an LNV row and sit under <b>{n(families.length)} song
@@ -369,8 +419,11 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
             <div className="rv-list-tools">
               {(section === 'songs' || section === 'new') && <Dropdown className="rv-dd" label="Which songs" value={show} onChange={(v) => { setShow(v); setSelectedId(null) }} options={[
                 { value: 'all', label: <ListOpt name="Show all" count={showCount('all')} />, hint: section === 'songs' ? 'Every song name' : 'Every song not in the LNV' },
-                { value: 'todo', label: <ListOpt name={section === 'songs' ? 'Left to check' : 'Needs an answer'} count={showCount('todo')} />, hint: section === 'songs' ? 'A match not ticked yet' : 'No answer saved yet' },
-                { value: 'done', label: <ListOpt name={section === 'songs' ? 'All checked' : 'Done'} count={showCount('done')} />, hint: section === 'songs' ? 'Every match ticked' : 'Answered' },
+                { value: 'todo', label: <ListOpt name={section === 'songs' ? 'Left to check' : 'Needs an answer'} count={showCount('todo')} />, hint: section === 'songs' ? 'A match not answered yet – the song stays here until its last one is' : 'No answer saved yet' },
+                ...(section === 'songs' ? [
+                  { value: 'new' as const, label: <ListOpt name="– not started" count={showCount('new')} />, hint: 'No match of it is answered yet' },
+                  { value: 'part' as const, label: <ListOpt name="– partly checked" count={showCount('part')} />, hint: 'Some matches answered, others still to check' }] : []),
+                { value: 'done', label: <ListOpt name={section === 'songs' ? 'All checked' : 'Done'} count={showCount('done')} />, hint: section === 'songs' ? 'Every match answered' : 'Answered' },
               ]} />}
               <Dropdown className="rv-dd" label="Order" value={sortShown} onChange={setSort} options={sorts.map(([id, label]) => ({ value: id, label }))} />
               {section === 'new' && confirmable > 0 && (
@@ -393,15 +446,16 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
                   </button>
                 )
                 if (x.f) {
-                  const f = x.f, l = left(f)
+                  const f = x.f, pr = progressOf(pending, f), upd = updates.songs[f.id]
                   return (
-                    <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => pick(x.id)}>
+                    <button key={x.id} type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item s-${pr.status} ${on ? 'on' : ''}`} onClick={() => pick(x.id)}>
                       <span className="sm-item-text">
                         <b>{f.title}</b>
                         <small><span className="li-n exact">Exact {n(f.exact.length)}</span><span className="li-n possible">Possible {n(f.possible.length)}</span>
-                          {l > 0 && <span className="rv-verdict">{n(l)} to check</span>}</small>
+                          {pr.left > 0 && <span className="rv-verdict">{n(pr.left)} to check</span>}</small>
+                        <span className="li-st"><StatusChip small status={pr.status} done={pr.done} total={pr.total} />
+                          {upd && <span className={`li-upd ${updates.last[0]?.key === f.id ? 'last' : ''}`} title={`Last updated ${whenText(upd, true)}`}><Clock size={11} />{updates.last[0]?.key === f.id ? 'Last updated · ' : ''}{whenText(upd)}</span>}</span>
                       </span>
-                      {!l && <Check size={15} strokeWidth={2.5} className="rv-done" />}
                     </button>
                   )
                 }
@@ -415,7 +469,7 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
                 return (
                   <Fragment key={x.id}>
                     {section === 'songs' && !shown[i - 1]?.c && <p className="sm-list-sep">Other questions</p>}
-                    <button type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item ${on ? 'on' : ''}`} onClick={() => pick(x.id)}>
+                    <button type="button" ref={(el) => { refs.current[x.id] = el }} className={`sm-item s-${isDone(c) ? 'done' : 'todo'} ${on ? 'on' : ''}`} onClick={() => pick(x.id)}>
                       <span className="sm-item-text">
                         <b>{c.title}</b>
                         {section === 'newrow' || section === 'deleted'
@@ -436,7 +490,7 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
             <div className="rv-scroll"><TypedCard t={sel.t} busy={flushing} edit={() => setEditing(sel.t!)} remove={() => { const t = sel.t!; void commit([{ key: t.key, choice: null }]).then((ok) => { if (ok) toast(`“${t.data.title}” is removed – Undo brings it back`, 'good') }) }}>
               {families.some((f) => f.typed.includes(sel.t!)) && <button type="button" className="btn sm" onClick={() => { const f = families.find((y) => y.typed.includes(sel.t!))!; pickSection('songs'); setShow('all'); setSelectedId(f.id) }}>Open “{sel.t.to_title}”</button>}</TypedCard></div></div>
           : sel?.f ? <FamilyView key={sel.f.id} f={sel.f} d={d} p={pending} set={setPending} pos={at + 1} total={shown.length} prev={() => go(-1)} next={() => go(1)}
-            wideBtn={lockBtn} targets={targets} commit={commit} toast={toast} families={families} loose={loose} act={act} showUndo={showUndo} />
+            wideBtn={lockBtn} targets={targets} commit={commit} toast={toast} families={families} loose={loose} act={act} showUndo={showUndo} updated={updates.songs[sel.f.id]} />
           : sel?.c ? <CaseView key={`${sel.c.id}-${sel.c.done}-${JSON.stringify(sel.c.answer)}-${sel.c.merge?.status}-${sel.c.muso.length}`} c={sel.c} source={d.source} done={isDone(sel.c)} picks={d.picks} savedCount={saved.length} showSaved={showSaved}
             titles={d.titles ?? {}} d={d} p={pending} families={families} targets={targets} mapped={(all, t) => { toast(`${all ? 'Every version' : 'The version'} now belongs to “${t.title}”${t.row != null ? ` (LNV row ${t.row})` : ''}`, 'good'); if (all && sel.c) next(sel.c) }}
             linked={(t) => toast(`“${sel.c!.title}” is now the same song as LNV row ${t.row} “${t.title}” – it is under Songs`, 'good')}
@@ -631,6 +685,22 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
     answer({ ...draft, choice: 'same', rows: [row] })
     toast(`“${c.title}” is mapped back to LNV row ${row} – it is under Songs`, 'good')
   }
+  // the DSP's own data corrected right here: saved at once
+  const [fixing, setFixing] = useState(false)
+  const editing: MusoEditing = {
+    source, busy: fixing,
+    save: async (r, f, v) => {
+      setFixing(true)
+      const items: CleanDecisionIn[] = [editItem(r, f, v)]
+      if (f === 'Title' && r.id === main?.id && (titles[String(r.id)]?.mode ?? 'muso') === 'muso') {
+        const t = (v ?? rawOf(r, f)).join(', ')
+        c.muso.forEach((x) => { if (x.id !== r.id && titles[String(x.id)]?.mode === 'main') items.push({ key: `title:${x.id}`, choice: 'main', data: { value: t } }) })
+      }
+      const ok = await save(items)
+      setFixing(false)
+      if (ok) toast(v == null ? `${labelOf(f)}: back to the ${source} file’s value` : `${source} ${labelOf(f).toLowerCase()} corrected`, 'good')
+    },
+  }
   useKeys({ enter: confirm, a: confirm, s: names ? isSame : same, n: add, x: skip, m: mapToSong, d: different, r: apart, delete: del,
     u: () => { if (done) answer(null); else undoLast() }, arrowdown: next, j: next, arrowup: prev, k: prev })
 
@@ -684,8 +754,9 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   const onSame = draft.choice === 'same' && ready(c, draft)
   // Muso and the chosen LNV rows hold two values: the reviewer says which one goes into the LNV (the LNV's by default)
   const musoRec = musoCol[0]?.r
+  // (every ISRC goes into the cell, so there is nothing to choose there)
   const choices = adding || !musoRec || twice ? [] : c.lnv.filter((r) => sameRows.includes(r.row!)).flatMap((r) => PICK_SHOWN
-    .filter((f) => differs(f, list(musoRec.fields[f]), list(r.fields[f])))
+    .filter((f) => f !== 'ISRC' && differs(f, list(musoRec.fields[f]), list(r.fields[f])))
     .map((f) => ({ key: pickKey(r.row!, f), row: r.row!, f, lnv: list(r.fields[f]), muso: list(musoRec.fields[f]) })))
   const choose = (key: string, v: string[] | null) => {
     const { [key]: _, ...rest } = draft.picks   // eslint-disable-line @typescript-eslint/no-unused-vars
@@ -719,11 +790,12 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
   })
 
   return (
+    <MusoContext.Provider value={editing}>
     <div className="sm-detail rv-case">
       <div className="sm-detail-top">
         <div className="sm-detail-nav">
           <h3>{c.title}</h3>
-          {done && <span className="rv-done-name"><Check size={13} />Done</span>}
+          {done ? <span className="st done"><CircleCheck size={13} />Done</span> : <span className="st todo"><Circle size={13} />{ready(c, draftOf(c)) ? 'To confirm' : 'Needs an answer'}</span>}
           <span className="grow" />
           <button type="button" className="btn sm" onClick={showUndo} title="The changes made to this song – undo any of them"><Undo2 size={14} />Undo</button>
           <span className="muted rv-pos">{n(pos)} of {n(total)}</span>
@@ -822,7 +894,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
             {updates.map((u) => (
               <label key={u.key} className={draft.reject.includes(u.key) ? 'off' : ''}>
                 <input type="checkbox" checked={!draft.reject.includes(u.key)} onChange={() => toggleUpdate(u.key)} />
-                <span className="muted">{single ? '' : `Row ${u.row} · `}{u.field}</span><b>{u.value}</b>{u.more > 0 && <small className="muted">+{u.more} more recordings</small>}
+                <span className="muted">{single ? '' : `Row ${u.row} · `}{labelOf(u.field)}</span><b>{u.value}</b>{u.more > 0 && <small className="muted">+{u.more} more recordings</small>}
               </label>
             ))}
           </section>
@@ -837,10 +909,10 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
                 const muso = x.key in draft.picks
                 return (
                   <tr key={x.key}>
-                    <td className="muted nowrap">{x.f}</td>
+                    <td className="muted nowrap">{labelOf(x.f)}</td>
                     {sameRows.length > 1 && <td className="muted">{x.row}</td>}
-                    <td><label className={`rv-pick-opt ${muso ? '' : 'on'}`}><input type="radio" name={x.key} checked={!muso} onChange={() => choose(x.key, null)} />{x.lnv.join(', ')}</label></td>
-                    <td><label className={`rv-pick-opt ${muso ? 'on' : ''}`}><input type="radio" name={x.key} checked={muso} onChange={() => choose(x.key, x.muso)} />{x.muso.join(', ')}</label></td>
+                    <td><label className={`rv-pick-opt ${muso ? '' : 'on'}`}><input type="radio" name={x.key} checked={!muso} onChange={() => choose(x.key, null)} />{typedText(x.f, x.lnv)}</label></td>
+                    <td><label className={`rv-pick-opt ${muso ? 'on' : ''}`}><input type="radio" name={x.key} checked={muso} onChange={() => choose(x.key, x.muso)} />{typedText(x.f, x.muso)}</label></td>
                   </tr>
                 )
               })}</tbody>
@@ -930,6 +1002,7 @@ function CaseView({ c, source, done, pos, total, prev, next, possible, answer, l
         </div>
       </div>
     </div>
+    </MusoContext.Provider>
   )
 }
 

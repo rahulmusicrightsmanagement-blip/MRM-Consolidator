@@ -12,7 +12,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_http_methods
 
-from .engine.normalize import clean_text
+from .engine.normalize import clean_text, printable
 from .models import Remark
 
 
@@ -41,9 +41,9 @@ def _problem(name, but=None):
 def _body(request):
     try:
         data = json.loads(request.body or b"{}")
-    except ValueError:
+    except (ValueError, RecursionError):
         data = {}
-    return data if isinstance(data, dict) else {}
+    return printable(data) if isinstance(data, dict) else {}
 
 
 @require_http_methods(["GET", "POST"])

@@ -4,6 +4,7 @@ Originals are always kept by callers; these functions only produce
 comparison-ready values.
 """
 import re
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 
 from rapidfuzz import fuzz
@@ -22,6 +23,21 @@ def clean_text(value):
     text = str(value).replace("\r", " ").replace("\n", " ").replace("\xa0", " ")
     text = re.sub(r"\s+", " ", text).strip()
     return text.rstrip(",").strip()
+
+
+# what XML, Excel and PostgreSQL cannot hold: control characters (tab and line breaks aside), lone surrogates
+CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff\ud800-\udfff]")
+
+
+def printable(value):
+    """A text without control characters; a list or an object with every text in it so."""
+    if isinstance(value, str):
+        return CONTROL.sub("", value)
+    if isinstance(value, list):
+        return [printable(v) for v in value]
+    if isinstance(value, dict):
+        return {printable(k): printable(v) for k, v in value.items()}
+    return value
 
 
 def clean_id(value):
@@ -105,6 +121,84 @@ def norm_isrc(value):
     """'In-T20-24-04686' -> 'INT202404686'; '' if not a valid ISRC."""
     text = re.sub(r"[^0-9A-Za-z]", "", clean_text(value)).upper()
     return text if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}\d{7}", text) else ""
+
+
+ISRC_PIPE = " | "   # several ISRCs of one song in one cell
+
+
+def _isrc_pieces(value):
+    """(valid ISRCs in order, text that is no ISRC) of a cell that may hold several, whatever stands between them."""
+    text = clean_text(value)
+    whole = norm_isrc(text)
+    if whole or not text:
+        return ([whole] if whole else []), ""
+    found, rest = [], []
+    for part in re.split(r"[|,;/&]+", text):
+        one = norm_isrc(part)
+        if one:
+            found.append(one)
+            continue
+        for word in part.split():
+            (found if norm_isrc(word) else rest).append(norm_isrc(word) or word)
+    return found, " ".join(rest)
+
+
+def isrc_list(value):
+    """Every valid ISRC a cell (or a list of cells) holds, each once: 'In-T20-24-04686, INT202404687' -> both."""
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    return list(dict.fromkeys(i for v in values for i in _isrc_pieces(v)[0]))
+
+
+def isrc_rest(value):
+    """What a cell holds that is no ISRC ('JUST MOHABBAT TITLE TRACK'): such a cell is never written over."""
+    return _isrc_pieces(value)[1]
+
+
+def pipe_isrcs(isrcs):
+    """ISRCs as one cell: 'ISRC1 | ISRC2 | ISRC3', each once."""
+    return ISRC_PIPE.join(dict.fromkeys(i for i in isrcs if i))
+
+
+MONTHS = {m: n for n, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), start=1)}
+
+
+def _day(y, m, d):
+    try:
+        return date(int(y), int(m), int(d)).isoformat()
+    except ValueError:
+        return ""
+
+
+def norm_date(value):
+    """A complete date as 'YYYY-MM-DD'; '' when the day or the month is missing. Text is read day first ('08-05-2013'
+    is 8 May 2013, as the LNV's column says: DD-MM-YYYY) unless only the other order is a date."""
+    if isinstance(value, (datetime, date)):
+        return (value.date() if isinstance(value, datetime) else value).isoformat()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return (date(1899, 12, 30) + timedelta(days=int(value))).isoformat() if 10000 < value < 80000 else ""
+    text = clean_text(value)
+    if m := re.match(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)", text):
+        return _day(*m.groups())
+    if m := re.match(r"(\d{1,2})[-/.\s](\d{1,2})[-/.\s](\d{4})(?!\d)", text):
+        d, mo, y = m.groups()
+        return _day(y, mo, d) or _day(y, d, mo)
+    if m := re.match(r"(\d{1,2})(?:st|nd|rd|th)?[-\s]+([A-Za-z]{3})[A-Za-z]*\.?,?[-\s]+(\d{4})", text):
+        return _day(m[3], MONTHS.get(m[2].lower(), 0), m[1])
+    if m := re.match(r"([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})", text):
+        return _day(m[3], MONTHS.get(m[1].lower(), 0), m[2])
+    return ""
+
+
+def show_date(value):
+    """A date as the LNV writes it: '2013-05-08' -> '08-05-2013'; text that is no complete date stays as it is."""
+    iso = norm_date(value)
+    return f"{iso[8:]}-{iso[5:7]}-{iso[:4]}" if iso else clean_text(value)
+
+
+def is_link(value):
+    """A web link that is safe to open: http(s) with a host, no spaces or control characters (never javascript:)."""
+    text = str(value or "")
+    return len(text) <= 2000 and bool(re.fullmatch(r"https?://[^\s/?#\\<>\"'`]+\.[^\s/?#\\<>\"'`]+(?:[/?#][^\s<>\"`]*)?", text, re.I))
 
 
 @lru_cache(maxsize=131072)

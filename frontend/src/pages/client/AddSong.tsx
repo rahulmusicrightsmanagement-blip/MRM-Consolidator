@@ -146,7 +146,7 @@ function TypeSong({ f, edit, commit, act, close, done }: {
   if (!form) return <div className="loading"><span className="spinner" />Reading the LNV’s fields…</div>
   return (
     <form className="as-form" onSubmit={(e) => { e.preventDefault(); void save() }} noValidate>
-      <div className="as-grid">{field('title', 'Title', 'Song title')}{field('album', 'Album', 'Film / album')}{field('isrc', 'ISRC', 'e.g. INH100510220')}</div>
+      <div className="as-grid">{field('title', 'Title', 'Song title')}{field('album', 'Album', 'Film / album')}{field('isrc', 'ISRC', 'INH100510220 | INH100510221')}</div>
       <fieldset className={`as-set ${wrong.links ? 'bad' : ''}`}>
         <legend>Song links <i className="as-req">required</i></legend>
         {t.links.map((u, i) => (

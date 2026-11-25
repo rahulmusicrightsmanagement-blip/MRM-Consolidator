@@ -8,11 +8,11 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from . import typed
-from .dataclean import VERSION_RE, person_key, phonetic, same_people, title_key
+from .dataclean import VERSION_RE, person_key, phonetic, release_date, same_name, same_people, title_key
 from .iprs import SHARE_KEYS
-from .master import read_layout
-from .xlsx_patch import PatchSheet
-from .normalize import clean_text, norm_ipi, norm_title, same_party
+from .master import lnv_link, read_layout
+from .xlsx_patch import PatchSheet, compact
+from .normalize import clean_text, is_link, isrc_list, isrc_rest, norm_ipi, norm_isrc, norm_title, pipe_isrcs, printable, same_party, show_date
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E46")
 HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -33,12 +33,15 @@ def _sheet(wb, title, header, rows, status_col=None, widths=None):
     for cell in ws[1]:
         cell.fill, cell.font = HEADER_FILL, HEADER_FONT
         cell.alignment = Alignment(vertical="center", wrap_text=True)
-    for row in rows:
-        ws.append(["" if v is None else v for v in row])
+    for n, row in enumerate(rows, start=2):   # (ws.max_row walks every cell: not asked for each row)
+        ws.append(["" if v is None else printable(v) for v in row])
+        for c, v in enumerate(row, start=1):   # text stays text: a title that starts with "=" is never a formula
+            if isinstance(v, str) and v[:1] == "=":
+                ws.cell(n, c).data_type = "s"
         if status_col is not None:
             fill = STATUS_FILLS.get(str(row[status_col]))
             if fill:
-                ws.cell(ws.max_row, status_col + 1).fill = fill
+                ws.cell(n, status_col + 1).fill = fill
     ws.freeze_panes = "B2"
     if rows:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(header))}{len(rows) + 1}"
@@ -60,7 +63,7 @@ def _new_book():
 def _bytes(wb):
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue()
+    return compact(buf.getvalue())
 
 
 # ---- Step 1 -----------------------------------------------------------------
@@ -170,7 +173,7 @@ def _put(ws, row, col, value, fill):
     if col is None or value in (None, ""):
         return
     cell = ws.cell(row, col + 1)
-    cell.value = value
+    cell.value = printable(value)
     cell.fill = fill
 
 
@@ -206,7 +209,8 @@ def _write_iprs_work(ws, layout, row, w, sn, fill, status):
 
 REPEAT_FILL = PatternFill("solid", fgColor="FBD9C9")
 # Data clean fill fields -> the LNV's work field, or its contributor slots
-DSP_FIELDS = {"ISRC": "isrc", "Release year": "release_year", "Duration": "duration", "Label": "label", "Movie / album": "movie"}
+DSP_FIELDS = {"ISRC": "isrc", "Release year": "release_year", "Release date": "release_date", "Duration": "duration", "Label": "label",
+              "Movie / album": "movie", "Link": "website"}
 DSP_SLOTS = {"Singers": "singers", "Lyricists": "authors", "Composers": "composers"}
 
 
@@ -286,8 +290,90 @@ def lnv_update(master_path, fills, adds, repeats, source):
     return final_report(master_path, dsp={"fills": fills, "adds": adds, "repeats": repeats, "source": source})
 
 
-PICK_FIELDS = {"Title": "title", "Film / album": "movie", "Year": "release_year", "ISRC": "isrc", "Label": "label"}
+PICK_FIELDS = {"Title": "title", "Film / album": "movie", "Year": "release_year", "ISRC": "isrc", "Label": "label",
+               "Release date": "release_date", "Alternate title": "alt_title", "Link": "website"}
 PICK_SLOTS = {"Lyricist": "authors", "Composer": "composers", "Singer": "singers", "Publisher": "publishers"}
+
+
+# columns of the LNV a few sheets do not have: added after the last one when there is something to write
+EXTRA_COLUMNS = {"release_date": "Date Of Release(DD-MM-YYYY)", "alt_title": "Alternate Work", "website": "Website1"}
+
+
+def _last_column(ws):
+    """The sheet's last column with a header (0-based) – one just added counts too."""
+    return max([c for c, h in enumerate(ws[1]) if clean_text(h.value)] + [c - 1 for (r, c), v in ws.values.items() if r == 1 and clean_text(v)] + [-1])
+
+
+def _column(ws, layout, field):
+    """The LNV's column of a field – one of EXTRA_COLUMNS is added when the LNV has none (None for any other)."""
+    fields = layout["fields"]
+    if field not in fields and field in EXTRA_COLUMNS:
+        fields[field] = _last_column(ws) + 1
+        _put(ws, 1, fields[field], EXTRA_COLUMNS[field], ADDED_FILL)
+    return fields.get(field)
+
+
+SPOTIFY_TRACK = re.compile(r"spotify\.com/(?:[\w-]+/)?track/([A-Za-z0-9]{22})")
+
+
+def _write_link(ws, layout, row, url, fill):
+    """A link in the column the row's link stands in (a Spotify ID gets the track's ID), else in Website1. False when it
+    is not a web link."""
+    if not is_link(url):
+        return False
+    fields = layout["fields"]
+    at = lambda f: clean_text(ws.cell(row, fields[f] + 1).value) if f in fields else ""
+    _, field = lnv_link({f: at(f) for f in ("website", "website2", "spotify_id", "youtube")})
+    track = SPOTIFY_TRACK.search(url)
+    if track and at("spotify_id"):   # the ID names the old track: it goes with the link
+        _put(ws, row, fields["spotify_id"], track.group(1), fill)
+    if field != "spotify_id" or not track:
+        _put(ws, row, fields[field] if field and field != "spotify_id" else _column(ws, layout, "website"), url, fill)
+    return True
+
+
+def _alternative_names(ws, layout, dsp):
+    """The Alternative Work Name of each linked row: the work name of the source that was not kept joins the names the
+    column has (yellow). Not where the reviewer chose the value."""
+    kept = {(int(r), f) for r, f in dsp.get("kept", [])}
+    fields, changes = layout["fields"], []
+    for row, names in sorted((dsp.get("alternatives") or {}).items()):
+        row = int(row)
+        if (row, "Alternate title") in kept:
+            continue
+        old = clean_text(ws.cell(row, fields["alt_title"] + 1).value) if "alt_title" in fields else ""
+        new = [x for x in names if not any(same_name(x, y) for y in re.split(r"[;|]", old))]
+        if not new:
+            continue
+        _put(ws, row, _column(ws, layout, "alt_title"), "; ".join(([old] if old else []) + new), FILLED_FILL)
+        changes.append([row, clean_text(ws.cell(row, fields["title"] + 1).value), "Alternative work name",
+                        f"{'; '.join(new)} – the work name of the source that was not kept"])
+    return changes
+
+
+def _merge_isrcs(ws, layout, dsp):
+    """Every ISRC of a linked song in its ISRC cell – the LNV's and the DSP's – with a pipe between them, each once
+    (yellow). A cell that holds other text is left alone; so is a row where the reviewer chose the value."""
+    kept = {(int(r), f) for r, f in dsp.get("kept", [])}
+    fields, changes = layout["fields"], []
+    if "isrc" not in fields:
+        return changes
+    col = fields["isrc"] + 1
+    plan = {int(r): list(v) for r, v in (dsp.get("isrcs") or {}).items()}
+    for row in range(2, len(ws.rows) + 1):
+        old = clean_text(ws.cell(row, col).value)
+        own = isrc_list(old)
+        if (row, "ISRC") in kept or (old and isrc_rest(old)):
+            continue
+        # a row that is not linked only has what it holds written one way: no ISRC twice, a pipe between two
+        want = list(dict.fromkeys(own + plan.get(row, [])))
+        if not own or (want == own and (norm_isrc(old) == own[0] if len(own) == 1 else old == pipe_isrcs(own))):
+            continue   # blank cells are filled with the other blanks (fills)
+        _put(ws, row, fields["isrc"], pipe_isrcs(want), FILLED_FILL)
+        added = [i for i in want if i not in own]
+        changes.append([row, clean_text(ws.cell(row, fields["title"] + 1).value) if "title" in fields else "", "ISRCs merged",
+                        f"{pipe_isrcs(want)} – " + (f"{', '.join(added)} added from {dsp['source']}" if added else "the same ISRCs, each once")])
+    return changes
 
 
 def _replace_names(ws, layout, row, group, names, fill, ipis=None):
@@ -332,13 +418,21 @@ def _picks(ws, layout, dsp):
             title = title_of(row)
             more = _replace_names(ws, layout, row, PICK_SLOTS[field], values, FILLED_FILL, p.get("ipis") if "ipis" in p else None)
             new = ", ".join(values) + (" (not all fit the LNV's slots)" if more else "")
+        elif field == "Link":
+            title = title_of(row)
+            old = next((clean_text(ws.cell(row, fields[f] + 1).value) for f in ("website", "website2", "spotify_id", "youtube")
+                        if f in fields and clean_text(ws.cell(row, fields[f] + 1).value)), "")
+            new = str(values[0]).strip()
+            if not _write_link(ws, layout, row, new, FILLED_FILL):
+                continue
         else:
-            col = fields.get(PICK_FIELDS.get(field))
+            col = _column(ws, layout, PICK_FIELDS.get(field))
             if col is None:
                 continue
             title = title_of(row)
             old = clean_text(ws.cell(row, col + 1).value)
-            new = values[0][:4] if field == "Year" else values[0]
+            new = str(values[0])[:4] if field == "Year" else show_date(values[0]) if field == "Release date" \
+                else (pipe_isrcs(isrc_list(values)) or " | ".join(str(v) for v in values)) if field == "ISRC" else values[0]
             cell = ws.cell(row, col + 1)
             cell.value, cell.fill = new, FILLED_FILL
         changes.append([row, title, f"{field} changed", f"{old or '(blank)'} → {new} – " + (p.get("why") or f"the {dsp['source']} value, chosen by the reviewer")])
@@ -350,6 +444,8 @@ def _dsp_changes(ws, layout, dsp):
     IPRS just now, has), and rows entered twice marked (orange – never deleted)."""
     # the LNV's names as the IPI / CAE list has them first: a value the reviewer chose (picks) is written over them
     fields, changes = layout["fields"], _ipi_names(ws, layout, dsp)
+    changes += _alternative_names(ws, layout, dsp)   # before the titles chosen are written: they name the LNV's own
+    changes += _merge_isrcs(ws, layout, dsp)
     changes += _picks(ws, layout, dsp)
     title_of = lambda row: clean_text(ws.cell(row, fields["title"] + 1).value) if "title" in fields else ""
     for f in dsp.get("fills", []):
@@ -364,8 +460,10 @@ def _dsp_changes(ws, layout, dsp):
             if _put_names(ws, layout, row, DSP_SLOTS[field], names, FILLED_FILL, ipis):
                 value += " (not all fit the LNV's slots)"
         else:
-            col = fields.get(DSP_FIELDS.get(field))
+            col = _column(ws, layout, DSP_FIELDS.get(field))
             if col is None or clean_text(ws.cell(row, col + 1).value):
+                continue
+            if field == "Link" and not is_link(value):
                 continue
             _put(ws, row, col, value, FILLED_FILL)
         changes.append([row, title_of(row), f"{field} filled", f"{value} – from {dsp['source']}"])
@@ -389,11 +487,13 @@ def _row_hints(ws, layout, row, dsp):
 def _write_dsp_song(ws, layout, row, song, sn, extra=None, dsp=None):
     """One DSP song (or one version of it) as a new LNV row – its names as the IPI / CAE list has them."""
     fields = layout["fields"]
-    values = {"sn": sn, "title": song["title"], "isrc": (song.get("isrcs") or [""])[0], "movie": song.get("album", ""),
-              "release_year": (song.get("year") or "")[:4], "duration": song.get("duration", ""), "label": song.get("label", ""),
-              **(extra or {})}
+    year = (song.get("year") or "")[:4]
+    values = {"sn": sn, "title": song["title"], "isrc": pipe_isrcs(song.get("isrcs") or []), "movie": song.get("album", ""),
+              "release_year": year, "release_date": release_date(song.get("dates") or [], year),
+              "duration": song.get("duration", ""), "label": song.get("label", ""), "alt_title": "; ".join(song.get("alt") or []),
+              "website": song.get("link", "") if is_link(song.get("link")) else "", **(extra or {})}
     for field, value in values.items():
-        _put(ws, row, fields.get(field), value, ADDED_FILL)
+        _put(ws, row, _column(ws, layout, field) if value else fields.get(field), value, ADDED_FILL)
     for group, key in (("authors", "lyricists"), ("composers", "composers"), ("singers", "singers")):
         names, ipis = _listed(dsp, song.get(key, []))
         _put_names(ws, layout, row, group, names, ADDED_FILL, ipis)
@@ -405,7 +505,7 @@ ORIGINAL_COLUMNS = {"original_work": "Original Work", "original_movie": "Origina
 def _original_columns(ws, layout):
     """The columns naming a version's original work: the LNV's own, else two new ones after its last column."""
     fields = layout["fields"]
-    last = max([c for c, h in enumerate(ws[1]) if clean_text(h.value)] + [-1])
+    last = _last_column(ws)
     for field, header in ORIGINAL_COLUMNS.items():
         if field not in fields:
             last += 1
@@ -452,6 +552,28 @@ def _same_new_song(song, work):
     return bool(a and b) and same_people(a, b)
 
 
+def _keep_rows(ws, keep):
+    """Only the header and these rows stay, one below another – in one pass (delete_rows moves every cell below it each
+    time: minutes on a large LNV). Each cell keeps its format and link, each row its height."""
+    new = {old: n for n, old in enumerate([1, *sorted(r for r in keep if r > 1)], start=1)}
+    cells = {}
+    for (r, c), cell in ws._cells.items():
+        if r in new:
+            cell.row = new[r]
+            cells[(new[r], c)] = cell
+    ws._cells = cells
+    for cell in cells.values():   # a link names its cell: it moves with it, and those of the rows left out go
+        if cell.hyperlink:
+            cell.hyperlink.ref = cell.coordinate
+    ws._hyperlinks = [c.hyperlink for c in cells.values() if c.hyperlink]
+    heights = {new[r]: d for r, d in ws.row_dimensions.items() if r in new}
+    for r in list(ws.row_dimensions):
+        del ws.row_dimensions[r]
+    for r, d in heights.items():
+        d.index = r
+        ws.row_dimensions[r] = d
+
+
 def lnv_action_report(master_path, iprs, final, tunecodes, society, status):
     """Our master (LNV format) cut down to the songs that need this action at this society.
 
@@ -490,16 +612,7 @@ def lnv_action_report(master_path, iprs, final, tunecodes, society, status):
                 _put(ws, row, block["fields"].get("amendment_purpose"), "; ".join(res["reasons"]), FILLED_FILL)
         notes.append([r["title"], ", ".join(res["codes"]) or "—", label, "\n".join(res["reasons"])])
 
-    # Delete the other rows bottom-up, a run of consecutive rows at a time (one delete_rows per row is slow).
-    row = ws.max_row
-    while row > 1:
-        if row in keep:
-            row -= 1
-            continue
-        end = row
-        while row > 1 and row not in keep:
-            row -= 1
-        ws.delete_rows(row + 1, end - row)
+    _keep_rows(ws, keep)
     sn_col = layout["fields"].get("sn")
     if sn_col is not None:
         for n in range(2, ws.max_row + 1):
@@ -512,8 +625,11 @@ def lnv_action_report(master_path, iprs, final, tunecodes, society, status):
     why.append(["Title", f"{society} tune code", "Action", "Reason"])
     for cell in why[1]:
         cell.fill, cell.font = HEADER_FILL, HEADER_FONT
-    for n in notes:
-        why.append(n)
+    for r, n in enumerate(notes, start=2):
+        why.append([printable(v) for v in n])
+        for c, v in enumerate(n, start=1):
+            if isinstance(v, str) and v[:1] == "=":
+                why.cell(r, c).data_type = "s"
     for col, width in zip("ABCD", (45, 22, 16, 90)):
         why.column_dimensions[col].width = width
     return _bytes(wb)
@@ -565,7 +681,9 @@ def apply_master_edits(ws, layout, edits, works):
             elif field in ("ISWC", "ISRC"):
                 key = field.lower()
                 value = w[f"{key}_valid"] or w[key]
-                _put(ws, row, fields.get(key), value, FILLED_FILL)
+                held = isrc_list(ws.cell(row, fields["isrc"] + 1).value) if key == "isrc" and "isrc" in fields else []
+                # a cell with several ISRCs keeps them: IPRS's comes first
+                _put(ws, row, fields.get(key), pipe_isrcs([value, *held]) if len(held) > 1 else value, FILLED_FILL)
                 for b in layout["blocks"]:  # the IPRS block that carries this work's tune code
                     if b["society"] == "IPRS" and str(ws.cell(row, b["code"] + 1).value or "").strip() == w["internal_no"]:
                         _put(ws, row, b[key], value, FILLED_FILL)
@@ -827,7 +945,7 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
     ws.order = [x["row"] for x in order]
 
     # the three columns, after the LNV's last one
-    col = max([c for c, h in enumerate(ws[1]) if clean_text(h.value)] + [fields.get(f, -1) for f in ORIGINAL_COLUMNS] + [-1])
+    col = _last_column(ws)
     for i, header in enumerate(ARRANGE_COLUMNS, start=1):
         _put(ws, 1, col + i, header, ADDED_FILL)
     for k, xs in groups.items():

@@ -16,7 +16,7 @@ from openpyxl.utils import get_column_letter
 
 from .iprs import AUTHOR_ROLES, COMPOSER_ROLES, PUBLISHER_ROLES, _key as iprs_key
 from .mapping import CA_ROLES
-from .normalize import clean_text, norm_ipi, norm_isrc, norm_iswc, norm_title, same_party, to_number
+from .normalize import clean_text, isrc_list, norm_ipi, norm_isrc, norm_iswc, norm_title, same_party, to_number
 from .xlsx import read_rows
 
 
@@ -170,7 +170,9 @@ def build_pair(iprs_path, master_path, work, song, layout):
     def identifier(label, value, iprs_header, field, norm, block_key):
         """ISWC / ISRC: our master often keeps them only in a society block, not in its top column."""
         top = f.get(field)
-        r = row(label, value, icol(iprs_header), top, lambda a, b: norm(a) and norm(a) == norm(b))
+        # our ISRC cell may hold several ('ISRC1 | ISRC2'): one of them being IPRS's is the same
+        same = (lambda a, b: norm(a) and norm(a) in isrc_list(b)) if field == "isrc" else (lambda a, b: norm(a) and norm(a) == norm(b))
+        r = row(label, value, icol(iprs_header), top, same)
         if r["status"] == "only_iprs" and norm(value):
             for b in (layout["blocks"] if layout else []):
                 if norm(mcell(b[block_key])) == norm(value):

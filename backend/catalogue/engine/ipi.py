@@ -245,7 +245,7 @@ def annotate_step(step, index):
         return step
     for c in step.get("cases", []):
         lnv = list(c.get("lnv") or []) + [v["lnv"] for v in c.get("in_lnv") or []] + ([c["origin"]] if c.get("origin") else []) \
-            + list(c.get("was") or [])
+            + list(c.get("was") or []) + list(c.get("off_lnv") or [])
         hints = index.hints([i for r in lnv for ids in (r.get("cae") or {}).values() for i in ids if i])
         for r in lnv:
             annotate(r, index, hints)
@@ -256,6 +256,10 @@ def annotate_step(step, index):
             for f in ("Lyricist", "Composer", "Singer"):
                 if isinstance(row.get(f), list) and row[f]:
                     row[f] = index.names(row[f], (), hints)[0]
+    for x in step.get("moved", []):
+        hints = index.hints([i for r in x["lnv"] for ids in (r.get("cae") or {}).values() for i in ids if i])
+        for r in [*x["lnv"], x["muso"]]:
+            annotate(r, index, hints)
     step["ipi"] = {"version": index.version, "members": len(index.members)}
     return step
 

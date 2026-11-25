@@ -9,6 +9,7 @@ applied; the reviewer only changes what is wrong.
 """
 import re
 
+from . import master
 from .dataclean import work_check
 from .normalize import display_name, norm_title
 
@@ -39,12 +40,8 @@ def _names(people):
 # ---------------------------------------------------------------- records: one source's view of a song
 
 def lnv_link(song):
-    """The LNV row's link: its website column (often a Spotify track), else its Spotify ID as a track link."""
-    site = str(song.get("website") or "").strip()
-    if site:
-        return site if re.match(r"https?://", site, re.I) else f"https://{site}"
-    sid = str(song.get("spotify_id") or "").strip()
-    return f"https://open.spotify.com/track/{sid}" if re.fullmatch(r"[A-Za-z0-9]{22}", sid) else ""
+    """The LNV row's link: its website columns, else its Spotify ID as a track link, else its YouTube column."""
+    return master.lnv_link(song)[0]
 
 
 def _named(people, limit=None):
@@ -67,9 +64,9 @@ def lnv_record(song):
         "Title": song["title"], "Film / album": song.get("movie", ""), "Lyricist": lyr[0],
         "Composer": com[0], "Singer": sing[0],
         "ISRC": song.get("isrcs", []), "ISWC": song.get("iswcs", []), "IPRS code": codes,
-        "Year": song.get("release_year", ""), "Label": song.get("label", ""), "Length": song.get("duration", ""),
-        "Publisher": pub[0],
-        "Alternate title": song.get("alt_title", ""), "Language": song.get("language", ""),
+        "Year": song.get("release_year", ""), "Release date": song.get("release_date", ""),
+        "Label": song.get("label", ""), "Length": song.get("duration", ""), "Publisher": pub[0],
+        "Alternate title": song.get("alt_title", ""), "Language": song.get("language", ""), "Link": lnv_link(song),
     }, **({"cae": cae} if cae else {})}
 
 

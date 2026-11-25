@@ -4,7 +4,7 @@ one composer or lyricist with a CAE / IPI number (every composer and lyricist ne
 import re
 
 from .master import _key, read_layout
-from .normalize import clean_text, norm_ipi, norm_isrc, to_number
+from .normalize import clean_text, is_link, isrc_list, isrc_rest, norm_ipi, pipe_isrcs, to_number
 
 GROUPS = {"composers": ("Composer", "C"), "authors": ("Lyricist", "A"), "singers": ("Singer", "S"), "publishers": ("Publisher", "E")}
 # columns the form's own parts fill: the rest of the LNV's work columns are offered as they are
@@ -40,17 +40,17 @@ def clean(data, header):
     for k, label in (("title", "Title"), ("album", "Album")):
         if not out[k]:
             wrong[k] = f"{label} is required"
-    out["isrc"] = norm_isrc(data.get("isrc"))
+    out["isrc"] = pipe_isrcs(isrc_list(data.get("isrc"))[:20])   # one, or several with | between them
     if not clean_text(data.get("isrc")):
         wrong["isrc"] = "ISRC is required"
-    elif not out["isrc"]:
+    elif not out["isrc"] or isrc_rest(data.get("isrc")):
         wrong["isrc"] = "ISRC must be 12 characters, e.g. INH100510220"
     links = []
     for u in data.get("links") if isinstance(data.get("links"), list) else []:
         u = clean_text(u)[:500]
         if not u:
             continue
-        if not re.match(r"https?://[^\s/]+\.[^\s/]+", u, re.I):
+        if not is_link(u):
             wrong["links"] = f"Not a link: {u[:60]}"
         elif u not in links:
             links.append(u)
@@ -110,7 +110,7 @@ def record(data):
     names = lambda g: [p["name"] for p in (data.get("people") or {}).get(g, [])]
     return {"src": "Typed", "ref": "Typed", "link": (data.get("links") or [""])[0], "fields": {
         "Title": data.get("title", ""), "Film / album": data.get("album", ""), "Lyricist": names("authors"), "Composer": names("composers"),
-        "Singer": names("singers"), "Publisher": names("publishers"), "ISRC": [data["isrc"]] if data.get("isrc") else [],
+        "Singer": names("singers"), "Publisher": names("publishers"), "ISRC": isrc_list(data.get("isrc")),
         "Year": (data.get("more") or {}).get("RELEASEYEARYYYY", "")}}
 
 

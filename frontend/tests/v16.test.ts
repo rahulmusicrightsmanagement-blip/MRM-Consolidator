@@ -135,10 +135,11 @@ test('the Excel lists hold exactly the rows their counts count', () => {
   const gone = song('Gone', 'G', 'gone', [], { done: true, answer: { song: 'G', choice: 'deleted', by: 'you' }, was: [row(7, 'Gone')] })
   const d = step([a, n, add, gone], [typedSong('alpha')])
   const x = { families: familiesOf(d.cases, d.typed), loose: d.cases.filter((c) => !inFamilies(c) && !isNewRow(c) && !isDeleted(c)), newRows: d.cases.filter(isNewRow), deleted: d.cases.filter(isDeleted), isDone: (c: ReviewCase) => c.done, d, p: NO_PENDING }
-  assert.deepEqual(EACH.map((k) => listCount(x, k)), [1, 1, 1, 2, 1, 1, 2, 1, 1])
+  assert.deepEqual(EACH.map((k) => listCount(x, k)), [1, 1, 1, 1, 2, 0, 1, 1, 2, 1, 1])   // v1.7: song status first, not a match after the checked ones
   for (const k of EACH) { const s = sheetOf(x, k); assert.equal(s.rows.length, listCount(x, k), k); assert.ok(s.rows.every((r) => r.length === s.header.length), k) }
   assert.equal(sheetsOf(x, 'all').length, EACH.length)
-  assert.deepEqual(sheetOf(x, 'deleted').rows[0].slice(0, 2).concat(sheetOf(x, 'deleted').rows[0][12]), ['Gone', 1, '7'])
+  const s = sheetOf(x, 'deleted')
+  assert.deepEqual(s.rows[0].slice(0, 2).concat(s.rows[0][s.header.indexOf('Was LNV row')]), ['Gone', 1, '7'])
 })
 
 test('remarks: kept by ISRC, one for all recordings of a song, shown mixed when they differ', async () => {

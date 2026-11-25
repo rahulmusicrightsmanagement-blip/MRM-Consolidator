@@ -3514,3 +3514,105 @@ button.side-ver:hover b, .foot-ver:hover { color: var(--brand); text-decoration:
   .shell2.auto .side-ver { height: 30px; padding-top: 0; padding-bottom: 0; align-items: center; }
   .shell2.auto .user-row { height: 48px; padding-top: 0; padding-bottom: 0; }
 }
+
+/* ============ v1.7: status · last updated · both sides editable · kept answers ============ */
+.st { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 2px 10px; border-radius: 99px; font-size: 13.5px; font-weight: 650; white-space: nowrap; }
+.st b { font-variant-numeric: tabular-nums; font-weight: 700; }
+.st svg { flex: none; }
+.st.todo { background: var(--warn-bg); color: var(--warn); }
+.st.part { background: var(--info-bg); color: var(--info); }
+.st.done { background: var(--good-bg); color: var(--good); }
+.st.out { background: var(--bad-bg); color: var(--bad); }
+.st.sm { padding: 1px 8px; font-size: 12.5px; }
+.fx .fx-col .gr-rows .st { margin-left: 2px; }
+.sm-detail-nav .st { font-size: 14px; }
+
+/* the list: each song's state on its left edge and in words */
+.rv .sm-review .sm-item.s-todo { border-left-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+.rv .sm-review .sm-item.s-part { border-left-color: var(--info); }
+.rv .sm-review .sm-item.s-done { border-left-color: var(--good); }
+.rv .sm-review .sm-item.on { border-left-width: 4px; }
+.li-st { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; min-width: 0; }
+.li-upd { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.li-upd.last { color: var(--violet); font-weight: 650; }
+
+/* progress of the songs */
+.pg { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.pg-item { display: inline-flex; align-items: center; gap: 7px; height: 36px; padding: 0 13px; border: 1.5px solid transparent; border-radius: 99px; font: inherit; font-size: 14.5px; font-weight: 600; cursor: pointer; }
+.pg-item b { font-size: 15.5px; font-variant-numeric: tabular-nums; }
+.pg-item small { font-size: 12.5px; font-weight: 500; opacity: .85; }
+.pg-item.todo { background: var(--warn-bg); color: var(--warn); }
+.pg-item.part { background: var(--info-bg); color: var(--info); }
+.pg-item.done { background: var(--good-bg); color: var(--good); }
+.pg-item:hover, .pg-item.on { border-color: currentColor; }
+.pg-item:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.pg-bar { display: flex; flex: 1 1 120px; min-width: 90px; max-width: 320px; height: 8px; overflow: hidden; border-radius: 99px; background: var(--warn-bg); }
+.pg-bar i.done { background: var(--good); }
+.pg-bar i.part { background: var(--info); }
+.pg-note { font-size: 13.5px; }
+
+/* the song changed last */
+.lu { display: flex; flex-direction: column; gap: 6px; padding: 8px 14px; border: 1px solid color-mix(in srgb, var(--violet) 30%, var(--border)); border-radius: var(--r); background: color-mix(in srgb, var(--violet-bg) 45%, var(--surface)); font-size: 14.5px; }
+.lu.empty { flex-direction: row; align-items: center; border-color: var(--border); background: var(--surface-2); }
+.lu svg { flex: none; }
+.lu-head { display: flex; align-items: center; gap: 9px; min-width: 0; color: var(--violet); }
+.lu-label { flex: none; font-weight: 700; }
+.lu-line { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 2px 10px; min-width: 0; color: var(--text); }
+.lu-title { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lu-when { font-weight: 600; color: var(--violet); white-space: nowrap; }
+.lu-by { white-space: nowrap; }
+.lu-what { min-width: 0; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lu-more { flex: none; }
+.lu-list { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; border-top: 1px solid color-mix(in srgb, var(--violet) 20%, var(--border)); }
+.lu-gone { font-size: 13px; }
+.fam-upd { display: inline-flex; align-items: center; gap: 4px; font-size: 13.5px; white-space: nowrap; }
+
+/* a match turned down: in its place, only to read */
+.fam-count.checked { background: var(--good-bg); color: var(--good); }
+.fam-count.gone { background: var(--bad-bg); color: var(--bad); }
+.fx .fx-col.out, .fx td.fx-out { background: color-mix(in srgb, var(--surface-3) 70%, var(--surface)); color: var(--muted); }
+.fx .fx-col.out { box-shadow: inset 0 3px 0 var(--bad); }
+.fx-rec.plain { cursor: default; color: var(--muted); }
+.fx-rec.plain:hover { text-decoration: none; }
+.fx-out-why { color: var(--bad); font-weight: 650; font-size: 14.5px; }
+.pc.out { opacity: .92; background: color-mix(in srgb, var(--surface-3) 60%, var(--surface)); }
+.pc-out { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+
+/* the DSP's own value, editable under what the LNV keeps */
+.ml { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; padding-top: 7px; border-top: 1px dashed var(--border); font-size: 14px; font-weight: 500; color: var(--text-2); }
+.ml-src { flex: none; margin-top: 2px; padding: 0 7px; border-radius: 99px; background: var(--violet-bg); color: var(--violet); font-size: 12px; font-weight: 700; }
+.ml .mf, .ml > .fe-edit-wrap { flex: 1; min-width: 0; }
+.ml-more { flex: none; font-size: 13px; }
+.mf { min-width: 0; }
+.mf .fe { min-height: 0; }
+.mf .fe-btn.pen { width: 24px; height: 24px; opacity: .55; }
+.mf:hover .fe-btn.pen, .mf .fe-btn.pen:focus-visible { opacity: 1; }
+.mf.edited .fe-text { color: var(--violet); font-weight: 650; }
+.mf-was { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; margin-top: 2px; font-size: 12.5px; color: var(--muted); }
+.mf-was .rv-text-btn { font-size: 12.5px; }
+.fe-edit-wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.fe-error { color: var(--bad); font-size: 13px; font-weight: 600; }
+.fc-in.wrong { border-color: var(--bad); }
+.keep-tag.all, .keep-tag.auto { background: var(--info-bg); color: var(--info); }
+.keep-chip.all, .keep-chip.auto { background: var(--info-bg); color: var(--info); }
+.fam-main-fields dd .mf { max-width: 100%; }
+.fam-main-fields dd { max-width: 340px; white-space: normal; overflow: visible; }
+.pop-note { margin: 0 0 8px; font-size: 14px; }
+.cv-fields .mf .fe-btn.pen { width: 22px; height: 22px; }
+@media (max-width: 900px) { .lu-head { flex-wrap: wrap; } .lu-what { display: none; } .pg-note { display: none; } }
+.journey-last { display: flex; align-items: center; gap: 4px; max-width: 280px; margin-top: 2px; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.journey-last b { max-width: 130px; overflow: hidden; text-overflow: ellipsis; font-weight: 600; color: var(--text-2); }
+.journey-last svg { flex: none; }
+
+/* progress and the song changed last share one line where there is room */
+.rv-strip { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 14px; padding: 2px 16px 0 0; }
+.rv-strip .pg { flex: 0 1 auto; }
+.rv-strip .pg-bar { flex: 0 0 110px; }
+.rv-strip .lu { flex: 1 1 420px; min-width: 0; padding: 4px 12px; }
+.rv-strip .lu.empty { flex: 0 1 auto; }
+.st.sm b { font-size: 12.5px; }
+.st b { font-size: inherit; }
+@media (max-width: 1900px) { .rv-strip .pg-note { display: none; } }
+.fam-counts { gap: 6px 8px; }
+.rv-strip { margin-bottom: 8px; }
+.rv-strip .pg + .lu .lu-what { display: none; }

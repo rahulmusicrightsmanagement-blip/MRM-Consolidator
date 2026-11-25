@@ -13,7 +13,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.http import JsonResponse
+from django.http import HttpResponseRedirect, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_http_methods
@@ -53,6 +53,12 @@ class LoginRequiredMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
+        # Django's own admin has no lock-out on wrong passwords: its sign-in page is not offered – the super admin signs
+        # in here, with the app's sign-in, and then opens /admin/
+        if request.path.startswith("/admin/") and not is_super_admin(request.user):
+            return HttpResponseRedirect("/")
+        if request.path.startswith("/api/") and int(request.META.get("CONTENT_LENGTH") or 0) > settings.MAX_REQUEST_BYTES:
+            return JsonResponse({"error": "The file is too large."}, status=413)
         if request.path.startswith("/api/") and request.path not in PUBLIC_API and not request.user.is_authenticated:
             return JsonResponse({"error": "Please sign in.", "auth": "required"}, status=401)
         return self.get_response(request)
@@ -60,9 +66,10 @@ class LoginRequiredMiddleware:
 
 def _body(request):
     try:
-        return json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
+        data = json.loads(request.body or b"{}")
+    except (ValueError, RecursionError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _user_json(user):
@@ -96,9 +103,9 @@ def me(request):
 @require_http_methods(["POST"])
 def login_view(request):
     data = _body(request)
-    email = (data.get("email") or "").strip().lower()
-    password = data.get("password") or ""
-    if not email or not password:
+    email, password = data.get("email") or "", data.get("password") or ""
+    email = email.strip().lower() if isinstance(email, str) else None
+    if not isinstance(email, str) or not isinstance(password, str) or not email or not password or "\x00" in email + password or len(email) > 254 or len(password) > 1000:
         return JsonResponse({"error": "Enter your email and password."}, status=400)
     key = f"login-fail:{email}:{request.META.get('REMOTE_ADDR', '')}"
     if cache.get(key, 0) >= MAX_FAILURES:

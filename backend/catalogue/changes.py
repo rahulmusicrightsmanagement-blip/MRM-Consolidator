@@ -10,7 +10,9 @@ POST /api/clients/<id>/songs/   {key?, data, log}  a song typed (or an earlier o
 import uuid
 from collections import OrderedDict
 
+from django.core.cache import cache
 from django.db import transaction
+from django.db.models import Count, Max
 from django.utils import timezone
 
 from .models import CleanChange, CleanDecision, NameAlias
@@ -138,6 +140,41 @@ def listing(client):
     return [{"id": r["id"], "songs": r["songs"], "lines": r["lines"], "by": r["by"], "at": r["at"].isoformat(), "closed": r["closed"],
              "undone_at": r["undone_at"].isoformat() if r["undone_at"] else None, "undone_by": r["undone_by"],
              "with": later.get(r["id"], [])} for r in rows]
+
+
+# the songs "Last updated" goes through, and how many it names
+TRACKED, NAMED = 5000, 10
+
+
+def updates(client):
+    """Last updated: the songs changed last, newest first ("last": their names, when, by whom, what), and when each song
+    was last changed ("songs": {song key: ISO time}). A change undone counts as one too. Kept until the next change."""
+    mark = client.clean_changes.aggregate(n=Count("id"), last=Max("id"), undone=Max("undone_at"))
+    if not mark["n"]:
+        return {"last": [], "songs": {}}
+    key = f"updates-{client.id}-{mark['n']}-{mark['last']}-{mark['undone'].timestamp() if mark['undone'] else 0}"
+    out = cache.get(key)
+    if out is None:
+        seen = {}
+        for songs, at, by, undone_at, undone_by, pk in client.clean_changes.order_by("-id").values_list(
+                "songs", "at", "by", "undone_at", "undone_by", "id")[:TRACKED]:
+            when, who, undone = (undone_at, undone_by, True) if undone_at else (at, by, False)
+            for s in songs:
+                if s.get("key") and s["key"] != "other" and (s["key"] not in seen or when > seen[s["key"]]["when"]):
+                    seen[s["key"]] = {"key": s["key"], "title": s.get("title") or "", "when": when, "by": who, "undone": undone, "id": pk}
+        newest = sorted(seen.values(), key=lambda x: x["when"], reverse=True)
+        lines = dict(client.clean_changes.filter(id__in=[x["id"] for x in newest[:NAMED]]).values_list("id", "lines"))
+        out = {"last": [{"key": x["key"], "title": x["title"], "at": x["when"].isoformat(), "by": x["by"],
+                         "what": ("Undone: " if x["undone"] else "") + str((lines.get(x["id"]) or [""])[0])} for x in newest[:NAMED]],
+               "songs": {x["key"]: x["when"].isoformat() for x in newest}}
+        cache.set(key, out, 24 * 60 * 60)
+    return out
+
+
+def last_songs(client_ids):
+    """Each client's song changed last, for the client list: {client id: {"title", "at", "by"}} – one query."""
+    rows = CleanChange.objects.filter(client_id__in=client_ids).order_by("client_id", "-id").distinct("client_id").values("client_id", "songs", "at", "by")
+    return {r["client_id"]: {"title": str(((r["songs"] or [{}])[0] or {}).get("title") or ""), "at": r["at"].isoformat(), "by": r["by"]} for r in rows}
 
 
 class Conflict(Exception):

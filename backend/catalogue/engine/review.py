@@ -23,6 +23,7 @@ import re
 from collections import OrderedDict
 
 from . import dataclean, songmerge, typed
+from .normalize import clean_text, isrc_list, norm_date, show_date
 from .steps import _names, _user, lnv_record
 
 KIND_HELP = {
@@ -34,19 +35,47 @@ KIND_HELP = {
 ORDER = {"names": 0, "versions": 1, "isrc": 2, "check": 3, "missing": 4, "twice": 5, "left_out": 6}
 
 
-def _recording(rows, recs, ids, rid, rtype, source):
+def _recording(rows, recs, ids, rid, rtype, source, edits=None):
+    """One DSP recording, with the reviewer's corrections (edits: {recording id: {field: value}}) – what the sheet has
+    for a corrected field is kept beside it ("edited")."""
     idxs = recs[rid]
     p = rows[idxs[0]]
     dates = sorted(rows[i]["date"] for i in idxs if re.match(r"\d{4}", rows[i]["date"] or ""))
+    full = sorted(d for i in idxs if (d := norm_date(rows[i]["date"])))
     sheet_rows = [rows[i]["row"] for i in idxs]
-    return {"src": source, "ref": f"Row {sheet_rows[0]}" + (f" +{len(idxs) - 1}" if len(idxs) > 1 else ""), "id": ids[rid],
+    out = {"src": source, "ref": f"Row {sheet_rows[0]}" + (f" +{len(idxs) - 1}" if len(idxs) > 1 else ""), "id": ids[rid],
             "sheet_rows": sheet_rows, "link": p["link"], "version": rtype, "fields": {
                 "Title": p["title"], "Film / album": p["album"],
                 "Lyricist": songmerge._names(rows, idxs, "lyricists"), "Composer": songmerge._names(rows, idxs, "composers"),
                 "Singer": songmerge._names(rows, idxs, "singers")[:6],
                 "Publisher": list(OrderedDict.fromkeys(x for i in idxs for x in rows[i].get("publishers", [])))[:4],
                 "ISRC": list(OrderedDict.fromkeys(t for i in idxs for t in rows[i]["isrcs"])),
-                "Year": dates[0][:10] if dates else ""}}
+                "Year": dates[0][:4] if dates else "", "Release date": show_date(full[0]) if full else "",
+                "Link": p["link"]}}
+    fixed = (edits or {}).get(ids[rid]) or {}
+    if fixed:
+        out["edited"] = {}
+        for f in sorted(fixed, key=lambda f: f == "Year"):
+            v = fixed[f]
+            if f == "Link":
+                out["link"] = v
+            out["edited"][f] = out["fields"].get(f, "")
+            out["fields"][f] = v
+            if f == "Release date" and v:
+                out["edited"].setdefault("Year", out["fields"]["Year"])
+                out["fields"]["Year"] = norm_date(v)[:4]
+    return out
+
+
+def oldest(record):
+    """A recording's release, to find the oldest: the sheet's own date (a correction never changes the main version)."""
+    raw = record.get("edited") or {}
+    return norm_date(raw.get("Release date", record["fields"].get("Release date"))) or raw.get("Year", record["fields"].get("Year")) or "9999"
+
+
+def raw_field(record, field):
+    """What the sheet has in a field, a correction aside."""
+    return (record.get("edited") or {}).get(field, record["fields"].get(field))
 
 
 def _marks(r):
@@ -104,7 +133,9 @@ def _lnv_part(kind, item, rec):
             return recs + [_candidate(rec, c) for c in also], {
                 "song": song, "choice": "same", "rows": d["data"].get("rows") or rows, "by": "you",
                 **({"also": [c["row"] for c in also]} if also else {})}
-        return recs, {"song": song, "choice": "same", "rows": rows, "by": "app", "why": item.get("auto") or "Same writers and publisher"}
+        # a row it would have had, had the reviewer not given it to another recording: still shown, still to check
+        return recs + [_candidate(rec, c) for c in item.get("also") or []], {
+            "song": song, "choice": "same", "rows": rows, "by": "app", "why": item.get("auto") or "Same writers and publisher"}
     if kind == "check":
         d = _user(item)
         recs = [_candidate(rec, c) for c in item["candidates"]]
@@ -198,10 +229,14 @@ def families(cases):
     # a song the reviewer added to another never makes or unmakes a name, nor becomes its main version
     own = lambda cs: [c for c in cs if not c.get("joined")] or cs
     tagged = lambda c: all(r.get("version") and r["version"] not in PLAIN for r in c["muso"] if r.get("in"))
+    # the songs of a name sent out of their match count here as before: an answer on one song moves no other one
+    sent = group([c for c in cases if c["kind"] not in ("names", "twice") and c not in matched and (c.get("off_lnv") or (
+        c["answer"].get("by") == "you" and c["answer"].get("choice") in ("add", "deleted", "not_ours") and (c.get("was") or c.get("in_lnv")))
+        or any(v["answer"] == "none" for v in c.get("in_lnv") or []))])
     keys = sorted(by, key=len)
     for k in reversed(keys):
         base = next((x for x in reversed(keys) if 8 <= len(x) < len(k) and k.startswith(x) and x in by), None)
-        if base and all(tagged(c) for c in own(by[k])):
+        if base and all(tagged(c) for c in own(by[k] + sent.get(k, []))):
             by[base] += by.pop(k)
             joins[k] = base
 
@@ -209,7 +244,7 @@ def families(cases):
         recs = [(r, c) for c in own(cs) for r in c["muso"] if r.get("in")]
         if not recs:
             return None
-        r, c = sorted(recs, key=lambda x: (plainness(x[0]["fields"].get("Title"), x[0].get("version")), x[0]["fields"].get("Year") or "9999"))[0]
+        r, c = sorted(recs, key=lambda x: (plainness(raw_field(x[0], "Title"), x[0].get("version")), oldest(x[0])))[0]
         a = c["answer"]
         linked = (a.get("rows") or []) if a.get("choice") == "same" and r.get("part") != "version" else []
         return {"title": r["fields"].get("Title") or "", "isrcs": list(r["fields"].get("ISRC") or []), "year": r["fields"].get("Year") or "",
@@ -303,11 +338,11 @@ def _in_lnv(song, rec, recording, rid_of, isrcs_of, rids):
     """The song's versions the LNV already has, each beside its LNV row, for the reviewer to check. answer: same
     (the reviewer said right) · none (they said it is not this version – it is then added as a new row) · None (the
     app's match, from a shared ISRC or the same title and version tag)."""
-    album = lambda r: dataclean.album_key(r["fields"].get("Film / album") or "")
-    year = lambda r: str(r["fields"].get("Year") or "")[:4]
+    album = lambda r: dataclean.album_key(raw_field(r, "Film / album") or "")
+    year = lambda r: str(raw_field(r, "Year") or "")[:4]
     out = []
     for p in song.get("parts", []):
-        row = p["lnv_row"] or (p["refused"][-1] if p.get("refused") else None)
+        row = p["lnv_row"] or p.get("taken_row") or (p["refused"][-1] if p.get("refused") else None)
         if not row:
             continue
         lnv = rec(row)
@@ -317,9 +352,11 @@ def _in_lnv(song, rec, recording, rid_of, isrcs_of, rids):
             continue   # a version of the song this case does not show
         muso = recording(rid_of[at])
         out.append({"key": p["key"], "type": p["type"], "row": row, "muso": muso, "lnv": lnv,
-                    "isrc": bool(set(muso["fields"]["ISRC"]) & set(lnv["fields"]["ISRC"])),
+                    "isrc": bool(set(raw_field(muso, "ISRC") or []) & set(lnv["fields"]["ISRC"])),
                     "album": bool(album(muso)) and album(muso) == album(lnv), "year": bool(year(muso)) and year(muso) == year(lnv),
-                    "answer": "none" if not p["lnv_row"] else "same" if p.get("confirmed") else None})
+                    # the reviewer gave the row to another recording: still shown, to be answered too
+                    **({"taken": p["taken"]} if p.get("taken_row") and not p["lnv_row"] else {}),
+                    "answer": None if p.get("taken_row") and not p["lnv_row"] else "none" if not p["lnv_row"] else "same" if p.get("confirmed") else None})
     return out
 
 
@@ -333,16 +370,17 @@ def _origin(song, rec):
 
 
 FILL_FIELDS = {"Movie / album": "Film / album", "Release year": "Year", "Lyricists": "Lyricist", "Composers": "Composer",
-               "Singers": "Singer"}
+               "Singers": "Singer", "Duration": "Length"}
 
 
 def _new_row(song):
     """The LNV row an added song becomes: its original (each version gets a row of its own), or with no original on
     the DSP, its main version."""
     o = song.get("original") or (song.get("parts") or [song])[0]
-    return {"Title": o["title"], "Film / album": o.get("album", ""), "Lyricist": song.get("lyricists", [])[:6],
-            "Composer": song.get("composers", [])[:6], "Singer": o.get("singers", [])[:6], "ISRC": o.get("isrcs", [])[:1],
-            "Year": o.get("year", ""), "Length": o.get("duration", ""), "Label": o.get("label", "")}
+    return {"Title": o["title"], "Film / album": o.get("album", ""), "Lyricist": (o.get("lyricists") or song.get("lyricists", []))[:6],
+            "Composer": (o.get("composers") or song.get("composers", []))[:6], "Singer": o.get("singers", [])[:6], "ISRC": o.get("isrcs", []),
+            "Year": o.get("year", ""), "Release date": dataclean.release_date(o.get("dates") or [], o.get("year", "")),
+            "Length": o.get("duration", ""), "Label": o.get("label", "")}
 
 
 def _updates(fills_by_row, rows):
@@ -353,6 +391,85 @@ def _updates(fills_by_row, rows):
             d = f.get("decision") or {}
             out.append({"key": f["key"], "row": row, "field": FILL_FIELDS.get(f["field"], f["field"]), "value": f["value"],
                         "more": f.get("more", 0), "accept": d.get("choice", "accept") != "reject", "by": "app" if d.get("auto") or not d else "you"})
+    return out
+
+
+def _isrcs(cases, clean, songs_by_row, item_of):
+    """What an LNV row gets from the recordings that land on it: the release date and link it lacks ("date_add",
+    "link_add") and, in its ISRC cell besides its own ("isrc_add"): the ISRCs of the recordings that land on it, the
+    ones another LNV row has aside – as dataclean._isrc_plan writes them for a linked row, and for a row not linked yet
+    as it would."""
+    plan, held, given = clean.get("isrcs") or {}, clean.get("isrc_rows") or {}, clean.get("isrc_given") or {}
+
+    def mark(record, part):
+        row = record.get("row")
+        if row is None:
+            return
+        # the cell's own first, then the society blocks': the order the LNV gets them in
+        own = list(OrderedDict.fromkeys(isrc_list(songs_by_row[row].get("isrc")) + list(record["fields"].get("ISRC") or [])))
+        add = [t for t in plan.get(row, []) if t not in own] if row in plan else \
+            [t for t in (part or {}).get("isrcs") or [] if t not in own and not set(held.get(t, [])) - {row} and given.get(t, row) == row]
+        record["fields"]["ISRC"] = own
+        record["isrc_add"] = add
+        # what fills a blank release date or link (none: nothing does)
+        dates = (part or {}).get("dates") or []
+        record["date_add"] = "" if record["fields"].get("Release date") else dataclean.release_date(dates, songs_by_row[row].get("release_year"))
+        record["link_add"] = "" if record["fields"].get("Link") else (part or {}).get("link", "")
+        # a cell with other text in it ('TITLE TRACK (FR TV SER)') is never written over by the app
+        text = clean_text(songs_by_row[row].get("isrc"))
+        if text and not isrc_list(text):
+            record["isrc_text"] = text
+    for c in cases:
+        song = item_of.get((c.get("answer") or {}).get("song"))
+        if not song:
+            continue
+        parts = {p["key"]: p for p in song.get("parts", []) if p.get("key")}
+        for r in (c.get("lnv") or []) + (c.get("off_lnv") or []) + (c.get("was") or []):
+            mark(r, song.get("original"))
+        for v in c.get("in_lnv") or []:
+            mark(v["lnv"], parts.get(v["key"]))
+
+
+def _keep_held(cases, holds, item_of, rec, songs_by_row):
+    """The matches that were on screen when the reviewer began a song stay there until each is answered: a row the match
+    no longer offers (an answer beside it changed what fits) is put back, still to check, as exact or possible as it was."""
+    for c in cases:
+        a = c.get("answer") or {}
+        held = holds.get(a.get("song"))
+        if held and held["vers"]:
+            c["begun"] = True   # its versions were on screen: they stay, also when the song itself has no match left
+        if not held or c["kind"] in ("names", "twice") or (a.get("by") == "you" and a.get("choice") in ("add", "deleted", "not_ours")):
+            continue
+        mine = [*(a.get("rows") or []), *(a.get("also") or [])] if a.get("choice") == "same" and a.get("by") == "you" else None
+        shown = {r["row"] for r in c["lnv"] if (r["row"] in mine if mine is not None else (r.get("check") or {}).get("level") or r["row"] in (a.get("rows") or []))}
+        shown |= {int(r) for r in c.get("off") or []} | {v["row"] for v in c.get("in_lnv") or []}
+        known = {x["row"]: x for k in ("held", "near", "off", "was") for x in (item_of.get(a.get("song")) or {}).get(k) or []}
+        for row, level in sorted(held["rows"].items()):
+            if row in shown or row not in songs_by_row:
+                continue
+            r = next((x for x in c["lnv"] if x["row"] == row), None)
+            if r is None:
+                r = _candidate(rec, known[row]) if row in known else rec(row)
+                c["lnv"].append(r)
+            r["check"] = {"writers": None, "publisher": None, **(r.get("check") or {}), "level": level}
+            r["kept"] = True
+            if mine is not None:
+                a["also"] = [*(a.get("also") or []), row]
+
+
+def moved_out(cases, decisions, recording_of, rec, songs_by_row):
+    """The recordings the reviewer mapped onto another song, as their old song name shows them until it is all checked:
+    [{"id", "family", "title", "to_title", "row", "muso", "lnv": [the LNV rows they stood beside]}]."""
+    out = []
+    for key, d in sorted(decisions.items()):
+        data = d.get("data") or {}
+        if not key.startswith("map:") or d.get("choice") != "join" or not key[4:].isdigit() or not data.get("family"):
+            continue
+        muso = recording_of(int(key[4:]))
+        rows = [r for r in dict.fromkeys(int(x) for x in data.get("was") or [] if str(x).isdigit()) if r in songs_by_row]
+        if muso and rows:
+            out.append({"id": int(key[4:]), "family": str(data["family"]), "title": str(data.get("from") or ""), "to_title": str(data.get("title") or ""),
+                        "row": data.get("row"), "level": "exact" if data.get("level") == "exact" else "possible", "muso": muso, "lnv": [rec(r) for r in rows[:12]]})
     return out
 
 
@@ -387,9 +504,10 @@ def build(dsp, analysis, decisions, clean, master):
         goes.update({i: {"part": "original"} for i in (s.get("original") or {}).get("rows", [])})
         goes.update({i: {"part": "version", "lnv_row": p["lnv_row"]} for p in s.get("parts", []) for i in p["rows"]})
     isrcs_of = lambda i: rows[i]["isrcs"]
+    edits = songmerge.edits_of(decisions)   # the reviewer's corrections of the DSP data
     moved = songmerge.moves(decisions)   # recordings the reviewer mapped onto an exactly matched song
     mapped = lambda rid: {"moved": {k: moved[ids[rid]].get(k) for k in ("from", "row", "title")}} if ids[rid] in moved else {}
-    recording = lambda rid, rtype=None: {**_recording(rows, recs, ids, rid, rtype or types[rid], source), **goes.get(recs[rid][0], {}),
+    recording = lambda rid, rtype=None: {**_recording(rows, recs, ids, rid, rtype or types[rid], source, edits), **goes.get(recs[rid][0], {}),
                                          **mapped(rid)}
 
     # One case per song: step 1's merge items (version groups, ISRC conflicts) that make up one song are shown together,
@@ -427,7 +545,7 @@ def build(dsp, analysis, decisions, clean, master):
         conflict = next((it for it in groups if it["kind"] != "suggestion"), None)
         cases.append({
             "id": items[0][0], "kind": "versions" if any(it["kind"] == "suggestion" for it in groups) else "isrc",
-            "title": song["title"], "family": _family(song["title"]),
+            "title": song["title"], "family": _family(song.get("raw_title") or song["title"]),
             "why": answer["why"] if answer.get("recheck") else "Similar title, the same lyricist and composer" if not conflict
             else f"Same ISRC {', '.join(conflict['isrcs'][:2])} – " + KIND_HELP[conflict["kind"]],
             "tone": "warn" if any(it["kind"] in ("overlap", "different") for it in groups) else None,
@@ -454,7 +572,7 @@ def build(dsp, analysis, decisions, clean, master):
         left_out = kind == "missing" and item["credit"] in ("performer", "medley")
         case_kind = "check" if kind in ("check", "matched") else "left_out" if left_out else "missing"
         cases.append({
-            "id": item["key"], "kind": case_kind, "title": song_of(kind, item)["title"], "family": _family(song_of(kind, item)["title"]),
+            "id": item["key"], "kind": case_kind, "title": song_of(kind, item)["title"], "family": _family(song_of(kind, item).get("raw_title") or song_of(kind, item)["title"]),
             # the app's own reason when it proposes an answer (the same recording; or saved earlier as new, asked again)
             "why": answer["why"] if answer.get("recheck") or (kind == "check" and answer.get("by") == "app")
             else _taken_why(item, source) if kind == "check" and _taken_why(item, source)
@@ -503,18 +621,28 @@ def build(dsp, analysis, decisions, clean, master):
             cases.append(_name_case(key, d["data"]["a"], d["data"].get("b", ""), d["data"].get("songs", []), 0, d, source))
 
     # a song the reviewer sent out of its match (a new row, deleted): the LNV rows it was matched to, to map it back
+    item_of = {(item["song"]["key"] if kind != "missing" else item["song_key"]): song_of(kind, item) for kind, item, _ in entries}
     for c in cases:
         song = (c.get("answer") or {}).get("song")
+        known = {x["row"]: x for k in ("was", "off") for x in (item_of.get(song) or {}).get(k) or []}
+        back = lambda r: _candidate(rec, known[r]) if r in known else rec(r)
         d = decisions.get(f"link:{song}") if song else None
         if d and d.get("choice") == "none" and c["answer"].get("choice") in ("add", "deleted", "not_ours"):
             rows = [r for r in dict.fromkeys(int(x) for x in (d.get("data") or {}).get("rows") or []) if r in songs_by_row]
             if rows:
-                c["was"] = [rec(r) for r in rows[:6]]
-    for c in cases:   # the LNV rows the reviewer said a song is not: one more is added to them
-        d = decisions.get(f"off:{c['answer'].get('song')}") if c["answer"].get("song") else None
+                c["was"] = [back(r) for r in rows[:12]]
+        # the LNV rows the reviewer said a song is not: one more is added to them – and they stay on screen, answered,
+        # while the song's other matches are checked
+        d = decisions.get(f"off:{song}") if song else None
         if d:
             c["off"] = (d.get("data") or {}).get("rows") or []
+            c["off_lnv"] = [back(r) for r in dict.fromkeys(int(x) for x in c["off"]) if r in songs_by_row]
+            c["off_then"] = (d.get("data") or {}).get("then")
+    _keep_held(cases, dataclean.holds_of(decisions), item_of, rec, songs_by_row)
+    _isrcs(cases, clean, songs_by_row, item_of)
     join_songs(cases, decisions)
+    rid_by_id = {x: rid for rid, x in enumerate(ids)}
+    moved_list = moved_out(cases, decisions, lambda x: recording(rid_by_id[x]) if x in rid_by_id and x in moved else None, rec, songs_by_row)
     added = typed_songs(cases, decisions)
     cases.sort(key=lambda c: (c["done"], ORDER[c["kind"]], -len(c["muso"]), -c.get("popularity", 0), c["title"].lower()))
     asked_cases = [c for c in cases if not c.get("auto")]
@@ -545,11 +673,11 @@ def build(dsp, analysis, decisions, clean, master):
                    # open cases the app has no answer for: the real doubts
                    "needs": sum(1 for c in asked_cases if not c["done"] and c["answer"].get("choice") is None),
                    "kinds": {k: sum(1 for c in asked_cases if c["kind"] == k) for k in ORDER}},
-        "cases": cases, "lnv_only": lnv_only, "typed": added,
+        "cases": cases, "lnv_only": lnv_only, "typed": added, "moved": moved_list,
         # values the reviewer took from the DSP over the LNV's own ("pick:<row>:<field>")
         "picks": {k: (d.get("data") or {}).get("value") for k, d in decisions.items() if k.startswith("pick:")},
         # the title the reviewer chose for a recording (its id): mode main · muso · lnv · custom, and the title itself
-        "titles": {str(k): v for k, v in dataclean.titles_of(decisions).items()},
+        "titles": {str(k): v for k, v in dataclean.titles_of(decisions, songmerge.titles_now(dsp, analysis, decisions)).items()},
         "wins": _wins(clean, decisions),
     }
 

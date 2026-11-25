@@ -7,6 +7,8 @@ import type { CleanDecisionIn } from '../../lib/api'
 import { useClient } from '../../lib/client'
 import type { CaseRecord, ReviewCase, Step1, TitleMode } from '../../types'
 import { cellOf, inList, list, n, norm } from './Block'
+import { MusoField } from './EditParts'
+import { labelOf } from './editModel'
 
 /** The parts of one song's screen in step 2, top to bottom: ① the main version (the DSP's original), ② the LNV rows
  *  that may be it, ③ the song's other DSP versions, … ⑤ the titles that go into the LNV, and the popup that maps a
@@ -15,12 +17,13 @@ import { cellOf, inList, list, n, norm } from './Block'
 export const value = (v?: string | string[]) => list(v).join(', ')
 export const WRITERS = new Set(['Lyricist', 'Composer'])
 const LISTY = new Set(['Lyricist', 'Composer', 'Publisher', 'Singer', 'ISRC'])
-export const CARD_FIELDS = ['Title', 'Film / album', 'Lyricist', 'Composer', 'Publisher', 'Singer', 'ISRC', 'Year']
+export const CARD_FIELDS = ['Title', 'Alternate title', 'Film / album', 'Lyricist', 'Composer', 'Publisher', 'Singer', 'ISRC', 'Year', 'Release date']
 
 /** Two records hold two different values (a blank is no difference – it gets filled). */
 export function differs(f: string, a: string[], b: string[]) {
   if (!a.length || !b.length) return false
   if (f === 'Year') return a[0].slice(0, 4) !== b[0].slice(0, 4)
+  if (f === 'Link') return a.join(' ') !== b.join(' ')   // a track's id: capital letters count
   if (WRITERS.has(f) || f === 'Singer' || f === 'ISRC') return a.some((x) => !inList(f, b, x)) || b.some((x) => !inList(f, a, x))
   return norm(a.join(' ')) !== norm(b.join(' '))
 }
@@ -83,9 +86,12 @@ export function Links({ urls, from }: { urls: (string | undefined | null)[]; fro
 export const hasLink = (rs: (CaseRecord | undefined | null)[]) => rs.some((r) => /^https?:\/\//i.test(r?.link ?? ''))
 
 /** A record's fields; where they differ from the main version's they are marked, the main's value written under. */
-export function Fields({ r, main, fields = CARD_FIELDS }: { r: CaseRecord; main?: CaseRecord | null; fields?: string[] }) {
+export function Fields({ r, main, fields = CARD_FIELDS, all }: { r: CaseRecord; main?: CaseRecord | null; fields?: string[]
+  /** every field of a DSP recording, the blank ones too: each can be corrected */
+  all?: boolean
+}) {
   const other = !!main && main !== r
-  const shown = fields.filter((f) => f === 'Title' || list(r.fields[f]).length || (other && list(main!.fields[f]).length))
+  const shown = fields.filter((f) => f === 'Title' || list(r.fields[f]).length || (other && list(main!.fields[f]).length) || (all && f !== 'Alternate title'))
   return (
     <dl className="cv-fields">
       {shown.map((f) => {
@@ -95,15 +101,15 @@ export function Fields({ r, main, fields = CARD_FIELDS }: { r: CaseRecord; main?
         const whole = other && !LISTY.has(f) && differs(f, v, m)
         return (
           <Fragment key={f}>
-            <dt>{f}</dt>
+            <dt>{labelOf(f)}</dt>
             <dd className={`${whole ? 'cv-diff' : ''} ${f === 'ISRC' ? 'mono' : ''} ${f === 'Title' ? 'cv-ftitle' : ''}`}>
-              {v.length ? v.map((x, j) => <Fragment key={j}>{j > 0 && ', '}<span className={odd(x) ? 'cv-odd' : ''}>{x}</span></Fragment>) : <span className="muted">— blank</span>}
+              <MusoField r={r} f={f}>{v.length ? v.map((x, j) => <Fragment key={j}>{j > 0 && (f === 'ISRC' ? ' | ' : ', ')}<span className={odd(x) ? 'cv-odd' : ''}>{x}</span></Fragment>) : <span className="muted">— blank</span>}</MusoField>
               {whole && <small className="cv-main">Main version: {m.join(', ')}</small>}
             </dd>
           </Fragment>
         )
       })}
-      {hasLink([r]) && <><dt>Link</dt><dd><Links urls={[r.link]} /></dd></>}
+      {(hasLink([r]) || all) && <><dt>Link</dt><dd><MusoField r={r} f="Link">{hasLink([r]) ? <Links urls={[r.link]} /> : <span className="muted">— blank</span>}</MusoField></dd></>}
     </dl>
   )
 }
@@ -118,10 +124,11 @@ export function Checks({ r }: { r: CaseRecord }) {
   const why = (Array.isArray(r.why) ? r.why : []).filter((w) => !w.good || w.text.startsWith('Writers: one') || w.text.startsWith('Later year'))
   const mark = (ok: boolean | undefined | null, text: string, title: string) => ok == null ? null
     : <span className={ok ? 'good' : 'bad'} title={title}>{ok ? <Check size={13} /> : <X size={13} />}{text}</span>
-  const simple = ch.stage1 == null
+  const simple = ch.stage1 == null && ch.writers != null
   return (
     <div className="cv-checks">
       <b className={`cv-level ${level[0]}`}>{level[1]}</b>
+      {r.kept && <span className="warn" title="It was on screen when you began this song; an answer beside it changed what fits. It stays until you answer it.">Still to answer</span>}
       {mark(ch.stage1, 'Same recording', 'Title, album, ISRC and release year')}
       {mark(ch.stage2, 'Same work', 'Title, album, lyricist, composer and publisher')}
       {simple && mark(ch.writers === 'same' || ch.writers === 'close', ch.writers === 'blank' ? 'Writers missing' : ch.writers === 'differ' ? 'Different writers' : 'Same writers', 'Lyricists and composers')}
@@ -142,7 +149,7 @@ export function MainCard({ r, source, count, open }: { r: CaseRecord; source: st
         {count > 1 && <span className="muted cv-count">1 of {n(count)} {source} versions</span>}
         <button type="button" className="cv-open" onClick={open} title="Everything the sheet holds for it">All details<ChevronRight size={15} /></button>
       </header>
-      <Fields r={r} />
+      <Fields r={r} all />
     </article>
   )
 }
@@ -362,11 +369,13 @@ export function targetsOf(cases: ReviewCase[], exact: (c: ReviewCase) => boolean
 /** The popup that maps a recording – or every recording of its song – onto a song the app matched exactly: search,
  *  pick the song, then say whether only this version or all of them join it. They become that song's versions, each
  *  with a row of its own naming its LNV row (or linked to the version row the LNV has), and fill what it lacks. */
-export function MapDialog({ c, rec, recs, targets, source, close, save, done, link }: {
+export function MapDialog({ c, rec, recs, targets, source, close, save, done, link, family, wasOf, levelOf }: {
   c: ReviewCase; rec: CaseRecord; recs: CaseRecord[]; targets: Target[]; source: string; close: () => void
   save: (items: CleanDecisionIn[]) => Promise<boolean>; done: (all: boolean, t: Target) => void
   /** a "Not in the LNV" song: it can also be that song itself – linked to the LNV row, no row of its own */
   link?: (t: Target) => void
+  /** the song name it stands under, and the LNV rows a recording of it stands beside there */
+  family?: string; wasOf?: (id: number) => number[]; levelOf?: (id: number) => string | undefined
 }) {
   const base = c.title.replace(/\s*[-–(\[].*$/, '').trim()
   const [q, setQ] = useState(base)
@@ -389,7 +398,10 @@ export function MapDialog({ c, rec, recs, targets, source, close, save, done, li
     if (!picked) return
     setBusy(true)
     const ids = (all ? recs : [rec]).map((r) => r.id!).filter((x) => x != null && x !== picked.to)
-    const ok = await save(ids.map((x) => ({ key: `map:${x}`, choice: 'join' as const, data: { to: picked.to, row: picked.row, title: picked.title, from: c.title } })))
+    const ok = await save(ids.map((x) => {
+      const was = wasOf?.(x) ?? []   // where it stood: its old song shows it as answered until every match there is
+      return { key: `map:${x}`, choice: 'join' as const, data: { to: picked.to, row: picked.row, title: picked.title, from: c.title, ...(was.length && family ? { was, family, level: levelOf?.(x) } : {}) } }
+    }))
     setBusy(false)
     if (ok) { done(all, picked); close() }
   }
@@ -465,7 +477,7 @@ export function MapDialog({ c, rec, recs, targets, source, close, save, done, li
 
 /* ---------- shared by the review screens ---------- */
 
-export const SHOW = ['Title', 'Film / album', 'Lyricist', 'Composer', 'Publisher', 'Singer', 'ISRC', 'Year']
+export const SHOW = ['Title', 'Film / album', 'Lyricist', 'Composer', 'Publisher', 'Singer', 'ISRC', 'Year', 'Release date']
 export const RULE = {
   writers: { same: ['good', 'Same writers'], close: ['good', 'Writers: one name extra'], differ: ['bad', 'Different writers'], blank: ['warn', 'Writers missing – cannot check'] },
   publisher: { same: ['good', 'Same publisher'], differ: ['bad', 'Different publisher'], unchecked: ['warn', 'Publisher not checked'] },
@@ -563,7 +575,7 @@ export function Compare({ cols, fields = SHOW, base = 0 }: { cols: Col[]; fields
       <tbody>
         {rows.map((f) => (
           <tr key={f}>
-            <th className="rvc-f">{f}</th>
+            <th className="rvc-f">{labelOf(f)}</th>
             {cols.map((c, i) => {
               const v = list(c.r.fields[f])
               const cell = ref && i !== base && f === 'Title' ? cellOf(f, list(ref.fields[f]), v) : ''
@@ -648,12 +660,13 @@ export function VersionDetails({ r, main, at, total, source, go, close }: { r: C
   const [rows, setRows] = useState<{ row: number; fields: { name: string; value: string }[] }[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState(0)
+  const sheetRows = (r.sheet_rows ?? []).join(',')   // a correction saved loads the step again: the sheet's rows are the same
   useEffect(() => {
     let on = true
     setRows(null); setError(null); setTab(0)
-    api.cleanRows(clientId, r.sheet_rows ?? []).then((x) => { if (on) setRows(x.rows) }).catch((e) => { if (on) setError((e as Error).message) })
+    api.cleanRows(clientId, sheetRows ? sheetRows.split(',').map(Number) : []).then((x) => { if (on) setRows(x.rows) }).catch((e) => { if (on) setError((e as Error).message) })
     return () => { on = false }
-  }, [clientId, r])
+  }, [clientId, sheetRows])
   useArrows(at > 0 ? () => go(at - 1) : null, at < total - 1 ? () => go(at + 1) : null)
   const row = rows?.[tab]
   return (
@@ -665,7 +678,8 @@ export function VersionDetails({ r, main, at, total, source, go, close }: { r: C
       </div>}>
       <section className="pop-glance">
         <h4>{at === 0 ? 'The main version' : 'Compared with the main version'}</h4>
-        <Fields r={r} main={at === 0 ? null : main} />
+        <p className="muted pop-note">The pencil corrects a {source} value: it goes into the LNV as corrected. The sheet’s own columns stay below.</p>
+        <Fields r={r} main={at === 0 ? null : main} all />
       </section>
       {error ? <div className="alert bad">{error}</div> : !rows ? <div className="loading"><span className="spinner" />Loading…</div> : !row ? <p className="muted">This row is no longer in the sheet.</p> : (
         <>

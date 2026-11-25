@@ -12,7 +12,7 @@ export type Draft = { in: number[]; rows: number[]; choice: Choice; reject: stri
 
 /** Fields where the reviewer may take Muso's value over the LNV's, or type one of their own. A publisher picked or
  *  typed replaces the LNV's publisher names (a slot keeps its IPI only while it holds the same company). */
-export const PICKABLE = ['Title', 'Film / album', 'Year', 'ISRC', 'Lyricist', 'Composer', 'Singer', 'Publisher']
+export const PICKABLE = ['Title', 'Alternate title', 'Film / album', 'Year', 'Release date', 'ISRC', 'Lyricist', 'Composer', 'Singer', 'Publisher', 'Link']
 export const pickKey = (row: number, f: string) => `pick:${row}:${f}`
 /** Fields offered in "which value goes into the LNV" – the title has a part of its own (the titles part). */
 export const PICK_SHOWN = PICKABLE.filter((f) => f !== 'Title')
@@ -33,6 +33,8 @@ export const pickItem = (k: string, v: string | string[], recs: CaseRecord[], ln
   const f = k.split(':').slice(2).join(':')
   // the very names, as written: 'RAM KRISHNA' kept from the LNV is not 'Ram Krishna' from the IPI / CAE list
   const exact = (a: string | string[] | undefined) => JSON.stringify(list(a)) === JSON.stringify(list(v))
+  // left as the LNV has it: blank
+  if (!list(v).length) return { key: k, choice: 'lnv', data: { value: [] } }
   if (lnv && list(lnv.fields[f]).length && exact(lnv.fields[f])) return { key: k, choice: 'lnv', data: { value: v } }
   const ipi = [lnv, ...recs].map((r) => ipiOf(r, f)).find((x) => x && exact(x.names))
   if (ipi) return { key: k, choice: 'ipi', data: { value: v, ipis: ipi.ids } }
@@ -78,6 +80,9 @@ export function itemsOf(c: ReviewCase, d: Draft | null): CleanDecisionIn[] {
   }))
   // the LNV rows the reviewer turned down before (a new row, a deleted song): they stay turned down
   const was = (c.was ?? []).map((r) => r.row!).filter((r) => r != null)
+  // rows turned down one by one go with the answer that sends the whole song out: putting it back brings them all back
+  const off = (c.off ?? []).filter((r) => !was.includes(r))
+  const offGone = () => { if (c.off?.length) out.push({ key: `off:${song}`, choice: null }) }
   if (!d) { out.push({ key: `link:${song}`, choice: null }, { key: `missing:${song}`, choice: null }); picks([]) }
   else if (d.choice === 'same') {
     const also = (d.also ?? []).filter((r) => !d.rows.includes(r))
@@ -85,11 +90,12 @@ export function itemsOf(c: ReviewCase, d: Draft | null): CleanDecisionIn[] {
     c.updates.filter((u) => d.rows.includes(u.row)).forEach((u) => out.push({ key: u.key, choice: d.reject.includes(u.key) ? 'reject' : 'accept' }))
     picks(d.rows)
   } else if (d.choice === 'add' || d.choice === 'not_ours') {
-    out.push({ key: `link:${song}`, choice: 'none', ...(was.length ? { data: { rows: was } } : {}) }, { key: `missing:${song}`, choice: d.choice }); picks([])
+    const rows = [...was, ...off]
+    out.push({ key: `link:${song}`, choice: 'none', ...(rows.length ? { data: { rows } } : {}) }, { key: `missing:${song}`, choice: d.choice }); offGone(); picks([])
   } else if (d.choice === 'deleted') {
     // deleted: every LNV row it was matched to is turned down too – nothing of it goes into the LNV, the app does not ask again
-    const rows = [...new Set([...c.lnv.map((r) => r.row!).filter((r) => r != null), ...was])]
-    out.push({ key: `link:${song}`, choice: 'none', data: { rows } }, { key: `missing:${song}`, choice: 'deleted' }); picks([])
+    const rows = [...new Set([...c.lnv.map((r) => r.row!).filter((r) => r != null), ...was, ...off])]
+    out.push({ key: `link:${song}`, choice: 'none', data: { rows } }, { key: `missing:${song}`, choice: 'deleted' }); offGone(); picks([])
   }
   return out
 }
