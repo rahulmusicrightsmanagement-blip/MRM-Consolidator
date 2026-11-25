@@ -3,7 +3,7 @@ contributor slots and repeating society blocks, located by header text."""
 import re
 from collections import defaultdict
 
-from .normalize import clean_id, clean_text, norm_ipi, norm_isrc, norm_iswc, to_number
+from .normalize import clean_id, clean_text, isrc_list, norm_ipi, norm_isrc, norm_iswc, show_date, to_number
 from .xlsx import read_rows
 
 WORK_FIELDS = {
@@ -11,7 +11,7 @@ WORK_FIELDS = {
     "MOVIENAME": "movie", "LABEL": "label", "RELEASEYEARYYYY": "release_year", "LANGUAGE": "language",
     "TYPEOFWORK": "type_of_work", "WORKSUBCATEGORY": "sub_category", "DURATIONHHMMSS": "duration",
     "VERSION": "version", "ORIGINALWORK": "original_work", "ORIGINALMOVIEALBUM": "original_movie",
-    "DATEOFRELEASEDDMMYYYY": "release_date", "WEBSITE1": "website", "SPOTIFYID": "spotify_id",
+    "DATEOFRELEASEDDMMYYYY": "release_date", "WEBSITE1": "website", "WEBSITE2": "website2", "YOUTUBE": "youtube", "SPOTIFYID": "spotify_id",
 }
 SLOT_KINDS = {"SINGERNAME": "singers", "COMPOSERNAME": "composers", "AUTHORNAME": "authors", "PUBLISHERNAME": "publishers"}
 BLOCK_FIELDS = {
@@ -86,7 +86,8 @@ def parse_master(path):
         multiline_cells += sum(1 for v in row if isinstance(v, str) and "\n" in v.strip())
         song = {"row": row_no}
         for field, idx in layout["fields"].items():
-            song[field] = clean_id(get(row, idx)) if field in ("sn", "release_year") else clean_text(get(row, idx))
+            song[field] = clean_id(get(row, idx)) if field in ("sn", "release_year") \
+                else show_date(get(row, idx)) if field == "release_date" else clean_text(get(row, idx))
         if not song.get("title"):
             continue
         for kind in SLOT_KINDS.values():
@@ -102,9 +103,8 @@ def parse_master(path):
 
         registrations, isrcs, iswcs = [], set(), set()
         occupied = []  # [society, slot] of every block with anything in it – the export never writes into those
-        for top in ("isrc", "iswc"):
-            value = song.get(top, "")
-            (isrcs if top == "isrc" else iswcs).add((norm_isrc if top == "isrc" else norm_iswc)(value))
+        isrcs.update(isrc_list(song.get("isrc")))   # the cell may hold several: 'ISRC1 | ISRC2'
+        iswcs.add(norm_iswc(song.get("iswc")))
         for block in layout["blocks"]:
             code = clean_id(get(row, block["code"]))
             isrc_raw, iswc_raw = clean_text(get(row, block["isrc"])), clean_text(get(row, block["iswc"]))
@@ -114,6 +114,7 @@ def parse_master(path):
                                "message": f"ISRC {iswc_raw} is stored in the ISWC column of the {block['society']} {block['slot']} block"})
                 isrc = isrc or norm_isrc(iswc_raw)
             isrcs.add(isrc)
+            isrcs.update(isrc_list(isrc_raw))
             iswcs.add(iswc)
             extra = {f: clean_text(get(row, idx)) for f, idx in block["fields"].items()}
             if code or isrc_raw or iswc_raw or any(extra.values()):
@@ -154,6 +155,23 @@ def parse_master(path):
              "multiline_cells": multiline_cells,
              "with_credits": sum(1 for s in songs if s["has_credits"])}
     return {"songs": songs, "issues": issues, "stats": stats, "layout": layout}
+
+
+LINK_FIELDS = ("website", "website2", "spotify_id", "youtube")
+
+
+def lnv_link(song):
+    """The LNV row's link and the column it stands in: Website1, else Website2, else its Spotify ID as a track link,
+    else YouTube – ("", "") when none of them holds a link (a column sometimes holds other text)."""
+    for field in LINK_FIELDS:
+        text = str(song.get(field) or "").strip()
+        if field == "spotify_id":
+            url = f"https://open.spotify.com/track/{text}" if re.fullmatch(r"[A-Za-z0-9]{22}", text) else ""
+        else:
+            url = text if re.match(r"https?://", text, re.I) else f"https://{text}" if re.match(r"([\w-]+\.)+[a-z]{2,}([/?]|$)", text, re.I) else ""
+        if url:
+            return url, field
+    return "", ""
 
 
 def codes_for(song, society):

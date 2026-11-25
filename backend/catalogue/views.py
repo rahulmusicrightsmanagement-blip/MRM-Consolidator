@@ -1,11 +1,13 @@
 import hashlib
 import json
 import logging
+import re
 import tempfile
 import threading
 from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
+from urllib.parse import quote
 
 from django.conf import settings
 from django.core.cache import cache
@@ -25,7 +27,8 @@ from .engine import dataclean, export, ipi, review, songmerge, steps, typed
 from .engine.fill import fill_iprs_columns
 from .engine.verify import verify as verify_run
 from .engine.iprs import IPRSFormatError, parse_iprs
-from .engine.normalize import norm_ipi
+from .engine.normalize import is_link, isrc_list, norm_date, norm_ipi, printable, show_date
+from .engine.xlsx_patch import compact
 from .engine.pair import build_pair
 from .engine.master import MasterFormatError, parse_master
 from .engine.xlsx import read_rows
@@ -57,7 +60,7 @@ TASK_RUN_HEAVY = ("opened_run__summary", "closed_run__summary")
 # reports. Keyed on the engine's own source (not the app version), a release that only changes screens keeps every
 # processed report – a 13,000-song catalogue is not processed again after each update.
 _ENGINE_FILES = sorted((Path(__file__).parent / "engine").glob("*.py")) + [Path(__file__).parent / "sync.py"]
-ENGINE_VERSION = hashlib.sha1(b"".join(f.read_bytes() for f in _ENGINE_FILES)).hexdigest()[:12]
+ENGINE_VERSION = hashlib.sha1(b"".join(f.read_bytes() for f in _ENGINE_FILES), usedforsecurity=False).hexdigest()[:12]
 RESULT_TTL = 30 * 24 * 60 * 60
 STAGES = ["Needs master", "Master loaded", "Societies in progress", "All societies complete"]
 # What the user sees: three steps per society. One-line conversion, gap filling, tune-code checks and
@@ -68,9 +71,11 @@ SOCIETY_META = {s["code"]: s for s in SOCIETIES}
 
 
 def _body(request):
+    """What a request sent, as an object – without control characters, which neither the database nor Excel can hold."""
     try:
-        return json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
+        data = json.loads(request.body or b"{}")
+        return printable(data) if isinstance(data, dict) else {}
+    except (ValueError, RecursionError):
         return {}
 
 
@@ -194,7 +199,7 @@ def compute(run):
              json.dumps(decisions, sort_keys=True), run.report_date,
              (run.client.name, run.client.ipi) if run.client else None, ENGINE_VERSION)
     # A stable key (Python's hash() differs per process), so every worker finds what another one computed.
-    key = f"run-{run.id}-{hashlib.sha1(repr(stamp).encode()).hexdigest()}"
+    key = f"run-{run.id}-{hashlib.sha1(repr(stamp).encode(), usedforsecurity=False).hexdigest()}"
     result = cache.get(key)
     if result is None:
         client = run.client
@@ -462,7 +467,8 @@ def clients(request):
     for c in everyone:
         _refresh_soon(c)
     numbers = metrics(everyone)
-    out = [{**_client_json(c), **numbers[c.id], "report_count": len(_runs(c))} for c in everyone]
+    last = changes.last_songs([c.id for c in everyone])
+    out = [{**_client_json(c), **numbers[c.id], "report_count": len(_runs(c)), "last_song": last.get(c.id)} for c in everyone]
     return JsonResponse({"clients": out, "stages": STAGES})
 
 
@@ -598,6 +604,11 @@ def client_master(request, client_id):
         client.master_edits.all().delete()
         client.song_flags.filter(key__startswith="M").delete()
     _drop_row_decisions(client)
+    # a recording mapped away says which rows of the old LNV it stood beside
+    mapped = [d for d in client.clean_decisions.filter(key__startswith="map:") if (d.data or {}).get("was")]
+    for d in mapped:
+        d.data = {k: v for k, v in d.data.items() if k not in ("was", "family")}
+    CleanDecision.objects.bulk_update(mapped, ["data"])
     changes.close(client)
     if client.stage1_done_at:
         client.stage1_done_at, client.stage1_done_by = None, ""
@@ -692,7 +703,7 @@ def client_stage2(request, client_id):
 # ---------------------------------------------------------------- data clean (step 1: today's LNV against one DSP sheet)
 
 # Decisions that point at rows of the LNV: they go when a new LNV arrives. Name, junk and missing-song decisions stay.
-ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:", "off:")
+ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:", "off:", "hold:")
 CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}, "name": {"same", "different"},
                  "junk": {"fix", "ok"}, "missing": {"add", "not_ours", "deleted"}, "fill": {"accept", "reject"}, "link": {"same", "none"},
                  "merge": {"accepted", "rejected", "pending"}, "type": {"set"}, "version": {"same", "none"},
@@ -705,9 +716,133 @@ CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}
                  # why a song is mapped (the Remark dropdown): a recording's ISRC, else its sheet row
                  "remark": {"set"},
                  # a recording mapped onto an exactly matched song · the title that goes into the LNV for a recording
-                 "map": {"join"}, "title": set(dataclean.TITLE_MODES)}
+                 "map": {"join"}, "title": set(dataclean.TITLE_MODES),
+                 # a value of the DSP (Muso) data corrected: "muso:<recording id>:<field>"
+                 "muso": {"set"}}
+# the LNV fields a value can be chosen for
+PICK_FIELDS = set(export.PICK_FIELDS) | set(export.PICK_SLOTS)
+MAX_ITEMS = 20000   # decisions in one save
 # Answers about people and companies, not about one client's songs: kept once, for every client
 GLOBAL_DECISIONS = ("name:", "writer:", "pub:")
+
+
+# what a decision's data can hold; anything else sent with it is left out
+DECISION_DATA = {"keep", "row", "rows", "also", "was", "excluded", "type", "cover", "a", "b", "songs", "name", "value", "ipis", "to", "title",
+                 "from", "family", "then", "level", "remark"}
+
+
+class BadDecision(ValueError):
+    pass
+
+
+def _numbers(v, what):
+    """LNV or sheet rows: whole numbers only – one that is none would break every later load of the client."""
+    if not isinstance(v, list) or len(v) > 2000 or not all(isinstance(x, int) and not isinstance(x, bool) or (isinstance(x, str) and x.isdigit()) for x in v):
+        raise BadDecision(f"{what} must be a list of row numbers")
+    return [int(x) for x in v]
+
+
+def _checked(key, choice, data):
+    """A decision's data as it is kept, once its key and data are what the screens send – BadDecision otherwise."""
+    kind, _, rest = key.partition(":")
+    if not rest:
+        raise BadDecision(f"Unknown decision {key!r}")
+    data = {k: v for k, v in data.items() if k in DECISION_DATA}
+    if kind in ("title", "map", "type") and not rest.isdigit():
+        raise BadDecision(f"{key!r} names no recording")
+    if kind == "pick":
+        row, _, field = rest.partition(":")
+        if not row.isdigit() or field not in PICK_FIELDS:
+            raise BadDecision(f"{key!r} names no field of the LNV")
+    if kind == "muso":
+        rid, _, field = rest.partition(":")
+        if not rid.isdigit() or field not in dataclean.EDIT_FIELDS:
+            raise BadDecision(f"{key!r} names no field of the sheet")
+    if choice is None:
+        return data
+    for k in ("rows", "also", "excluded", "was"):
+        if k in data:
+            data[k] = _numbers(data[k], k)
+    for k in ("keep", "row") + (("to",) if kind == "map" else ()):
+        if data.get(k) is not None and not (kind == "name" and k == "keep"):
+            if not str(data[k]).isdigit():
+                raise BadDecision(f"{k} must be a row number")
+            data[k] = int(data[k])
+    if kind == "map" and data.get("to") is None:
+        raise BadDecision("The song it is mapped to is missing")
+    for k in ("type", "cover", "a", "b", "name", "title", "from", "family", "then", "level") + (("to",) if kind != "map" else ()) + (("keep",) if kind == "name" else ()):
+        if data.get(k) is not None:
+            if not isinstance(data[k], (str, int)) or isinstance(data[k], bool):
+                raise BadDecision(f"{k} must be text")
+            data[k] = str(data[k])[:500]
+    for k in ("songs", "ipis"):
+        if k in data:
+            if not isinstance(data[k], list) or len(data[k]) > 100 or not all(isinstance(x, str) for x in data[k]):
+                raise BadDecision(f"{k} must be a list of texts")
+            data[k] = [x[:500] for x in data[k]]
+    if data.get("remark") is not None and (not isinstance(data["remark"], int) or isinstance(data["remark"], bool)):
+        raise BadDecision("remark must be a number")
+    if "value" in data:
+        v = data["value"]
+        if not isinstance(v, (str, int, float, list)) or isinstance(v, bool) or (isinstance(v, list) and (len(v) > 100 or not all(isinstance(x, str) for x in v))):
+            raise BadDecision("A value must be text")
+        data["value"] = [x[:500] for x in v] if isinstance(v, list) else str(v)[:2000]
+    if kind == "muso":
+        if "value" not in data:
+            raise BadDecision("The corrected value is missing")
+        try:
+            data["value"] = dataclean.edit_value(rest.partition(":")[2], data["value"])
+        except ValueError as e:
+            raise BadDecision(str(e))
+    if kind == "pick" and rest.endswith(":Link") and data.get("value"):
+        v = data["value"][0] if isinstance(data["value"], list) else data["value"]
+        if not is_link(v):
+            raise BadDecision("A link starts with http:// or https://")
+    if kind == "pick" and rest.endswith(":Release date") and data.get("value"):
+        v = data["value"][0] if isinstance(data["value"], list) else data["value"]
+        if choice == "custom" and not norm_date(v):
+            raise BadDecision("A release date is DD-MM-YYYY, e.g. 08-05-2013")
+        data["value"] = show_date(v)
+    if len(json.dumps(data)) > 20000:
+        raise BadDecision("The answer is too long")
+    return data
+
+
+def _holds(sent):
+    """The matches on screen a save sends along, checked: {song key: {"rows": {"5": "exact"}, "vers": {"version:…": 5}}}."""
+    if sent is None:
+        return {}
+    if not isinstance(sent, dict) or len(sent) > 3000:
+        raise BadDecision("The matches on screen could not be read")
+    out = {}
+    for song, h in sent.items():
+        rows, vers = (h.get("rows") or {}, h.get("vers") or {}) if isinstance(h, dict) else (None, None)
+        if not song or len(song) > 290 or not isinstance(rows, dict) or not isinstance(vers, dict) or len(rows) + len(vers) > 500 \
+                or not all(str(r).isdigit() and lv in dataclean.LEVELS for r, lv in rows.items()) \
+                or not all(k.startswith("version:") and len(k) <= 300 and isinstance(r, int) and not isinstance(r, bool) and r > 0 for k, r in vers.items()):
+            raise BadDecision("The matches on screen could not be read")
+        if rows or vers:
+            out[f"hold:{song}"] = {"rows": rows, "vers": vers}
+    return out
+
+
+def _hold(client, holds):
+    """Keep them – joined to the ones kept before, which stand. They are no answer: nothing to undo."""
+    if not holds:
+        return
+    known = {d.key: d for d in client.clean_decisions.filter(key__in=list(holds))}
+    fresh, more = [], []
+    for key, h in holds.items():
+        d = known.get(key)
+        if d is None:
+            fresh.append(CleanDecision(client=client, key=key, choice="rows", data=h))
+            continue
+        data = {k: {**h[k], **((d.data or {}).get(k) or {})} for k in ("rows", "vers")}
+        if data != d.data:
+            d.data = data
+            more.append(d)
+    CleanDecision.objects.bulk_create(fresh, ignore_conflicts=True)
+    CleanDecision.objects.bulk_update(more, ["data"])
 
 
 def _clean_decisions(client):
@@ -732,7 +867,7 @@ def _dsp_json(dsp):
 
 
 def _dsp_key(dsp):
-    return f"dsp-parsed-{dsp.id}-{hashlib.sha1(dsp.sheet.encode()).hexdigest()[:8]}-{ENGINE_VERSION}"
+    return f"dsp-parsed-{dsp.id}-{hashlib.sha1(dsp.sheet.encode(), usedforsecurity=False).hexdigest()[:8]}-{ENGINE_VERSION}"
 
 
 def _dsp_sheet(dsp):
@@ -756,19 +891,21 @@ def _clean_result(client, decisions):
     if not master or not dsp:
         return master, dsp, None
     aliases, links = dataclean.learned(decisions)
-    merges = {k: d for k, d in decisions.items() if k.startswith(("merge:", "map:"))}
+    merges = {k: {"choice": d["choice"], "data": d["data"]} for k, d in decisions.items() if k.startswith(("merge:", "map:", "muso:"))}
     rules = dataclean.rules_of(decisions)
     index = ipilist.index()   # the IPI / CAE list: a member's pseudonyms and spellings are the member
-    stamp = (master.id, master.file.name, dsp.id, dsp.sheet, client.name, json.dumps([aliases, links, merges, rules], sort_keys=True),
+    holds = dataclean.holds_of(decisions)
+    stamp = (master.id, master.file.name, dsp.id, dsp.sheet, client.name, json.dumps([aliases, links, merges, rules, holds], sort_keys=True),
              index.version, ENGINE_VERSION)
-    key = f"clean-{client.id}-{hashlib.sha1(repr(stamp).encode()).hexdigest()}"
+    key = f"clean-{client.id}-{hashlib.sha1(repr(stamp).encode(), usedforsecurity=False).hexdigest()}"
 
     def build():
         parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
         sheet, merge = _dsp_sheet(dsp)
         with measure("processing"):
             return dataclean.match(parsed, sheet, client.name, {**ipi.aliases(index, parsed, sheet["rows"]), **aliases}, links,
-                                   songmerge.songs(merge, decisions), rules, songmerge.moved_rows(merge, decisions))
+                                   songmerge.songs(merge, decisions), rules, songmerge.moved_rows(merge, decisions),
+                                   songmerge.row_edits(merge, decisions), holds)
     result = dataclean.apply_decisions(_cached(key, build), decisions)
     summary = {**dataclean.summary_counts(result), **({"flow": dsp.summary["flow"]} if (dsp.summary or {}).get("flow") else {})}
     if summary != dsp.summary:
@@ -784,6 +921,30 @@ def _clean_payload(client):
     except (FileNotFoundError, DriveError) as e:
         return JsonResponse({"error": f"A spreadsheet could not be opened: {e}"}, status=502)
     return JsonResponse({"master": _master_json(master), "dsp": _dsp_json(dsp), "result": result})
+
+
+def _followed(client, parsed):
+    """Titles chosen, recordings mapped and DSP values corrected name recordings by their sheet row: where each one is in
+    the newer sheet ({key: (key, data) | None}). None at all when the older sheet cannot be read."""
+    mine = {d.key: {"choice": d.choice, "data": d.data} for d in client.clean_decisions.all() if d.key.startswith(("title:", "map:", "muso:"))}
+    old = client.dsp_files.order_by("-uploaded_at").first()
+    if not mine or not old:
+        return {}
+    try:
+        sheet, merge = _dsp_sheet(old)
+    except (FileNotFoundError, DriveError, dataclean.DspFormatError):
+        return {k: None for k in mine}
+    return songmerge.follow(mine, (sheet["rows"], merge), (parsed["rows"], songmerge.analyse(parsed["rows"])))
+
+
+def _follow(client, moved):
+    """Write what _followed found: an answer whose recording is not in the newer sheet goes."""
+    if not moved:
+        return
+    known = {d.key: d for d in client.clean_decisions.filter(key__in=list(moved))}
+    client.clean_decisions.filter(key__in=list(moved)).delete()
+    CleanDecision.objects.bulk_create([CleanDecision(client=client, key=to[0], choice=known[k].choice, data=to[1])
+                                       for k, to in moved.items() if to and k in known])
 
 
 @gzip_page
@@ -823,6 +984,7 @@ def client_clean(request, client_id):
                     return JsonResponse({"error": "This is an LNV master. Upload it as the client's master; here goes the Muso, Apple Music or Spotify sheet."}, status=422)
                 return JsonResponse({"error": str(e)}, status=422)
         uploaded.seek(0)
+        follow = _followed(client, parsed)   # read before the newer sheet takes the older one's place
         dsp = DspFile(client=client, original_name=uploaded.name, source=parsed["source"], sheet=parsed["sheet"],
                       stats={**parsed["stats"], "sheets": parsed["sheets"]})
         try:
@@ -831,8 +993,10 @@ def client_clean(request, client_id):
             return JsonResponse({"error": f"The file could not be saved: {e}"}, status=502)
         dsp.save()
         # Step 1 choices name rows of the old sheet; a new export has other rows.
-        client.clean_decisions.filter(Q(key__startswith="merge:") | Q(key__startswith="type:") | Q(key__startswith="remark:#")).delete()
-        changes.close(client)
+        with transaction.atomic():
+            client.clean_decisions.filter(Q(key__startswith="merge:") | Q(key__startswith="type:") | Q(key__startswith="remark:#") | Q(key__startswith="hold:")).delete()
+            _follow(client, follow)
+            changes.close(client)
         cache.set(_dsp_key(dsp), parsed, RESULT_TTL)   # already read for the check: not read again
     return _clean_payload(client)
 
@@ -840,20 +1004,33 @@ def client_clean(request, client_id):
 @gzip_page
 @require_http_methods(["POST"])
 def clean_decisions(request, client_id):
-    """Many review decisions in one go: {items: [{key, choice, data?}], quiet?}; choice null clears a decision.
-    quiet: answer only {saved} (step 1 saves as the reviewer goes; the result is rebuilt when it is next asked for)."""
+    """Many review decisions in one go: {items: [{key, choice, data?}], quiet?, hold?}; choice null clears a decision.
+    hold: the matches on screen of the songs these answers concern ({song key: {rows: {LNV row: exact | possible}, vers:
+    {version key: LNV row}}}) – they stay until each is answered. quiet: answer only {saved} (step 1 saves as the reviewer goes; the result is rebuilt when it is next asked for)."""
     client = get_object_or_404(Client, pk=client_id)
     body = _body(request)
     items = {}
-    for item in body.get("items") or []:
-        key, choice = str(item.get("key") or "")[:300], item.get("choice")
+    sent = body.get("items") or []
+    if not isinstance(sent, list) or len(sent) > MAX_ITEMS or not all(isinstance(x, dict) for x in sent):
+        return JsonResponse({"error": "The answers could not be read"}, status=400)
+    for item in sent:
+        key, choice = str(item.get("key") or ""), item.get("choice")
         prefix = key.split(":", 1)[0]
-        if prefix not in CLEAN_CHOICES or (choice is not None and choice not in CLEAN_CHOICES[prefix]):
-            return JsonResponse({"error": f"Unknown decision {choice!r} for {key!r}"}, status=400)
+        if len(key) > 300 or "\x00" in key or prefix not in CLEAN_CHOICES or (choice is not None and (not isinstance(choice, str) or choice not in CLEAN_CHOICES[prefix])):
+            return JsonResponse({"error": f"Unknown decision {str(choice)[:40]!r} for {key[:80]!r}"}, status=400)
         if prefix == "song" and choice is not None:   # typed songs are checked: they come in by /songs/
             return JsonResponse({"error": "A typed song is saved with its form"}, status=400)
-        items[key] = (choice, item.get("data") if isinstance(item.get("data"), dict) else {}, item.get("log"))
+        try:
+            data = _checked(key, choice, item.get("data") if isinstance(item.get("data"), dict) else {})
+        except BadDecision as e:
+            return JsonResponse({"error": str(e)}, status=400)
+        items[key] = (choice, data, item.get("log"))
+    try:
+        holds = _holds(body.get("hold"))
+    except BadDecision as e:
+        return JsonResponse({"error": str(e)}, status=400)
     saved = len(items)
+    _hold(client, holds)
     changes.save(client, items, request.user, _who(request), GLOBAL_DECISIONS)
     if body.get("quiet"):
         return JsonResponse({"saved": saved})
@@ -910,10 +1087,10 @@ def client_songs(request, client_id):
         return JsonResponse({"error": str(e), "fields": e.fields}, status=422)
     except (FileNotFoundError, DriveError) as e:
         return JsonResponse({"error": f"A spreadsheet could not be opened: {e}"}, status=502)
-    isrc = data["isrc"]
-    row = next((s["row"] for s in parsed["songs"] if isrc in s["isrcs"]), None)
-    muso = next((r["title"] for r in sheet["rows"] if isrc in r["isrcs"]), None)
-    other = next((d.data.get("title") for d in client.clean_decisions.filter(key__startswith="song:").exclude(key=key) if d.data.get("isrc") == isrc), None)
+    isrcs = set(isrc_list(data["isrc"]))
+    row = next((s["row"] for s in parsed["songs"] if isrcs & set(s["isrcs"])), None)
+    muso = next((r["title"] for r in sheet["rows"] if isrcs & set(r["isrcs"])), None)
+    other = next((d.data.get("title") for d in client.clean_decisions.filter(key__startswith="song:").exclude(key=key) if isrcs & set(isrc_list(d.data.get("isrc")))), None)
     taken = f"LNV row {row} has this ISRC already – choose it from the sheet" if row else \
         f"{dsp.source} has this ISRC already (“{muso}”) – choose it from the sheet" if muso else f"You typed this ISRC already (“{other}”)" if other else ""
     if taken:
@@ -983,6 +1160,8 @@ def client_steps(request, client_id):
     except (FileNotFoundError, DriveError) as e:
         return JsonResponse({"error": f"A spreadsheet could not be opened: {e}"}, status=502)
     if request.GET.get("row"):   # an LNV row of step 2: IPRS only where it is checked against this same LNV
+        if not request.GET["row"].isdigit():
+            return JsonResponse({"error": "row must be a row number"}, status=400)
         return JsonResponse({"records": steps.records_for_row(parsed, clean, None if lnv2 else result, int(request.GET["row"]), out["source"])})
     built = {}
     index = ipilist.index()
@@ -990,6 +1169,7 @@ def client_steps(request, client_id):
         built["1"] = review.build(sheet, merge, decisions, clean, parsed)
         if request.GET.get("step") == "1":
             built["1"]["remarks"], built["1"]["remark_list"] = remarks.of(decisions), remarks.offered()
+            built["1"]["updates"] = changes.updates(client)   # last updated: the song to go on from
             # the names as the IPI / CAE list has them, for the review screens
             ipi.annotate_step(built["1"], index)
         flow = {"needs": built["1"]["counts"]["needs"], "songs": built["1"]["counts"]["songs"]}
@@ -1029,8 +1209,11 @@ def _dsp_part(decisions, master, dsp, clean):
     if not clean:
         return None, {}
     choice = lambda item: (item.get("decision") or {}).get("choice")
+    # fields the reviewer left blank on purpose: nothing fills them
+    blank = {tuple(k.split(":", 2)[1:]) for k, d in decisions.items()
+             if k.startswith("pick:") and d.get("choice") == "lnv" and not (d.get("data") or {}).get("value")}
     part = {
-        "fills": [f for f in clean["fills"] if choice(f) == "accept"],
+        "fills": [f for f in clean["fills"] if choice(f) == "accept" and (str(f["row"]), review.FILL_FIELDS.get(f["field"], f["field"])) not in blank],
         "adds": [m for m in clean["missing"] if choice(m) == "add"],
         "repeats": [{"row": r["row"], "keep": d["data"]["keep"]} for c in clean["duplicates"] for d in [c.get("decision") or {}]
                     if d.get("choice") == "duplicate" and not d.get("auto") and (d.get("data") or {}).get("keep")
@@ -1045,6 +1228,8 @@ def _dsp_part(decisions, master, dsp, clean):
         # the fields where the reviewer chose a value (the LNV's own too): the IPI / CAE list does not change their names
         "kept": sorted({(int(k.split(":")[1]), k.split(":", 2)[2]) for k, d in decisions.items() if k.startswith("pick:")}),
         "ipi": ipilist.index(),
+        # every ISRC of each linked row, the LNV's and the DSP's
+        "isrcs": clean.get("isrcs") or {},
         "source": dsp.source}
     # each version of a song the LNV lacks gets a row of its own
     parsed = _cached(f"master-parsed-{master.id}-{ENGINE_VERSION}", lambda: parse_master(master.file.path))
@@ -1054,11 +1239,15 @@ def _dsp_part(decisions, master, dsp, clean):
     part["typed"] = _typed_part(step["typed"], parsed, arrange)
     part["versions"] = dataclean.lnv_versions(clean, parsed["songs"], songmerge.moves(decisions))
     # the titles the reviewer chose, where each recording lands (after the older Title picks: they win)
-    titled, part["versions"], part["adds"] = dataclean.apply_titles(clean, part["versions"], part["adds"], dataclean.titles_of(decisions))
+    titles = dataclean.titles_of(decisions, songmerge.titles_now(sheet, merge, decisions))
+    titled, part["versions"], part["adds"] = dataclean.apply_titles(clean, part["versions"], part["adds"], titles)
     part["picks"] += titled
+    # the work name of the source that was not kept: the Alternative Work Name
+    part["alternatives"] = dataclean.alternative_names(clean, titles, parsed["songs"])
     # why a song was mapped: the Remark column, on the row the song has or gets
     part["remarks"], part["versions"], part["adds"] = dataclean.place_remarks(
         clean, part["versions"], part["adds"], {k: v["name"] for k, v in remarks.of(decisions).items()})
+    part["versions"], part["adds"] = dataclean.isrcs_once(part["versions"], part["adds"], part["isrcs"], clean.get("isrc_rows") or {})
     return part, arrange
 
 
@@ -1095,7 +1284,7 @@ def lnv_update_export(request, client_id):
         if lnv2:   # step 2 is in it already; its change list stays, step 3's goes on a sheet of its own
             if not (result and result.get("final")):
                 with open(lnv2.file.path, "rb") as fh:
-                    return _xlsx(fh.read(), f"{name}_LNV_final_{date.today()}")
+                    return _xlsx(compact(fh.read()), f"{name}_LNV_final_{date.today()}")
             content = export.final_report(lnv2.file.path, result["iprs"], result["final"], _master_edits(client),
                                           fill_plan(run, result), log_name="MRM changes IPRS")
             return _xlsx(content, f"{name}_LNV_final_{date.today()}")
@@ -1476,7 +1665,11 @@ EXPORT_NAMES = {
 
 def _xlsx(content, filename):
     response = HttpResponse(content, content_type=XLSX)
-    response["Content-Disposition"] = f'attachment; filename="{filename}.xlsx"'
+    # a client's name is part of it: nothing in it may end the name or start another header
+    safe = re.sub(r'[^\w.()&+, -]+', "_", printable(str(filename)).replace("\r", " ").replace("\n", " ")).strip(". ")[:150] or "download"
+    plain = safe.encode("ascii", "ignore").decode().strip("_. ") or "download"
+    response["Content-Disposition"] = f'attachment; filename="{plain}.xlsx"' if plain == safe else \
+        f"attachment; filename=\"{plain}.xlsx\"; filename*=UTF-8''{quote(safe)}.xlsx"
     return response
 
 
@@ -1554,9 +1747,12 @@ def client_export(request, client_id, name):
 def frontend(request, path=""):
     """Serve the built React app (frontend/dist) so one server runs everything."""
     dist = Path(settings.FRONTEND_DIST)
-    target = (dist / path).resolve()
-    if path and target.is_file() and dist.resolve() in target.parents:
-        return FileResponse(open(target, "rb"))
+    try:
+        target = (dist / path).resolve()
+        if path and target.is_file() and dist.resolve() in target.parents:
+            return FileResponse(open(target, "rb"))
+    except (ValueError, OSError):   # an address no file can have (a null byte, a name too long)
+        return HttpResponse("Not found", status=404)
     index = dist / "index.html"
     if not index.exists():
         return HttpResponse("Frontend not built yet. Run `npm run build` in frontend/ or use the Vite dev server.", status=503)

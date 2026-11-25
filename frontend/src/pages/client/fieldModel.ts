@@ -41,37 +41,55 @@ export function ipiChoices(f: string, lnv: CaseRecord, recs: CaseRecord[], sourc
   return out
 }
 /** Which value a field keeps in the LNV: the LNV's own, the DSP's (picked, or filling a blank), the IPI / CAE list's
- *  name, typed, or blank. */
-export type Keep = 'lnv' | 'muso' | 'ipi' | 'custom' | 'blank'
-export const keepText = (k: Keep, source: string) => k === 'lnv' ? 'LNV' : k === 'muso' ? source : k === 'ipi' ? 'IPI List' : k === 'custom' ? 'Customised' : 'Blank'
+ *  name, typed, blank – every ISRC of both (all) – or the work name that was not kept (auto: Alternative work name). */
+export type Keep = 'lnv' | 'muso' | 'ipi' | 'custom' | 'blank' | 'all' | 'auto'
+export const keepText = (k: Keep, source: string) => k === 'lnv' ? 'LNV' : k === 'muso' ? source : k === 'ipi' ? 'IPI List' : k === 'custom' ? 'Customised'
+  : k === 'all' ? 'All ISRCs' : k === 'auto' ? 'Automatic' : 'Blank'
 
 /** The choices one field of a card offers, and which one holds: the LNV's own value ('lnv'), each DSP value that
- *  differs ('m0' …), each name the IPI / CAE list has for it ('i0' …), typed ('custom'), blank. With no answer the
- *  LNV keeps its own names as the list has them – the member's PA name – else its own value; a blank LNV field takes
- *  the DSP's (as the list has it). pickOf: the value an answer saves – null for the one the LNV gets anyway. */
+ *  differs ('m0' …), each name the IPI / CAE list has for it ('i0' …), every ISRC ('all'), the alternative work name
+ *  by itself ('auto'), typed ('custom'), blank. With no answer the LNV keeps its own names as the list has them – the
+ *  member's PA name – else its own value; a blank LNV field takes the DSP's (as the list has it). An ISRC cell gets
+ *  every ISRC of the song, each once. pickOf: the value an answer saves – null for the one the LNV gets anyway,
+ *  nothing ([]) to leave it blank. */
 export type Choices = {
   lv: string[]; lvShown: string[]; vs: Variant[]; opts: string[][]; ipis: IpiChoice[]
+  /** every ISRC of the row: the LNV's and the DSP's · the alternative work name by itself */
+  all: string[]; auto: string[]
   def: string; mode: string; now: string[]; keep: Keep; pickOf: (m: string) => string[] | null
 }
-export function fieldChoices(fl: string, g: Group, taken: string | string[] | undefined, source: string): Choices {
+export function fieldChoices(fl: string, g: Group, taken: string | string[] | undefined, source: string, alternative?: string): Choices {
   const lv = list(g.lnv.fields[fl])
-  const vs = variantsOf(fl, g.recs)
+  const vs = fl === 'Alternate title' ? [] : variantsOf(fl, g.recs)
   const mvs = vs.map((x) => x.v)
   const opts = lv.length ? mvs.filter((v) => differs(fl, v, lv)) : mvs
   const ipis = NAME_FIELDS.has(fl) ? ipiChoices(fl, g.lnv, g.recs, source) : []
   const own = ipiOf(g.lnv, fl)
   const ipiAt = (v?: string[] | null) => v ? ipis.findIndex((x) => same(x.v, v)) : -1
-  const def = lv.length ? (ipiAt(own?.names) >= 0 ? `i${ipiAt(own?.names)}` : 'lnv')
+  // what the LNV row gets besides its own: worked out by the server, one rule for the screen and the file
+  const adds = fl === 'ISRC' ? [...new Set([g.lnv, ...(g.entries ?? []).map((e) => e.lnv)].flatMap((r) => r.isrc_add ?? []))].filter((x) => !lv.includes(x)) : []
+  const told = fl === 'ISRC' ? g.lnv.isrc_add : undefined
+  const all = adds.length && !g.lnv.isrc_text ? [...lv, ...adds] : []
+  const auto = fl === 'Alternate title' && alternative && alternative !== lv.join('; ') ? [alternative] : []
+  const fill = fl === 'Release date' ? g.lnv.date_add : fl === 'Link' ? g.lnv.link_add : undefined
+  const fillAt = fill ? opts.findIndex((v) => v[0] === fill) : -1
+  const def = fl === 'ISRC' && told ? (all.length ? (!lv.length && opts.length && valueKey(opts[0]) === valueKey(all) ? 'm0' : 'all') : lv.length ? 'lnv' : 'blank')
+    : auto.length ? 'auto'
+    : lv.length ? (ipiAt(own?.names) >= 0 ? `i${ipiAt(own?.names)}` : 'lnv')
+    : fill !== undefined ? (fillAt >= 0 ? `m${fillAt}` : 'blank')
     : vs.length ? (vs[0].res !== vs[0].v && ipiAt(vs[0].res) >= 0 ? `i${ipiAt(vs[0].res)}` : 'm0') : 'blank'
-  const valueOf = (m: string): string[] => m === 'lnv' ? lv : m.startsWith('m') ? opts[Number(m.slice(1))] ?? [] : m.startsWith('i') ? ipis[Number(m.slice(1))]?.v ?? [] : []
+  const valueOf = (m: string): string[] => m === 'lnv' ? lv : m === 'all' ? all : m === 'auto' ? auto
+    : m.startsWith('m') ? opts[Number(m.slice(1))] ?? [] : m.startsWith('i') ? ipis[Number(m.slice(1))]?.v ?? [] : []
   let mode = def
   if (taken !== undefined) {
     const t = list(taken)
-    const m = opts.findIndex((v) => valueKey(v) === valueKey(t))
-    mode = lv.length && same(t, lv) ? 'lnv' : ipiAt(t) >= 0 ? `i${ipiAt(t)}` : m >= 0 ? `m${m}` : 'custom'
+    // a year kept from the DSP before it was shown as a year only ('2013-05-08')
+    const key = (v: string[]) => fl === 'Year' ? (v[0] ?? '').slice(0, 4) : fl === 'Link' ? v.join(' ') : valueKey(v)
+    const m = opts.findIndex((v) => key(v) === key(t))
+    mode = !t.length ? (lv.length ? 'custom' : 'blank') : lv.length && same(t, lv) ? 'lnv' : all.length && key(t) === key(all) ? 'all'
+      : ipiAt(t) >= 0 ? `i${ipiAt(t)}` : m >= 0 ? `m${m}` : 'custom'
   }
-  const now = taken !== undefined ? list(taken) : valueOf(def)
-  const keep: Keep = mode === 'lnv' ? 'lnv' : mode === 'custom' ? 'custom' : mode === 'blank' ? 'blank' : mode.startsWith('i') ? 'ipi' : 'muso'
-  return { lv, lvShown: own?.names ?? lv, vs, opts, ipis, def, mode, now, keep, pickOf: (m) => m === def || m === 'blank' ? null : valueOf(m) }
+  const now = taken !== undefined ? (mode.startsWith('m') ? valueOf(mode) : list(taken)) : valueOf(def)
+  const keep: Keep = mode === 'lnv' || mode === 'custom' || mode === 'blank' || mode === 'all' || mode === 'auto' ? mode : mode.startsWith('i') ? 'ipi' : 'muso'
+  return { lv, lvShown: own?.names ?? lv, vs, opts, ipis, all, auto, def, mode, now, keep, pickOf: (m) => m === def ? null : m === 'blank' ? [] : valueOf(m) }
 }
-

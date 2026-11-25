@@ -2,6 +2,19 @@
  *  its CHANGELOG entry, cut at its semicolons. No React here: unit-tested in Node. */
 
 export const POINTS: Record<string, string[]> = {
+  '1.7.0': [
+    'Alternative work name fills itself: keep the LNV’s name and Muso’s goes there, or the reverse.',
+    'ISRC: all ISRCs of a song in one cell, with | between them. No ISRC twice.',
+    'Release date: the full date from Muso, next to the LNV’s release year.',
+    'Muso data can be edited too. The file’s value stays below it: Put back brings it back.',
+    'Link: replace an old link with a working one, on the LNV or the Muso side.',
+    'Matches stay on screen until all of them are answered. “Not a match” is marked, with Put back.',
+    'A song leaves “Left to check” only after its last match.',
+    'Last updated song: its name, date, time and who. Press Continue from here.',
+    'Left to check, Partly checked, All checked: on every song, as filters and in Excel.',
+    'Downloads are much smaller: 5.3 MB is now 0.9 MB. No data is lost.',
+    'Safer: uploads, links and answers are checked before they are saved.',
+  ],
   '1.6.1': [
     'Not in the LNV: map a song to an existing ISRC or song, from the Muso or the LNV list.',
     'Remark: choose why the song is mapped.',

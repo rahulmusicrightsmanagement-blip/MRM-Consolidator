@@ -2,6 +2,7 @@ import type { CleanDecisionIn } from '../../lib/api'
 import type { CaseRecord, RemarkChoice, ReviewCase, Step1 } from '../../types'
 import { list } from './Block'
 import { value, writersOf } from './CaseParts'
+import { rawOf } from './editModel'
 import { gTicked } from './Families'
 import type { Family, Pending } from './Families'
 
@@ -9,7 +10,7 @@ import type { Family, Pending } from './Families'
  *  can be mapped to. No React here: unit-tested in Node. */
 
 /** A recording's remark follows its ISRC (a new Muso export keeps it), else its sheet row. */
-export const remarkKey = (r: CaseRecord) => list(r.fields.ISRC)[0] ?? `#${r.id}`
+export const remarkKey = (r: CaseRecord) => rawOf(r, 'ISRC')[0] ?? `#${r.id}`
 export type Remark = { id: number | null; name: string }
 
 /** The remark of a song's recordings: the one they share, null – none, 'mixed' – several. */

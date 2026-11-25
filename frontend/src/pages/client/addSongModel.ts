@@ -1,3 +1,4 @@
+import { isrcsOf, pipe } from './editModel'
 import type { CleanDecisionIn } from '../../lib/api'
 import type { ReviewCase, Step1, TypedData, TypedPerson } from '../../types'
 import { list } from './Block'
@@ -61,7 +62,8 @@ export const blankPerson = (): TypedPerson => ({ name: '', ipi: '', joshua: '', 
 export const blankSong = (to: string, toTitle: string): TypedData => ({ title: '', album: '', isrc: '', links: [''], to, to_title: toTitle,
   people: { composers: [blankPerson()], authors: [blankPerson()], singers: [blankPerson()], publishers: [blankPerson()] }, more: {} })
 
-export const isrcOf = (t: string) => t.replace(/[^0-9a-z]/gi, '').toUpperCase()
+/** The ISRC of a typed song – or several, with a pipe between them. */
+export const isrcOf = (t: string) => pipe(isrcsOf(t).isrcs)
 const digits = (t: string) => t.replace(/[\s.]/g, '')
 
 /** What is missing or wrong, per field – the same rules as the server's (engine/typed.py). */
@@ -70,7 +72,7 @@ export function problems(t: TypedData): Record<string, string> {
   if (!t.title.trim()) out.title = 'Title is required'
   if (!t.album.trim()) out.album = 'Album is required'
   if (!t.isrc.trim()) out.isrc = 'ISRC is required'
-  else if (!/^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(isrcOf(t.isrc))) out.isrc = 'ISRC must be 12 characters, e.g. INH100510220'
+  else if (!isrcOf(t.isrc) || isrcsOf(t.isrc).wrong.length) out.isrc = 'ISRC must be 12 characters, e.g. INH100510220'
   const links = t.links.map((x) => x.trim()).filter(Boolean)
   const badLink = links.find((x) => !/^https?:\/\/[^\s/]+\.[^\s/]+/i.test(x))
   if (badLink) out.links = `Not a link: ${badLink.slice(0, 60)}`

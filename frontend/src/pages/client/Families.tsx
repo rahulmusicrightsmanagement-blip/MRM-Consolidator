@@ -1,19 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
-import { ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpDown, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Link2, Pencil, Plus, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpDown, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Circle, CircleCheck, CircleDot, Clock, Link2, Pencil, Plus, Trash2, Undo2, X } from 'lucide-react'
 import { ConfirmDialog, Dropdown, Guide } from '../../components/ui'
 import type { DropOption } from '../../components/ui'
 import type { CleanDecisionIn } from '../../lib/api'
-import type { CaseRecord, RemarkChoice, ReviewCase, Step1, TitleMode, TypedSong } from '../../types'
+import type { CaseRecord, MovedOut, RemarkChoice, ReviewCase, Step1, TitleMode, TypedSong } from '../../types'
 import { list, n, norm } from './Block'
 import { Checks, Links, LnvRowDetails, MapDialog, Part, VersionDetails, differs, hasLink, useKeys, useStored, value } from './CaseParts'
 import type { Target } from './CaseParts'
-import { NAME_FIELDS, PICKABLE, PICK_SHOWN, draftOf, itemsOf, matchOf, pickItem, pickKey, shownOf } from './reviewModel'
+import { PICKABLE, PICK_SHOWN, draftOf, itemsOf, matchOf, pickItem, pickKey, shownOf } from './reviewModel'
 import { AddSong } from './AddSong'
+import { EditBox, EditLine, MusoContext, MusoField, TypeIn } from './EditParts'
+import type { MusoEditing } from './EditParts'
+import { autoAlternative, editItem, labelOf, rawOf, typedText } from './editModel'
 import { fieldChoices, ipiOf, keepText } from './fieldModel'
 import { RemarkPick } from './MapTo'
 import { remarkItems, remarkKey, remarkOf } from './remarkModel'
 import { titleModel } from './titles'
+import { whenText } from './when'
 import type { Line } from './titles'
 import type { Choices, Keep } from './fieldModel'
 
@@ -50,11 +54,27 @@ export type Family = {
   recs: CaseRecord[]
   /** songs the reviewer typed and added to it: each a new LNV row, checked as it is */
   typed: TypedSong[]
+  /** its matches answered "not this one": they stay on screen, answered, beside the ones still to check */
+  out: Out[]
+}
+/** A match the reviewer turned down – this LNV row is not the song, its song got a new row, was deleted, is not the
+ *  client's, or was mapped to another song. */
+export type Out = {
+  key: string; why: 'off' | 'new' | 'deleted' | 'not_ours' | 'mapped'; match: 'exact' | 'possible'; rows: number[]; lnv: CaseRecord; recs: CaseRecord[]
+  /** what was decided, in plain words */
+  text: string
+  /** the song, the version or the recording it belongs to: what "Put back" takes back */
+  c?: ReviewCase; version?: string; moved?: number
 }
 
 const PLAIN = new Set(['Original', 'Re-release'])
-const yearOf = (r: CaseRecord) => value(r.fields.Year) || '9999'
-const FIELDS = ['Title', 'Film / album', 'Lyricist', 'Composer', 'Publisher', 'Singer', 'ISRC', 'Year']
+/** The sheet's own release (a correction never changes the main version): the complete date, else the year. */
+const yearOf = (r: CaseRecord) => rawOf(r, 'Release date').join('').split('-').reverse().join('-') || rawOf(r, 'Year').join('') || '9999'
+const FIELDS = ['Title', 'Alternate title', 'Film / album', 'Lyricist', 'Composer', 'Publisher', 'Singer', 'ISRC', 'Year', 'Release date']
+/** The fields a DSP recording has (an alternative work name is the LNV's only). */
+const MUSO_SHOWN = FIELDS.filter((f) => f !== 'Alternate title')
+/** What makes two LNV rows one card: the alternative name, release date and link aside. */
+const SIG = ['Title', 'Film / album', 'Lyricist', 'Composer', 'Publisher', 'Singer', 'ISRC', 'Year']
 
 /** Out of the LNV match: the reviewer gave it a new row (New row), it is not the client's (Not in the LNV), or the
  *  reviewer deleted it (Deleted songs). */
@@ -64,7 +84,7 @@ export const inFamilies = (c: ReviewCase) => c.kind !== 'names' && c.kind !== 't
 function entriesOf(c: ReviewCase): Entry[] {
   const out: Entry[] = []
   // the rows the reviewer linked; else every row the app found a match in (or proposes)
-  const mine = c.answer.choice === 'same' && c.answer.by === 'you' ? [...(c.answer.rows ?? []), ...(c.answer.also ?? [])] : null
+  const mine = outOfMatch(c) ? [] : c.answer.choice === 'same' && c.answer.by === 'you' ? [...(c.answer.rows ?? []), ...(c.answer.also ?? [])] : null
   const orig = c.muso.find((r) => r.part === 'original') ?? c.muso[0]
   for (const l of c.lnv) {
     if (l.row == null) continue
@@ -87,7 +107,7 @@ export const variants = (f: string, rs: CaseRecord[]) => {
   const vs = rs.map((r) => list(r.fields[f])).filter((v) => v.length)
   return vs.filter((v, i) => vs.findIndex((x) => !differs(f, x, v)) === i)
 }
-const sig = (rs: CaseRecord[]) => FIELDS.map((f) => variants(f, rs).map((v) => f === 'Year' ? v[0].slice(0, 4) : v.map(norm).sort().join(',')).sort().join('/')).join('|')
+const sig = (rs: CaseRecord[]) => SIG.map((f) => variants(f, rs).map((v) => f === 'Year' ? v[0].slice(0, 4) : v.map(norm).sort().join(',')).sort().join('/')).join('|')
 
 /** The cards of one section: the entries of each LNV row together, then rows whose data and recordings are the very
  *  same joined ("LNV rows 468, 475"). */
@@ -111,24 +131,72 @@ function groupsOf(entries: Entry[]): Group[] {
  *  'Maula Mere Maula (From "Anwar")'), 1 – no version tag ('Maula Mere Maula, Pt. 1', '- Stutter'), 2 – a version. */
 const plainness = (r: CaseRecord) => {
   if (r.version && !PLAIN.has(r.version)) return 2
-  const bare = value(r.fields.Title).replace(/\s*[([](from|original)\b[^)\]]*[)\]]/gi, '').trim()
+  const bare = rawOf(r, 'Title').join(', ').replace(/\s*[([](from|original)\b[^)\]]*[)\]]/gi, '').trim()
   return /\s[-–—|:]\s|[([,/]/.test(bare) ? 1 : 0
 }
 const tagged = (c: ReviewCase) => c.muso.filter((r) => r.in).every((r) => !!r.version && !PLAIN.has(r.version))
 
+/** A song with no match left itself – sent to a new row, or every row of it turned down – whose versions the LNV has:
+ *  those matches are still to check, under its song name. */
+const versionsLeft = (c: ReviewCase) => c.kind !== 'names' && c.kind !== 'twice' && (isSentNew(c) || (!outOfMatch(c) && !!(c.begun || c.in_lnv?.some((v) => v.answer === 'same'))))
+  && !!c.in_lnv?.some((v) => v.answer !== 'none')
+const isSentNew = (c: ReviewCase) => c.kind !== 'names' && c.kind !== 'twice' && c.answer.choice === 'add' && c.answer.by === 'you'
+const OUT_WHY = { add: 'new', deleted: 'deleted', not_ours: 'not_ours' } as const
+/** The matches of a song name answered "not this one". */
+function outOf(cs: ReviewCase[], gone: ReviewCase[], moved: MovedOut[]): Out[] {
+  const out: Out[] = []
+  const level = (r: CaseRecord) => r.check?.level === 'exact' ? 'exact' as const : 'possible' as const
+  // (a song with nothing left to match stands under Not in the LNV: the rows turned down for it are shown here all the same)
+  for (const c of [...cs, ...gone.filter((x) => !cs.includes(x))]) {
+    const orig = c.muso.find((r) => r.part === 'original') ?? c.muso[0]
+    for (const l of c.off_lnv ?? []) if (l.row != null) {
+      const rec = c.muso.find((r) => l.check?.via != null && r.sheet_rows?.includes(l.check.via)) ?? orig
+      out.push({ key: `off:${c.id}:${l.row}`, why: 'off', match: level(l), rows: [l.row], lnv: l, recs: [rec], c,
+        text: c.off_then === 'add' && !(c.answer.choice === 'same' && c.answer.by === 'you') ? 'Not a match – a new row, unless another match is ticked' : 'Not a match – this LNV row is not the song' })
+    }
+    for (const v of c.in_lnv ?? []) if (v.answer === 'none') out.push({ key: `offv:${v.key}`, why: 'off', match: v.isrc && v.album ? 'exact' : 'possible', rows: [v.row], lnv: v.lnv, recs: [v.muso], version: v.key,
+      text: 'Not a match – this version gets a row of its own' })
+  }
+  for (const c of gone) for (const l of [...(c.was ?? []), ...(c.answer.choice === 'add' ? [] : (c.in_lnv ?? []).filter((v) => v.answer !== 'none').map((v) => v.lnv))]) if (l.row != null) {
+    const why = c.answer.by === 'you' ? OUT_WHY[c.answer.choice as keyof typeof OUT_WHY] : undefined
+    if (why) out.push({ key: `${why}:${c.id}:${l.row}`, why, match: level(l), rows: [l.row], lnv: l, recs: c.muso.slice(0, 1), c,
+      text: why === 'new' ? 'Not a match – its song goes into the LNV as a new row' : why === 'deleted' ? 'Song deleted – nothing of it goes into the LNV' : 'Not the client’s – nothing of it goes into the LNV' })
+  }
+  for (const m of moved) for (const l of m.lnv) if (l.row != null) out.push({ key: `moved:${m.id}:${l.row}`, why: 'mapped', match: m.level ?? 'possible', rows: [l.row], lnv: l, recs: [m.muso], moved: m.id,
+    text: `Mapped to “${m.to_title}”${m.row ? ` (LNV row ${m.row})` : ''}` })
+  return out.sort((a, b) => a.rows[0] - b.rows[0])
+}
+
 /** The songs of the LNV match grouped by song name, each with its main version, exact and possible matches. */
-export function familiesOf(cases: ReviewCase[], typed: TypedSong[] = []): Family[] {
+export function familiesOf(cases: ReviewCase[], typed: TypedSong[] = [], moved: MovedOut[] = []): Family[] {
   // a song the reviewer added to another never makes or unmakes a name, nor becomes its main version
   const own = (cs: ReviewCase[]) => { const x = cs.filter((c) => !c.joined); return x.length ? x : cs }
   const by = new Map<string, ReviewCase[]>()
-  cases.filter(inFamilies).forEach((c) => { const k = c.family || c.id; by.set(k, [...(by.get(k) ?? []), c]) })
+  cases.filter((c) => inFamilies(c) || versionsLeft(c)).forEach((c) => { const k = c.family || c.id; by.set(k, [...(by.get(k) ?? []), c]) })
   // a name that only versions carry joins the shorter name it starts with: 'Maula Mere Maula Electronic Lab - Jhankar
   // Beats' is a Jhankar version of 'Maula Mere Maula' (a longer name with a plain recording stays a song of its own)
   const keys = [...by.keys()].filter((k) => !k.includes(':')).sort((a, b) => a.length - b.length)
+  const home = new Map<string, string>()   // a name that joined another -> that name
+  // the songs of a name sent out of their match count here as before: an answer on one song moves no other one
+  const isGone = (c: ReviewCase) => c.kind !== 'names' && c.kind !== 'twice' && !!c.family && !inFamilies(c)
+    && !!((c.answer.by === 'you' && outOfMatch(c) && (c.was?.length || c.in_lnv?.length)) || c.off_lnv?.length || c.in_lnv?.some((v) => v.answer === 'none'))
+  const sentOf = (k: string) => cases.filter((c) => c.family === k && isGone(c))
   for (const k of [...keys].reverse()) {
     const base = [...keys].reverse().find((x) => x.length >= 8 && x.length < k.length && k.startsWith(x) && by.has(x))   // the closest name
-    if (base && own(by.get(k)!).every(tagged)) { by.set(base, [...by.get(base)!, ...by.get(k)!]); by.delete(k) }
+    if (base && own([...by.get(k)!, ...sentOf(k)]).every(tagged)) { by.set(base, [...by.get(base)!, ...by.get(k)!]); by.delete(k); home.set(k, base) }
   }
+  // the songs sent out of a name that still has others: shown there, answered, until every match of it is
+  const nameOf = (k: string, only = false) => {
+    while (home.has(k)) k = home.get(k)!
+    // a name whose last song left it: the shorter one it would have joined
+    return by.has(k) || !only ? k : [...keys].reverse().find((x) => x.length >= 8 && x.length < k.length && k.startsWith(x) && by.has(x)) ?? k
+  }
+  const gone = new Map<string, ReviewCase[]>(), left = new Map<string, MovedOut[]>()
+  for (const c of cases) if (isGone(c)) {
+    const k = nameOf(c.family!, tagged(c))
+    gone.set(k, [...(gone.get(k) ?? []), c])
+  }
+  for (const m of moved) { const k = nameOf(m.family, true); left.set(k, [...(left.get(k) ?? []), m]) }
   return [...by].map(([k, cs]) => {
     const all = cs.flatMap((c) => c.muso.filter((r) => r.in))
     const mains = own(cs).flatMap((c) => c.muso.filter((r) => r.in))
@@ -144,6 +212,7 @@ export function familiesOf(cases: ReviewCase[], typed: TypedSong[] = []): Family
       possible: groupsOf(entries.filter((e) => e.match === 'possible')).sort((a, b) => a.rows[0] - b.rows[0]),
       rest: cs.flatMap((c) => c.muso.filter((r) => r.in && !used.has(r.id)).map((r) => ({ c, r }))),
       typed: typed.filter((t) => t.family && names.has(t.family)),
+      out: outOf(cs, gone.get(k) ?? [], left.get(k) ?? []),
     }
   })
 }
@@ -188,6 +257,13 @@ export const toCheck = (p: Pending, f: Family) => [...f.exact, ...f.possible].fi
 export const checkedIn = (p: Pending, f: Family) => [...f.exact, ...f.possible].filter((g) => gTicked(p, g)).length + f.typed.length
 /** The LNV rows of a song on screen as its own (not its versions'): linking one leaves the others to check. */
 const ownRows = (c: ReviewCase) => entriesOf(c).filter((e) => !e.v).map((e) => e.row)
+/** How far a song name is: its matches (the ones turned down too), how many are answered, and what is left. */
+export type Status = 'todo' | 'part' | 'done'
+export const STATUS: Record<Status, string> = { todo: 'Left to check', part: 'Partly checked', done: 'All checked' }
+export function progressOf(p: Pending, f: Family) {
+  const total = f.exact.length + f.possible.length + f.out.length, left = toCheck(p, f)
+  return { total, left, done: total - left, status: (!left ? 'done' : left === total ? 'todo' : 'part') as Status }
+}
 /** A song name's exact and possible matches not ticked yet. */
 export const openOf = (p: Pending, f: Family) => ({ exact: f.exact.filter((g) => !gTicked(p, g)).length, possible: f.possible.filter((g) => !gTicked(p, g)).length })
 
@@ -204,6 +280,72 @@ function tick(p: Pending, e: Entry, on: boolean, saved: Step1['picks']): Pending
 
 export function tickGroup(p: Pending, g: Group, on: boolean, saved: Step1['picks']): Pending {
   return g.entries.filter((e) => !locked(e) && ticked(p, e) !== on).reduce((acc, e) => tick(acc, e, on, saved), p)
+}
+
+/** The matches on screen of the song names these answers concern: the server keeps them there until each is answered,
+ *  whatever the answers change in the match. {song: {its own LNV rows: exact | possible, its versions' rows}} */
+export type Holds = Record<string, { rows: Record<string, 'exact' | 'possible'>; vers: Record<string, number> }>
+export function holdsOf(items: CleanDecisionIn[], families: Family[]): Holds {
+  const songs = new Set<string>(), recs = new Set<number>(), vers = new Set<string>(), rows = new Set<number>()
+  for (const it of items) {
+    const at = it.key.indexOf(':'), kind = it.key.slice(0, at), rest = it.key.slice(at + 1)
+    if (['link', 'missing', 'off', 'family'].includes(kind)) songs.add(rest)
+    else if (kind === 'version') vers.add(it.key)
+    else if (kind === 'map') recs.add(Number(rest))
+    else if (kind === 'pick') rows.add(Number(rest.split(':')[0]))
+  }
+  const out: Holds = {}
+  for (const f of families) {
+    const entries = [...f.exact, ...f.possible].flatMap((g) => g.entries)
+    if (!f.cases.some((c) => songs.has(c.answer.song ?? '') || c.muso.some((r) => r.id != null && recs.has(r.id)) || c.in_lnv?.some((v) => vers.has(v.key))) && !entries.some((e) => rows.has(e.row))) continue
+    for (const e of entries) {
+      const song = e.c.answer.song
+      if (!song) continue
+      const h = out[song] ??= { rows: {}, vers: {} }
+      if (e.v) h.vers[e.v.key] = e.row
+      else h.rows[String(e.row)] = e.match
+    }
+  }
+  return out
+}
+/** A song's other matches on screen: they stay to check when one of them is answered. */
+export const restOf = (c: ReviewCase, g: Group) => ownRows(c).filter((r) => !g.rows.includes(r))
+/** These rows are not the song: turned down, the song's other rows stay as they are. then: what becomes of the song when
+ *  none of them is it either. */
+export function turnDownItems(c: ReviewCase, g: Group, then: string | null | undefined, d: Step1): CleanDecisionIn[] {
+  const left = savedLinks(c).filter((r) => !g.rows.includes(r)), also = restOf(c, g)
+  return [{ key: `off:${c.answer.song}`, choice: 'rows', data: { rows: [...new Set([...(c.off ?? []), ...g.rows])].sort((a, b) => a - b), ...(then ? { then } : {}) } },
+    ...(left.length === savedLinks(c).length ? [] : left.length ? itemsOf(c, { ...draftOf(c, d.picks), choice: 'same', rows: left, also }) : itemsOf(c, null))]
+}
+/** "Not a match – a new row": a version gets a row of its own; a song with other matches to check has this one answered
+ *  (waiting: the others), one with none left goes into the LNV as a new row. */
+export function newRowItems(g: Group, d: Step1): { items: CleanDecisionIn[]; waiting: number[]; songs: number } {
+  const items: CleanDecisionIn[] = [], waiting: number[] = []
+  const songs = new Set<string>()
+  g.entries.forEach((e) => {
+    if (e.v) {
+      items.push({ key: e.v.key, choice: 'none', data: { rows: [e.v.row] } },
+        ...Object.keys(d.picks).filter((k) => k.startsWith(`pick:${e.row}:`)).map((k) => ({ key: k, choice: null })))
+    } else if (!songs.has(e.c.id)) {
+      songs.add(e.c.id)
+      const rest = restOf(e.c, g)
+      if (rest.length) { waiting.push(...rest); items.push(...turnDownItems(e.c, g, 'add', d)); return }
+      // every LNV row it was matched to is turned down: the app does not ask again
+      const rows = [...new Set([...e.c.lnv.filter((r) => r.row != null && (r.check?.level || g.rows.includes(r.row))).map((r) => r.row!), ...(e.c.was ?? []).map((r) => r.row!), ...(e.c.off ?? [])])]
+      items.push(...itemsOf(e.c, { ...draftOf(e.c), choice: 'add', rows: [] }).map((x) => x.key === `link:${e.c.answer.song}` ? { ...x, data: { rows } } : x))
+    }
+  })
+  return { items, waiting, songs: songs.size }
+}
+/** A match answered "not this one" taken back. */
+export function putBackItems(o: Out, d: Step1): CleanDecisionIn[] {
+  if (o.moved != null) return [{ key: `map:${o.moved}`, choice: null }]
+  if (o.version) return [{ key: o.version, choice: null }]
+  const c = o.c!
+  if (o.why !== 'off') return itemsOf(c, null)
+  const rest = (c.off ?? []).filter((r) => !o.rows.includes(r))
+  return [rest.length ? { key: `off:${c.answer.song}`, choice: 'rows', data: { rows: rest, ...(c.off_then ? { then: c.off_then } : {}) } } : { key: `off:${c.answer.song}`, choice: null },
+    ...(c.answer.choice === 'same' && c.answer.by === 'you' ? itemsOf(c, { ...draftOf(c, d.picks), choice: 'same', rows: c.answer.rows ?? [], also: [...new Set([...(c.answer.also ?? []), ...o.rows])] }) : [])]
 }
 
 /** The decisions the queue saves. A song whose rows or values changed is answered whole (itemsOf: its merge, link, the
@@ -246,7 +388,7 @@ export function SaveBar({ count, busy, flush }: { count: number; busy: boolean; 
 
 /* ---------- one family on screen ---------- */
 
-export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targets, commit, toast, families, loose, act, showUndo }: {
+export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targets, commit, toast, families, loose, act, showUndo, updated }: {
   f: Family; d: Step1; p: Pending; set: (fn: (p: Pending) => Pending) => void
   pos: number; total: number; prev: () => void; next: () => void; wideBtn: ReactNode
   targets: Target[]
@@ -258,6 +400,8 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
   /** a save of another kind, then the step again */
   act: (work: () => Promise<unknown>) => Promise<boolean>
   showUndo: (song: string) => void
+  /** when a change to this song was last saved */
+  updated?: string
 }) {
   const source = d.source
   const [opened, setOpened] = useState<number | null>(null)   // the recording whose details are open (index in f.recs)
@@ -308,6 +452,8 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
 
   // ---- values: where Muso and the LNV row differ, the one the LNV keeps – on every row of the card
   const pickOf = (k: string) => (k in p.picks ? p.picks[k] ?? undefined : d.picks[k])
+  /** A field's choices on a card – the alternative work name follows the title chosen. */
+  const choicesOf = (g: Group, fl: string) => fieldChoices(fl, g, pickOf(pickKey(g.rows[0], fl)), source, fl === 'Alternate title' ? autoAlternative(titleFinal(g), g.lnv, g.trs) : undefined)
   const choosePick = (g: Group, fl: string, v: string[] | null) => set((q) => {
     let out: Pending = q
     g.rows.forEach((row) => { const k = pickKey(row, fl); out = { ...out, picks: put(out.picks, k, v ? (v.length === 1 ? v[0] : v) : null, d.picks[k] ?? null) } })
@@ -315,38 +461,50 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
     return out
   })
 
-  // ---- not a match: a row of its own, or onto another song – saved at once, with the queue
+  // ---- the DSP's own data corrected: saved at once, with the queue; titles that follow it are carried along
+  const editing: MusoEditing = {
+    source, busy,
+    save: async (r, f, v) => {
+      const items: CleanDecisionIn[] = [editItem(r, f, v)]
+      if (f === 'Title' && r.id === mainLine.id && modeOf(mainLine) === 'muso') {
+        const t = (v ?? rawOf(r, f)).join(', ')
+        lines.forEach((x) => { if (x.id !== mainLine.id && modeOf(x) === 'main') items.push({ key: `title:${x.id}`, choice: 'main', data: { value: t } }) })
+      }
+      setBusy(true)
+      const ok = await commit(items)
+      setBusy(false)
+      if (ok) toast(v == null ? `${labelOf(f)}: back to the ${source} file’s value` : `${source} ${labelOf(f).toLowerCase()} corrected`, 'good')
+    },
+  }
+
+  // ---- not a match: a row of its own, or onto another song – saved at once, with the queue. One answer never takes
+  // another match away: a song's other matches stay until each of them is answered
+  /** The LNV rows a recording stands beside here – kept with the recording when it is mapped to another song. */
+  const wasOf = (id: number) => [...new Set([...entries.filter((e) => e.rec.id === id || e.tr.id === id).map((e) => e.row)])].sort((a, b) => a - b)
+  /** A match answered "not this one" taken back: to check again. */
+  const putBack = async (o: Out) => {
+    setBusy(true)
+    const ok = await commit(putBackItems(o, d))
+    setBusy(false)
+    if (ok) toast(`LNV row ${o.rows.join(', ')} is to check again`, 'good')
+  }
   const mapCard = (g: Group) => setMapping({ c: g.entries[0].c, rec: g.recs[0], recs: g.entries.some((e) => !e.v) && g.entries.length === 1 ? g.entries[0].c.muso.filter((r) => r.in) : g.recs })
   const newRow = async (g: Group) => {
     setBusy(true)
-    const items: CleanDecisionIn[] = []
-    const songs = new Set<string>()
-    g.entries.forEach((e) => {
-      if (e.v) {
-        items.push({ key: e.v.key, choice: 'none', data: { rows: [e.v.row] } },
-          ...Object.keys(d.picks).filter((k) => k.startsWith(`pick:${e.row}:`)).map((k) => ({ key: k, choice: null })))
-      } else if (!songs.has(e.c.id)) {
-        songs.add(e.c.id)
-        // every LNV row it was matched to is turned down: the app does not ask again
-        items.push(...itemsOf(e.c, { ...draftOf(e.c), choice: 'add', rows: [] })
-          .map((x) => x.key === `link:${e.c.answer.song}` ? { ...x, data: { rows: e.c.lnv.map((r) => r.row!).filter((r) => r != null) } } : x))
-      }
-    })
+    const { items, waiting, songs } = newRowItems(g, d)
     const ok = await commit(items)
     setBusy(false)
     setAsking(null)
-    if (ok) toast(songs.size ? `“${g.entries[0].c.title}” is added as a new row – it is under “New row” now` : `“${value(g.recs[0].fields.Title)}” gets a row of its own in the LNV`, 'good')
+    const title = g.entries[0].c.title
+    if (ok) toast(waiting.length ? `${rowsLabel(g)}: not “${title}”. Its other match${new Set(waiting).size > 1 ? 'es stay' : ' stays'} to check – it gets a new row if none of them is it`
+      : songs ? `“${title}” is added as a new row – it is under “New row” now` : `“${value(g.recs[0].fields.Title)}” gets a row of its own in the LNV`, 'good')
   }
   /** A song with other LNV rows on screen: one row can be turned down by itself, the song stays. */
   const onlyRow = (g: Group) => g.entries.every((e) => !e.v && e.c.answer.song && entries.some((x) => !x.v && x.c.id === e.c.id && !g.rows.includes(x.row)))
   const notRow = async (g: Group) => {
     setBusy(true)
     const cs = songsOf(g)
-    const ok = await commit(cs.flatMap((c) => {
-      const left = savedLinks(c).filter((r) => !g.rows.includes(r)), also = ownRows(c).filter((r) => !g.rows.includes(r))
-      return [{ key: `off:${c.answer.song}`, choice: 'rows' as const, data: { rows: [...new Set([...(c.off ?? []), ...g.rows])].sort((a, b) => a - b) } },
-        ...(left.length === savedLinks(c).length ? [] : left.length ? itemsOf(c, { ...draftOf(c, d.picks), choice: 'same', rows: left, also }) : itemsOf(c, null))]
-    }))
+    const ok = await commit(cs.flatMap((c) => turnDownItems(c, g, c.off_then, d)))
     setBusy(false)
     setAsking(null)
     if (ok) toast(`${rowsLabel(g)} ${g.rows.length > 1 ? 'are' : 'is'} not “${cs[0].title}” – its other rows stay`, 'good')
@@ -379,6 +537,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
     const part = g.entries.length > 1 ? g.entries.filter((x) => ticked(p, x)).length : 0
     const of = part && part < g.entries.length ? ` · ${part} of ${g.entries.length} recordings ticked` : ''
     if (gLocked(g)) return 'Linked by the app'
+    if (e.v?.taken) return `LNV row ${e.row} was given to ${e.v.taken} – tick only if it is this one too, else “Not a match”` + of
     if (e.v) return (e.v.answer === 'same' ? 'Checked by you' : `A version the LNV has – the app matched it${e.v.isrc ? ' by its ISRC' : ''}`) + of
     if (savedLinks(e.c).includes(e.row)) return 'Checked by you' + of
     if (e.c.answer.choice === 'same' && (e.c.answer.rows ?? []).includes(e.row)) return 'The app says it is this row – tick to confirm' + of
@@ -400,12 +559,13 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
       <div className="nm">
         <b>Not {what} – where does it go?</b>
         <div className="nm-btns">
-          <button type="button" className="btn" disabled={busy} onClick={() => newRow(g)}><Plus size={15} />{g.entries.every((x) => x.v) ? 'A row of its own' : 'New row in the LNV'}</button>
+          <button type="button" className="btn" disabled={busy} onClick={() => newRow(g)}><Plus size={15} />{g.entries.every((x) => x.v) ? 'A row of its own' : songsOf(g).some((c) => restOf(c, g).length) ? 'New row, if no other match is it' : 'New row in the LNV'}</button>
           <button type="button" className="btn" disabled={busy} onClick={() => mapCard(g)}><Link2 size={15} />Map to another song…</button>
           {onlyRow(g) && <button type="button" className="btn" disabled={busy} onClick={() => void notRow(g)}><X size={15} />Only {rowsLabel(g)} {g.rows.length > 1 ? 'are' : 'is'} not it</button>}
           <button type="button" className="rv-text-btn" onClick={() => setAsking(null)}>Cancel</button>
         </div>
         <small className="muted">{g.entries.every((x) => x.v) ? `${g.recs.length > 1 ? `These ${g.recs.length} recordings leave` : 'This version leaves'} ${rowsLabel(g)}.`
+          : songsOf(g).some((c) => restOf(c, g).length) ? 'Only this match is answered – it stays on screen, marked, and the other matches stay to check.'
           : `“${e.c.title}”${others > 0 ? ` and its ${others} other version${others > 1 ? 's' : ''}` : ''} leave${others > 0 ? '' : 's'} this song at once.`}</small>
       </div>
     ) : <button type="button" className="rv-text-btn nm-open" onClick={() => setAsking(g.key)}><X size={14} />Not {what}</button>
@@ -444,14 +604,20 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
 
   // an LNV row already an exact match above: said on its possible card – it is most likely another song
   const exactAt = new Map(f.exact.flatMap((g) => g.rows.map((row) => [row, value(g.recs[0].fields.Title)] as const)))
-  const mark = (fl: string, v: string[], from: CaseRecord) => from !== main && v.length > 0 && differs(fl, shownOf(main, fl), v)
+  const mark = (fl: string, v: string[], from: CaseRecord) => from !== main && v.length > 0 && fl !== 'Link'
+    && (fl === 'ISRC' ? list(main.fields.ISRC).length > 0 && !v.some((x) => list(main.fields.ISRC).includes(x)) : differs(fl, shownOf(main, fl), v))
+  /** A match's state, on its column or card. */
+  const stateOf = (g: Group) => gTicked(p, g) ? <span className="st done"><CircleCheck size={13} />Checked</span> : <span className="st todo"><Circle size={13} />Left to check</span>
   type Across = ReturnType<typeof useAcross>
-  /** LNV rows side by side against the main version, scrolled across: each field what the LNV keeps (its dropdown),
-   *  the link, the title, the tick and the answers (Not a match · Delete). The exact matches, and the possible ones (X). */
+  /** LNV rows side by side against the main version, scrolled across: each field what the LNV keeps (its dropdown) and
+   *  the DSP's own value under it – both can be edited –, the link, the title, the tick and the answers (Not a match ·
+   *  Delete). The exact matches, and the possible ones (X). A match turned down stays in its place, answered. */
   const lnvTable = (gs: Group[], kind: 'exact' | 'possible', sc: Across) => {
     // a possible match's LNV row is compared with the main version whatever recording is matched to it – the main
     // version itself too
     const cmp = (g: Group) => kind === 'possible' ? g.lnv : g.recs[0]
+    const cols = [...gs.map((g) => ({ at: g.rows[0], g, o: null })), ...f.out.filter((o) => o.match === kind).map((o) => ({ at: o.rows[0], g: null, o }))].sort((x, y) => x.at - y.at)
+    const each = (inMatch: (g: Group) => ReactNode, out: (o: Out) => ReactNode) => cols.map((c) => (c.g ? inMatch(c.g) : out(c.o!)))
     return (
     <div className={`fx-wrap ${sc.end && sc.start ? '' : 'can'}`} ref={sc.ref} onScroll={sc.measure} onPointerDown={sc.down}>
       <table className={`fx ${kind}`}>
@@ -459,10 +625,10 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
           <tr>
             <th className="fx-f" />
             <th className="fx-main"><span className="cv-badge muso">Main version</span><small className="muted">{source}</small></th>
-            {gs.map((g) => (
+            {each((g) => (
               <th key={g.key} className={`fx-col ${gTicked(p, g) ? 'on' : ''}`}>
                 <span className="gr-rows">{g.rows.map((row) => (
-                  <button key={row} type="button" className="cv-badge lnv cv-rowbtn" onClick={() => setOpenedRow(row)} title="See this LNV row">LNV row {row}<ChevronRight size={14} /></button>))}</span>
+                  <button key={row} type="button" className="cv-badge lnv cv-rowbtn" onClick={() => setOpenedRow(row)} title="See this LNV row">LNV row {row}<ChevronRight size={14} /></button>))}{stateOf(g)}</span>
                 {g.rows.length > 1 && <small className="gr-same">The same data in each of these rows</small>}
                 {recsLine(g, 'fx-rec')}
                 {kind === 'possible' && checksOf(g)}
@@ -470,66 +636,63 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                 {kind === 'possible' && g.rows.filter((row) => exactAt.has(row)).map((row) => (
                   <p key={row} className="pc-warn">LNV row {row} is already the exact match of “{exactAt.get(row)}” – check it is this song.</p>))}
               </th>
+            ), (o) => (
+              <th key={o.key} className="fx-col out">
+                <span className="gr-rows">{o.rows.map((row) => <button key={row} type="button" className="cv-badge lnv cv-rowbtn" onClick={() => setOpenedRow(row)} title="See this LNV row">LNV row {row}<ChevronRight size={14} /></button>)}<span className="st out"><X size={13} />Not a match</span></span>
+                <span className="fx-rec plain">{source}: {value(o.recs[0]?.fields.Title)}</span>
+              </th>
             ))}
           </tr>
         </thead>
         <tbody>
           {FIELDS.map((fl) => (
             <tr key={fl}>
-              <th className="fx-f">{fl}</th>
-              <td className={`fx-main ${fl === 'ISRC' ? 'mono' : ''} ${fl === 'Title' ? 'fx-t' : ''}`}><Listed r={main} fl={fl} source={source} />
+              <th className="fx-f">{labelOf(fl)}</th>
+              <td className={`fx-main ${fl === 'ISRC' ? 'mono' : ''} ${fl === 'Title' ? 'fx-t' : ''}`}>{fl === 'Alternate title' ? <span className="muted">—</span> : <Listed r={main} fl={fl} source={source} />}
                 {fl === 'Title' && finalOf(mainLine) !== mainLine.muso && <small className="fx-other lnv">In the LNV: {finalOf(mainLine)}</small>}</td>
-              {gs.map((g) => {
+              {each((g) => {
                 if (fl === 'Title') return (
-                  <td key={g.key} className={`fx-t ${mark(fl, [titleFinal(g)], cmp(g)) ? 'fx-dm' : ''}`}>{titlePick(g.trs.map((r) => r.id), () => mapCard(g))}</td>)
-                const lv = list(g.lnv.fields[fl]), mvs = variants(fl, g.recs)
-                const other = mvs.filter((v) => differs(fl, v, lv))
-                // every field but the title (it has its own row): the LNV's, the DSP's, the IPI List's, or typed
-                if (PICK_SHOWN.includes(fl)) {
-                  const taken = pickOf(pickKey(g.rows[0], fl))
-                  const fc = fieldChoices(fl, g, taken, source)
-                  return (
-                    <td key={g.key} className={`${mark(fl, fc.now, cmp(g)) ? 'fx-dm' : ''} ${fl === 'ISRC' ? 'mono' : ''}`}>
-                      <FieldChoice key={`${fl}-${JSON.stringify(taken ?? null)}`} fl={fl} fc={fc} source={source} pick={(v) => choosePick(g, fl, v)} />
-                    </td>
-                  )
-                }
+                  <td key={g.key} className={`fx-t ${mark(fl, [titleFinal(g)], cmp(g)) ? 'fx-dm' : ''}`}>{titlePick(g.trs.map((r) => r.id), () => mapCard(g))}<MusoLine recs={g.trs} fl={fl} source={source} open={openRec} /></td>)
+                const fc = choicesOf(g, fl)
                 return (
-                  <td key={g.key} className={`${mark(fl, lv.length ? lv : mvs[0] ?? [], cmp(g)) ? 'fx-dm' : ''} ${fl === 'ISRC' ? 'mono' : ''} ${fl === 'Title' ? 'fx-t' : ''}`}>
-                    {lv.length ? lv.join(', ') : mvs.length ? <span className="fx-fill">{mvs.map((v) => v.join(', ')).join(' / ')}<small>blank in the LNV – {source}'s fills it</small></span> : <span className="muted">—</span>}
-                    {lv.length > 0 && other.length > 0 && <small className="fx-other">{source}: {other.map((v) => v.join(', ')).join(' / ')}</small>}
+                  <td key={g.key} className={`${mark(fl, fc.now, cmp(g)) ? 'fx-dm' : ''} ${fl === 'ISRC' ? 'mono' : ''}`}>
+                    <FieldChoice key={`${fl}-${JSON.stringify(pickOf(pickKey(g.rows[0], fl)) ?? null)}`} fl={fl} fc={fc} source={source} pick={(v) => choosePick(g, fl, v)} text={g.lnv.isrc_text} />
+                    {fl !== 'Alternate title' && <MusoLine recs={g.recs} fl={fl} source={source} open={openRec} />}
                   </td>
                 )
-              })}
+              }, (o) => <OutCell key={o.key} o={o} fl={fl} source={source} />)}
             </tr>
           ))}
-          {/* the song's links (a Spotify track …) – from the LNV's website or Spotify ID, and from the DSP */}
-          {hasLink([main, ...gs.flatMap((g) => [g.lnv, ...g.recs])]) && (
-            <tr className="fx-link">
-              <th className="fx-f">Link</th>
-              <td className="fx-main"><Links urls={[main.link]} /></td>
-              {gs.map((g) => <td key={g.key}><Links urls={[g.lnv.link]} from="LNV" /><Links urls={g.recs.map((r) => r.link)} from={source} />
-                {!hasLink([g.lnv, ...g.recs]) && <span className="muted">—</span>}</td>)}
-            </tr>
-          )}
+          {/* the song's link (a Spotify track …) – from the LNV's website or Spotify ID, from the DSP, or typed */}
+          <tr className="fx-link">
+            <th className="fx-f">Link</th>
+            <td className="fx-main"><MusoField r={main} f="Link">{hasLink([main]) ? <Links urls={[main.link]} /> : <span className="muted">—</span>}</MusoField></td>
+            {each((g) => {
+              const fc = choicesOf(g, 'Link')
+              return <td key={g.key}><FieldChoice key={`Link-${JSON.stringify(pickOf(pickKey(g.rows[0], 'Link')) ?? null)}`} fl="Link" fc={fc} source={source} pick={(v) => choosePick(g, 'Link', v)} />
+                <MusoLine recs={g.recs} fl="Link" source={source} open={openRec} /></td>
+            }, (o) => <OutCell key={o.key} o={o} fl="Link" source={source} />)}
+          </tr>
           {/* why a song was mapped here: shown once one of them has a remark */}
           {gs.some((g) => hasRemark(g.recs)) && (
             <tr className="fx-remark">
               <th className="fx-f">Remark</th>
               <td className="fx-main">{(() => { const r = remarkOf(d, [main]); return r && r !== 'mixed' ? r.name : <span className="muted">—</span> })()}</td>
-              {gs.map((g) => <td key={g.key}><RemarkPick d={d} now={remarkOf(d, g.recs)} busy={busy} pick={(r) => void setRemark(g.recs, r)} /></td>)}
+              {each((g) => <td key={g.key}><RemarkPick d={d} now={remarkOf(d, g.recs)} busy={busy} pick={(r) => void setRemark(g.recs, r)} /></td>, (o) => <td key={o.key} className="fx-out" />)}
             </tr>
           )}
           {/* the answer, one row each: the ticks side by side, then "not a match" and delete */}
           <tr className="fx-yes">
             <th className="fx-f">{kind === 'exact' ? 'Exact match?' : 'Same song?'}</th>
             <td className="fx-main" />
-            {gs.map((g) => <td key={g.key} className={gTicked(p, g) ? 'on' : ''}>{tickBox(g, kind === 'exact' ? 'Yes, exact match' : 'Yes, same song')}{hintOf(g) && <small className="fx-hint">{hintOf(g)}</small>}</td>)}
+            {each((g) => <td key={g.key} className={gTicked(p, g) ? 'on' : ''}>{tickBox(g, kind === 'exact' ? 'Yes, exact match' : 'Yes, same song')}{hintOf(g) && <small className="fx-hint">{hintOf(g)}</small>}</td>,
+              (o) => <td key={o.key} className="fx-out"><b className="fx-out-why">{o.text}</b></td>)}
           </tr>
           <tr className="fx-act">
             <th className="fx-f" />
             <td className="fx-main" />
-            {gs.map((g) => <td key={g.key}>{actions(g, kind === 'exact' ? 'an exact match' : 'a possible match')}</td>)}
+            {each((g) => <td key={g.key}>{actions(g, kind === 'exact' ? 'an exact match' : 'a possible match')}</td>,
+              (o) => <td key={o.key} className="fx-out"><button type="button" className="btn sm" disabled={busy} onClick={() => void putBack(o)} title="Take this answer back – the match is to check again"><Undo2 size={14} />Put back</button></td>)}
           </tr>
         </tbody>
       </table>
@@ -562,9 +725,9 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
           </tr>
         </thead>
         <tbody>
-          {FIELDS.map((fl) => (
+          {MUSO_SHOWN.map((fl) => (
             <tr key={fl}>
-              <th className="fx-f">{fl}</th>
+              <th className="fx-f">{labelOf(fl)}</th>
               <td className={`fx-main ${fl === 'ISRC' ? 'mono' : ''} ${fl === 'Title' ? 'fx-t' : ''}`}><Listed r={main} fl={fl} source={source} /></td>
               {pRecs.map((r, i) => (
                 <td key={r.id ?? i} className={`${mark(fl, shownOf(r, fl), r) ? 'fx-dm' : ''} ${fl === 'ISRC' ? 'mono' : ''} ${fl === 'Title' ? 'fx-t' : ''}`}>
@@ -572,13 +735,11 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
               ))}
             </tr>
           ))}
-          {hasLink([main, ...pRecs]) && (
-            <tr className="fx-link">
-              <th className="fx-f">Link</th>
-              <td className="fx-main"><Links urls={[main.link]} /></td>
-              {pRecs.map((r, i) => <td key={r.id ?? i}><Links urls={[r.link]} />{!hasLink([r]) && <span className="muted">—</span>}</td>)}
-            </tr>
-          )}
+          <tr className="fx-link">
+            <th className="fx-f">Link</th>
+            <td className="fx-main"><MusoField r={main} f="Link">{hasLink([main]) ? <Links urls={[main.link]} /> : <span className="muted">—</span>}</MusoField></td>
+            {pRecs.map((r, i) => <td key={r.id ?? i}><MusoField r={r} f="Link">{hasLink([r]) ? <Links urls={[r.link]} /> : <span className="muted">—</span>}</MusoField></td>)}
+          </tr>
         </tbody>
       </table>
     </div>
@@ -586,15 +747,23 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
   // what "Delete" takes out: every LNV row the songs are matched to – not only the match it was pressed on
   const delRows = deleting ? [...new Set(cards.filter((g) => g.entries.some((e) => deleting.some((c) => c.id === e.c.id))).flatMap((g) => g.rows))].sort((a, b) => a - b) : []
   const exactOpen = f.exact.filter((g) => !gTicked(p, g) && !gLocked(g))
-  const possibleOpen = f.possible.filter((g) => !gTicked(p, g))
-  const todo = exactOpen.length + possibleOpen.length
+  const prog = progressOf(p, f)
+  const todo = prog.left
+  // the last match answered: said once, since the song now leaves the list of songs left to check
+  const before = useRef(todo)
+  useEffect(() => {
+    if (before.current > 0 && !todo && prog.total > 1) toast(`All ${prog.total} matches of “${f.title}” are checked – the song moves to “All checked”`, 'good')
+    before.current = todo
+  }, [todo])   // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
+    <MusoContext.Provider value={editing}>
     <div className="sm-detail rv-case fam">
       <div className="sm-detail-top">
         <div className="sm-detail-nav">
           <h3>{f.title}</h3>
-          {!todo && <span className="rv-done-name"><Check size={13} />All checked</span>}
+          <StatusChip status={prog.status} done={prog.done} total={prog.total} />
+          {updated && <span className="muted fam-upd" title={`Last updated ${whenText(updated, true)}`}><Clock size={13} />Updated {whenText(updated)}</span>}
           <span className="grow" />
           <span className="muted rv-pos">{n(pos)} of {n(total)}</span>
           <button type="button" className="sm-nav" disabled={pos <= 1} onClick={prev} title="Previous song (↑)"><ArrowLeft size={15} /></button>
@@ -605,8 +774,9 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
           <a href="#fam-exact" className="fam-count exact">Exact match : <b>{n(f.exact.length)}</b></a>
           <a href="#fam-possible" className="fam-count possible">Possible match : <b>{n(f.possible.length)}</b></a>
           <span className="fam-count checked">Checked : <b>{n(checkedIn(p, f))}</b></span>
-          <span className="fam-count todo">To check : <b>{n(todo)}</b></span>
-          {f.cases.length > 1 && <span className="muted">{n(f.cases.length)} {source} songs under this name</span>}
+          {f.out.length > 0 && <span className="fam-count gone" title="Matches you said are not this song – they stay on screen until every match is checked">Not a match : <b>{n(f.out.length)}</b></span>}
+          <span className={`fam-count ${todo ? 'todo' : 'checked'}`}>To check : <b>{n(todo)}</b></span>
+          {f.cases.length > 1 && <span className="muted" title={`${n(f.cases.length)} ${source} songs under this name`}>{n(f.cases.length)} {source} songs</span>}
           <span className="grow" />
           <button type="button" className="btn sm" disabled={busy} onClick={() => setAdding({})} title="Add a song to this one – from the sheets, or typed"><Plus size={14} />Add a song</button>
           <button type="button" className="btn sm" onClick={() => showUndo(f.id)} title="The changes made to this song – undo any of them"><Undo2 size={14} />Undo</button>
@@ -628,10 +798,10 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
               {mainOpen ? <><ChevronUp size={14} />Hide details</> : <><ChevronDown size={14} />Show details</>}</button>
           </div>
           {mainOpen && <dl className="fam-main-fields">
-            {FIELDS.slice(1).map((fl) => (
-              <div key={fl}><dt>{fl}</dt><dd className={fl === 'ISRC' ? 'mono' : ''} title={value(main.fields[fl])}><Listed r={main} fl={fl} source={source} /></dd></div>
+            {MUSO_SHOWN.slice(1).map((fl) => (
+              <div key={fl}><dt>{labelOf(fl)}</dt><dd className={fl === 'ISRC' ? 'mono' : ''} title={value(main.fields[fl])}><Listed r={main} fl={fl} source={source} /></dd></div>
             ))}
-            {hasLink([main]) && <div><dt>Link</dt><dd><Links urls={[main.link]} /></dd></div>}
+            <div><dt>Link</dt><dd><MusoField r={main} f="Link">{hasLink([main]) ? <Links urls={[main.link]} /> : <span className="muted">—</span>}</MusoField></dd></div>
           </dl>}
         </section>
 
@@ -652,7 +822,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
             {f.exact.length > 0 && <Nav sc={across} what="exact matches" />}
             {exactOpen.length > 1 && <button type="button" className="btn sm" onClick={() => tickAll(exactOpen)}><CheckCheck size={14} />Tick all {n(exactOpen.length)}</button>}
           </header>
-          {!f.exact.length ? <p className="cv-none">No exact match for this song name.</p> : lnvTable(f.exact, 'exact', across)}
+          {!f.exact.length && !f.out.some((o) => o.match === 'exact') ? <p className="cv-none">No exact match for this song name.</p> : lnvTable(f.exact, 'exact', across)}
         </section>
 
         <section className="fam-sec" id="fam-possible">
@@ -665,14 +835,14 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                 {d.ipi && <span><i className="fam-sw ipi" /><b>IPI List</b> – the member’s name in the IPI / CAE list</span>}</p>
             </div>
             {/* how the possible matches scroll: two tables across (X) or cards one below another (Y) */}
-            {f.possible.length > 0 && (
+            {f.possible.length + f.out.length > 0 && (
               <span className="axis" role="group" aria-label="How the possible matches scroll">
                 <button type="button" className={axis === 'x' ? 'on' : ''} aria-pressed={axis === 'x'} onClick={() => setAxis('x')} title="Two tables side by side – scroll across (X)"><ArrowLeftRight size={14} />X scroll</button>
                 <button type="button" className={axis === 'y' ? 'on' : ''} aria-pressed={axis === 'y'} onClick={() => setAxis('y')} title="One card per LNV row, one below another – scroll down (Y)"><ArrowUpDown size={14} />Y scroll</button>
               </span>
             )}
           </header>
-          {!f.possible.length ? <p className="cv-none">No possible match for this song name.</p> : axis === 'x' ? (
+          {!f.possible.length && !f.out.some((o) => o.match === 'possible') ? <p className="cv-none">No possible match for this song name.</p> : axis === 'x' ? (
             <>
               <div className="fam-sub" id="fam-possible-muso">
                 <header className="fam-sub-head">
@@ -705,6 +875,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                     <ArrowRight size={16} className="muted" />
                     {g.rows.map((row) => <button key={row} type="button" className="cv-badge lnv cv-rowbtn" onClick={() => setOpenedRow(row)} title="See this LNV row">LNV row {row}<ChevronRight size={14} /></button>)}
                     {g.rows.length > 1 && <small className="gr-same">the same data in each row</small>}
+                    {stateOf(g)}
                   </div>
                 </header>
                 <div className="pc-sub">
@@ -718,11 +889,14 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                   <tbody>
                     {shown.map((fl) => {
                       if (fl === 'Title') return (
-                        <tr key={fl}><th>{fl}</th><td className={`fx-t ${mark(fl, [value(g.recs[0].fields.Title)], g.recs[0]) ? 'fx-dm' : ''}`}>{variants(fl, g.recs).map((v, i) => <div key={i}>{v.join(', ')}</div>)}</td>
+                        <tr key={fl}><th>{fl}</th><td className={`fx-t ${mark(fl, [value(g.recs[0].fields.Title)], g.recs[0]) ? 'fx-dm' : ''}`}>{g.recs.length === 1 ? <MusoField r={g.recs[0]} f={fl}>{value(g.recs[0].fields.Title)}</MusoField> : variants(fl, g.recs).map((v, i) => <div key={i}>{v.join(', ')}</div>)}</td>
                           <td className={`fx-t ${mark(fl, [titleFinal(g)], g.lnv) ? 'fx-dm' : ''}`}>{titlePick(g.trs.map((r) => r.id), () => mapCard(g))}</td></tr>)
+                      if (fl === 'Alternate title' || fl === 'ISRC') return (   // written by themselves: the LNV's column says what it gets
+                        <tr key={fl}><th>{labelOf(fl)}</th>
+                          <td className={fl === 'ISRC' ? 'mono' : ''}>{fl === 'ISRC' ? (g.recs.length === 1 ? <MusoField r={g.recs[0]} f={fl}><Values fl={fl} v={list(g.recs[0].fields[fl])} /></MusoField> : variants(fl, g.recs).map((v, i) => <div key={i}><Values fl={fl} v={v} /></div>)) : <span className="muted">—</span>}</td>
+                          <td className={fl === 'ISRC' ? 'mono' : ''}><FieldChoice key={`${fl}-${JSON.stringify(pickOf(pickKey(g.rows[0], fl)) ?? null)}`} fl={fl} fc={choicesOf(g, fl)} source={source} pick={(v) => choosePick(g, fl, v)} text={g.lnv.isrc_text} /></td></tr>)
                       const pickable = PICK_SHOWN.includes(fl)
-                      const taken = pickOf(pickKey(g.rows[0], fl))
-                      const fc = fieldChoices(fl, g, taken, source)
+                      const fc = choicesOf(g, fl)
                       const { lv, vs, ipis } = fc
                       // the DSP values that differ from the LNV's (one choice each), the list's names, the LNV's: pick one
                       const opts = pickable ? (lv.length ? fc.opts : ipis.length ? fc.opts : []) : []
@@ -740,13 +914,15 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                       const tone = (v: string[], from: CaseRecord) => `${mark(fl, v, from) ? 'fx-dm' : ''} ${fl === 'ISRC' ? 'mono' : ''} ${fl === 'Title' ? 'fx-t' : ''}`
                       return (
                         <tr key={fl} className={`${two ? 'two' : ''} ${typed ? 'typed' : ''}`}>
-                          <th>{fl}{pickable && <KeepChip keep={fc.keep} source={source} />}{two && <small>{spelling ? 'same people – pick the spelling' : 'pick one'}</small>}</th>
+                          <th>{labelOf(fl)}{pickable && <KeepChip keep={fc.keep} source={source} />}{two && <small>{spelling ? 'same people – pick the spelling' : 'pick one'}</small>}</th>
                           <td className={tone(vs[0]?.res ?? [], g.recs[0])}>
                             {two && opts.length ? <div className="pc-opts">{opts.map((v, i) => {
                               const x = vs.find((y) => !differs(fl, y.v, v))
                               return opt(v, i === at, fc.pickOf(`m${i}`), String(i), x && x.res !== x.v ? <small className="ipi-is">IPI List: {x.res.join(', ')}</small> : null)
                             })}
-                              {opts.length < vs.length && <small className="muted">{n(vs.length - opts.length)} more with the LNV's value</small>}</div>
+                              {opts.length < vs.length && <small className="muted">{n(vs.length - opts.length)} more with the LNV's value</small>}
+                              {g.recs.length === 1 && <MusoLine recs={g.recs} fl={fl} source={source} open={openRec} />}</div>
+                              : g.recs.length === 1 ? <Listed r={g.recs[0]} fl={fl} source={source} />
                               : vs.length ? vs.map((x, i) => <div key={i}>{x.res.join(', ')}{x.res !== x.v && <small className="ipi-was">{source}: {x.v.join(', ')}</small>}</div>) : <span className="muted">—</span>}
                           </td>
                           <td className={tone(lv, g.lnv)}>
@@ -768,7 +944,8 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                       )
                     })}
                     {hasRemark(g.recs) && <tr><th>Remark</th><td colSpan={2}><RemarkPick d={d} now={remarkOf(d, g.recs)} busy={busy} pick={(r) => void setRemark(g.recs, r)} /></td></tr>}
-                    {hasLink([g.lnv, ...g.recs]) && <tr className="pc-link"><th>Link</th><td><Links urls={g.recs.map((r) => r.link)} /></td><td><Links urls={[g.lnv.link]} /></td></tr>}
+                    <tr className="pc-link"><th>Link</th><td>{g.recs.length === 1 ? <MusoField r={g.recs[0]} f="Link">{hasLink(g.recs) ? <Links urls={[g.recs[0].link]} /> : <span className="muted">—</span>}</MusoField> : <Links urls={g.recs.map((r) => r.link)} />}</td>
+                      <td><FieldChoice key={`Link-${JSON.stringify(pickOf(pickKey(g.rows[0], 'Link')) ?? null)}`} fl="Link" fc={choicesOf(g, 'Link')} source={source} pick={(v) => choosePick(g, 'Link', v)} /></td></tr>
                     {/* the answer at the bottom, as in the exact matches: the tick, then "not a match" */}
                     <tr className="pc-yes"><th>Same song?</th><td colSpan={2} className={on ? 'on' : ''}>{tickBox(g, 'Yes, same song')}{hintOf(g) && <small className="fx-hint">{hintOf(g)}</small>}</td></tr>
                     <tr className="pc-act"><th /><td colSpan={2}>{actions(g, 'a possible match')}</td></tr>
@@ -777,6 +954,14 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
               </article>
             )
           })}
+          {f.out.filter((o) => o.match === 'possible').map((o) => (
+            <article key={o.key} className="pc out">
+              <header className="pc-head"><div className="pc-pair"><span className="cv-badge muso">{source}</span><b className="pc-title">{value(o.recs[0]?.fields.Title)}</b><ArrowRight size={16} className="muted" />
+                {o.rows.map((row) => <button key={row} type="button" className="cv-badge lnv cv-rowbtn" onClick={() => setOpenedRow(row)} title="See this LNV row">LNV row {row}<ChevronRight size={14} /></button>)}
+                <span className="st out"><X size={13} />Not a match</span></div></header>
+              <div className="pc-out"><b className="fx-out-why">{o.text}</b><span className="muted">{[value(o.lnv.fields.Title), value(o.lnv.fields['Film / album']), value(o.lnv.fields.Year)].filter(Boolean).join(' · ')}</span>
+                <button type="button" className="btn sm" disabled={busy} onClick={() => void putBack(o)} title="Take this answer back – the match is to check again"><Undo2 size={14} />Put back</button></div>
+            </article>))}
           </div>
           )}
         </section>
@@ -816,7 +1001,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
         )}
       </div>
 
-      {mapping && <MapDialog c={mapping.c} rec={mapping.rec} recs={mapping.recs} targets={targets} source={source} save={commit}
+      {mapping && <MapDialog c={mapping.c} rec={mapping.rec} recs={mapping.recs} targets={targets} source={source} save={commit} family={f.id.slice(2)} wasOf={wasOf} levelOf={(x) => entries.find((e) => e.rec.id === x || e.tr.id === x)?.match}
         close={() => setMapping(null)} done={(all, t) => { setAsking(null); toast(`${all ? 'Every version' : 'The version'} now belongs to “${t.title}” (LNV row ${t.row})`, 'good') }} />}
       {opened !== null && f.recs[opened] && <VersionDetails r={f.recs[opened]} main={main} at={opened} total={f.recs.length} source={source} go={setOpened} close={() => setOpened(null)} />}
       {openedRow !== null && <LnvRowDetails row={openedRow} rows={rows} go={setOpenedRow} close={() => setOpenedRow(null)} />}
@@ -828,6 +1013,43 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
         {delRows.length > 0 && <p>{delRows.length > 1 ? <>All its matches leave: <b>LNV rows {delRows.join(', ')}</b>.</> : <>Its match leaves: <b>LNV row {delRows[0]}</b>.</>} The LNV rows themselves stay in the LNV.</p>}
       </ConfirmDialog>
     </div>
+    </MusoContext.Provider>
+  )
+}
+
+/** How far a song name is: Left to check · Partly checked 4 of 6 · All checked. */
+export function StatusChip({ status, done, total, small }: { status: Status; done: number; total: number; small?: boolean }) {
+  const Icon = status === 'done' ? CircleCheck : status === 'part' ? CircleDot : Circle
+  return <span className={`st ${status} ${small ? 'sm' : ''}`} title={`${STATUS[status]} – ${n(done)} of ${n(total)} match${total === 1 ? '' : 'es'} answered`}>
+    <Icon size={13} />{STATUS[status]}{total > 0 && <b>{n(done)}/{n(total)}</b>}</span>
+}
+
+/** A field's values as text: several ISRCs with a pipe between them. */
+const Values = ({ fl, v }: { fl: string; v: string[] }) => v.length ? <>{typedText(fl, v)}</> : <span className="muted">—</span>
+
+/** The DSP's own value of a field, under what the LNV keeps – with its pencil. Several recordings on one card: the
+ *  first one's, the others in their popups. */
+function MusoLine({ recs, fl, source, open }: { recs: CaseRecord[]; fl: string; source: string; open: (r: CaseRecord) => void }) {
+  const r = recs[0]
+  if (!r) return null
+  const v = list(r.fields[fl])
+  return (
+    <div className="ml">
+      <span className="ml-src">{source}</span>
+      <MusoField r={r} f={fl} compact>{fl === 'Link' ? (v.length ? <Links urls={v} /> : <span className="muted">—</span>) : <Values fl={fl} v={v} />}</MusoField>
+      {recs.length > 1 && <button type="button" className="rv-text-btn ml-more" onClick={() => open(recs[1])} title={`The other ${source} recordings of this row – see and edit them`}>+{recs.length - 1} more</button>}
+    </div>
+  )
+}
+
+/** A field of a match that was turned down: what each side has, only to read. */
+function OutCell({ o, fl, source }: { o: Out; fl: string; source: string }) {
+  const lv = list(o.lnv.fields[fl]), mv = fl === 'Alternate title' ? [] : list(o.recs[0]?.fields[fl])
+  return (
+    <td className={`fx-out ${fl === 'ISRC' ? 'mono' : ''} ${fl === 'Title' ? 'fx-t' : ''}`}>
+      {fl === 'Link' ? (lv.length ? <Links urls={lv} /> : <span className="muted">—</span>) : <Values fl={fl} v={lv} />}
+      {mv.length > 0 && fl !== 'Link' && <small className="fx-other">{source}: {typedText(fl, mv)}</small>}
+    </td>
   )
 }
 
@@ -964,52 +1186,7 @@ function TitlePick({ line, mode, final, isMain, mainTitle, source, choose, map }
         ? <EditBox initial={typing} label="Title for the LNV" placeholder="Type the title for the LNV"
           done={(t) => { setTyping(null); if (t && t !== final) choose('custom', t) }} />
         : <EditLine label="title" edit={() => setTyping(final)}><b>{final}</b></EditLine>}
-      {line.muso !== final && <small className="fx-other">{source}: {line.muso}</small>}
       {line.lnv && line.lnv !== final && <small className="fx-other lnv">LNV: {line.lnv}</small>}
-    </div>
-  )
-}
-
-/** The box to type a value in place: ready to type (the cursor after the text), with ✓ to keep it and ✕ to drop it –
- *  or Enter / leaving the box, and Esc. done(null): nothing changed. */
-function EditBox({ initial, label, placeholder, done }: { initial: string; label: string; placeholder: string; done: (text: string | null) => void }) {
-  const [text, setText] = useState(initial)
-  const over = useRef(false)   // a click on ✓ or ✕ is on its way: leaving the box is not "keep"
-  const keep = () => done(text.trim())
-  return (
-    <div className="fe-edit">
-      <input autoFocus className="fc-in" value={text} onChange={(e) => setText(e.target.value)} aria-label={label} placeholder={placeholder}
-        onFocus={(e) => { const end = e.currentTarget.value.length; e.currentTarget.setSelectionRange(end, end) }}
-        onBlur={() => { if (!over.current) keep() }}
-        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); keep() } if (e.key === 'Escape') { e.preventDefault(); done(null) } }} />
-      <button type="button" className="fe-btn ok" title="Keep (Enter)" aria-label="Keep"
-        onPointerDown={() => { over.current = true }} onClick={() => { over.current = false; keep() }}><Check size={15} /></button>
-      <button type="button" className="fe-btn" title="Cancel (Esc)" aria-label="Cancel"
-        onPointerDown={() => { over.current = true }} onClick={() => { over.current = false; done(null) }}><X size={15} /></button>
-    </div>
-  )
-}
-
-/** A field's value typed: names split at their commas. done(null) when nothing changed. */
-function TypeIn({ fl, initial, now, done }: { fl: string; initial: string; now: string[]; done: (v: string[] | null) => void }) {
-  return (
-    <EditBox initial={initial} label={`${fl} for the LNV`}
-      placeholder={NAME_FIELDS.has(fl) ? 'Names, comma between them' : fl === 'Year' ? 'e.g. 2015' : `Type the ${fl.toLowerCase()} for the LNV`}
-      done={(t) => {
-        if (t == null) return done(null)
-        const v = NAME_FIELDS.has(fl) ? t.split(',').map((x) => x.trim()).filter(Boolean) : t ? [t] : []
-        done(v.length && !same(v, now) ? v : null)
-      }} />
-  )
-}
-
-/** A value as it goes into the LNV, and its pencil – always at the same place, the top right; only the pencil opens
- *  the box to type it. */
-function EditLine({ label, edit, children }: { label: string; edit: () => void; children: ReactNode }) {
-  return (
-    <div className="fe">
-      <span className="fe-text">{children}</span>
-      <button type="button" className="fe-btn pen" onClick={edit} title={`Edit the ${label} – type the value the LNV keeps`} aria-label={`Edit the ${label}`}><Pencil size={14} /></button>
     </div>
   )
 }
@@ -1017,7 +1194,7 @@ function EditLine({ label, edit, children }: { label: string; edit: () => void; 
 /** A small chip: "Keeps LNV" · "Keeps Muso" · "Keeps IPI List" · "Keeps Customised". */
 function KeepChip({ keep, source }: { keep: Keep; source: string }) {
   return <span className={`keep-chip ${keep}`} title={`The LNV keeps ${keep === 'custom' ? 'the value typed by you' : keep === 'blank' ? 'nothing – blank'
-    : keep === 'ipi' ? 'the member’s name in the IPI / CAE list' : `${keepText(keep, source)}'s value`}`}>
+    : keep === 'ipi' ? 'the member’s name in the IPI / CAE list' : keep === 'all' ? 'every ISRC of the song' : keep === 'auto' ? 'the work name that is not kept' : `${keepText(keep, source)}'s value`}`}>
     <i aria-hidden />Keeps {keepText(keep, source)}</span>
 }
 
@@ -1027,43 +1204,55 @@ const KeepOption = ({ keep, tag, text }: { keep: Keep; tag: string; text: string
 
 /** A field's value with its pencil (see EditLine). */
 const EditValue = ({ fl, value: v, note, edit }: { fl: string; value: string[]; note?: string | null; edit: () => void }) => (
-  <EditLine label={fl.toLowerCase()} edit={edit}>{v.length ? v.join(', ') : <span className="muted">—</span>}{note && <small className="fx-fill-note">{note}</small>}</EditLine>
+  <EditLine label={labelOf(fl).toLowerCase()} edit={edit}>{!v.length ? <span className="muted">—</span> : fl === 'Link' ? <Links urls={v} /> : <Values fl={fl} v={v} />}{note && <small className="fx-fill-note">{note}</small>}</EditLine>
 )
 
 /** A name as the IPI / CAE list has it ("Ram Krishna"), with what the file wrote under it ("Muso: RK"). */
 function Listed({ r, fl, source }: { r: CaseRecord; fl: string; source: string }) {
   const ip = ipiOf(r, fl)
-  const raw = value(r.fields[fl])
-  if (!ip) return raw ? <>{raw}</> : <span className="muted">—</span>
-  return <>{ip.names.join(', ')}<small className="ipi-was" title="The IPI / CAE list has this member under the name above">{r.src === 'LNV' ? 'LNV' : source}: {raw}</small></>
+  const raw = typedText(fl, list(r.fields[fl]))
+  return (
+    <MusoField r={r} f={fl}>{!ip ? (raw ? <>{raw}</> : <span className="muted">—</span>)
+      : <>{ip.names.join(', ')}<small className="ipi-was" title="The IPI / CAE list has this member under the name above">{r.src === 'LNV' ? 'LNV' : source}: {raw}</small></>}</MusoField>
+  )
 }
 
 /** One field of an exact match as it goes into the LNV: the value – edited in place with its pencil – and under it a
  *  dropdown saying what the LNV keeps: the LNV's own value, the DSP's, the IPI / CAE list's name, or a customised
  *  (typed) one. */
-function FieldChoice({ fl, fc, source, pick }: { fl: string; fc: Choices; source: string; pick: (v: string[] | null) => void }) {
+function FieldChoice({ fl, fc, source, pick, text }: { fl: string; fc: Choices; source: string; pick: (v: string[] | null) => void
+  /** an ISRC cell that holds other text: the app never writes over it by itself */
+  text?: string
+}) {
   const [typing, setTyping] = useState<string | null>(null)
-  const { lv, opts, ipis, mode, now, keep, def } = fc
+  const { lv, opts, ipis, mode, now, keep, def, all, auto } = fc
+  const name = labelOf(fl)
   const options: DropOption[] = [
-    ...(lv.length ? [{ value: 'lnv', label: <KeepOption keep="lnv" tag="LNV" text={def === 'lnv' ? "Keep the LNV's value" : "Keep the LNV's value as written"} />, hint: lv.join(', ') }]
-      : !opts.length && !ipis.length ? [{ value: 'blank', label: <KeepOption keep="blank" tag="—" text="Leave it blank" /> }] : []),
+    ...(all.length ? [{ value: 'all', label: <KeepOption keep="all" tag="All" text="Every ISRC of the song, each once" />, hint: typedText(fl, all) }] : []),
+    ...(auto.length ? [{ value: 'auto', label: <KeepOption keep="auto" tag="Auto" text="The work name that is not kept" />, hint: auto.join('; ') }] : []),
+    ...(lv.length ? [{ value: 'lnv', label: <KeepOption keep="lnv" tag="LNV" text={def === 'lnv' ? "Keep the LNV's value" : "Keep the LNV's value as written"} />, hint: typedText(fl, lv) }] : []),
     ...opts.map((v, i) => ({ value: `m${i}`, label: <KeepOption keep="muso" tag={source}
-      text={!lv.length && i === 0 ? `Keep ${source}'s – fills the blank${def !== 'm0' ? ' as written' : ''}` : `Keep ${source}'s value`} />, hint: v.join(', ') })),
+      text={!lv.length && `m${i}` === def ? `Keep ${source}'s – fills the blank` : !lv.length && i === 0 && def.startsWith('i') ? `Keep ${source}'s – fills the blank as written` : `Keep ${source}'s value`} />, hint: typedText(fl, v) })),
     ...ipis.map((x, j) => ({ value: `i${j}`, label: <KeepOption keep="ipi" tag="IPI" text={`Keep the IPI List's name${ipis.length > 1 ? ` (for ${x.from}'s)` : ''}`} />,
       hint: `${x.v.join(', ')} – ${x.from} wrote ${x.raw.join(', ')}` })),
-    { value: 'custom', label: <KeepOption keep="custom" tag="Custom" text="Customise – type it" />, hint: mode === 'custom' ? now.join(', ') : `Type the ${fl.toLowerCase()} yourself`, sep: true },
+    ...(!lv.length ? [{ value: 'blank', label: <KeepOption keep="blank" tag="—" text="Leave it blank" /> }] : []),
+    { value: 'custom', label: <KeepOption keep="custom" tag="Custom" text={fl === 'Link' ? 'Another link – type it' : 'Customise – type it'} />, hint: mode === 'custom' ? typedText(fl, now) : `Type the ${name.toLowerCase()} yourself`, sep: true },
   ]
-  const choose = (m: string) => { if (m === 'custom') setTyping(now.join(', ')); else pick(fc.pickOf(m)) }
+  const edit = () => setTyping(typedText(fl, now))
+  const choose = (m: string) => { if (m === 'custom') edit(); else pick(fc.pickOf(m)) }
   const fills = !lv.length && mode === def && mode !== 'blank'
   const ip = mode.startsWith('i') ? ipis[Number(mode.slice(1))] : null
+  const note = fl === 'ISRC' && text ? `The LNV's cell holds “${text}” – left as it is unless you choose` : fl === 'ISRC' && mode === 'all' ? `${all.length} ISRC${all.length > 1 ? 's' : ''}, the LNV's and ${source}'s, each once`
+    : fl === 'Alternate title' ? (mode === 'auto' ? 'filled by itself: the work name that is not kept' : null) : fills ? `blank in the LNV – ${source}'s fills it` : null
   return (
     <div className={`fc ${mode === 'custom' ? 'typed' : ''}`}>
-      <Dropdown className="fc-dd" tone={keep === 'blank' ? '' : keep} value={mode} options={options} label={`What the LNV keeps for ${fl}`} menuWidth={310}
+      <Dropdown className="fc-dd" tone={keep === 'blank' ? '' : keep === 'all' ? 'ipi' : keep === 'auto' ? 'ipi' : keep} value={mode} options={options} label={`What the LNV keeps for ${name}`} menuWidth={310}
         shown={<><i className="dd-dot" />Keep: {keepText(keep, source)}</>} onChange={choose} />
       {typing != null ? <TypeIn fl={fl} initial={typing} now={now} done={(v) => { setTyping(null); if (v) pick(v) }} />
-        : <EditValue fl={fl} value={now} note={fills ? `blank in the LNV – ${source}'s fills it` : null} edit={() => setTyping(now.join(', '))} />}
+        : <EditValue fl={fl} value={now} note={note} edit={edit} />}
       {ip && <small className="fx-other ipi">IPI List – {ip.from} wrote: {ip.raw.join(', ')}</small>}
-      {mode === 'lnv' && opts.length > 0 && <small className="fx-other">{source}: {opts.map((v) => v.join(', ')).join(' / ')}</small>}
+      {lv.length > 0 && fl !== 'Link' && (mode === 'custom' || mode.startsWith('m')) && <small className="fx-other lnv">LNV: {typedText(fl, lv)}</small>}
+      {fl === 'Link' && lv.length > 0 && mode !== 'lnv' && <small className="fx-other lnv">LNV’s link: <Links urls={lv} /></small>}
     </div>
   )
 }

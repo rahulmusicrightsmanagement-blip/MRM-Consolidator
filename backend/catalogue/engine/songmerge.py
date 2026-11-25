@@ -19,7 +19,8 @@ from collections import Counter, OrderedDict, defaultdict
 
 import xlsxwriter
 
-from .dataclean import DSU, ORIGINAL, _primary_order, clean_title, is_placeholder, isrc_tokens, title_key, version_type
+from .dataclean import DSU, EDIT_FIELDS, ORIGINAL, _columns, _primary_order, clean_title, is_placeholder, isrc_tokens, title_key, version_type
+from .xlsx_patch import compact
 
 FUZZY_RATIO = 0.89
 KINDS = ("missing", "extra", "overlap", "different")
@@ -255,6 +256,65 @@ def manual_of(decisions):
             for k, d in decisions.items() if k.startswith("type:") and k[5:].isdigit()}
 
 
+def edits_of(decisions):
+    """The reviewer's corrections of the DSP data: {recording id: {field: value}} ("muso:<recording id>:<field>" = set)."""
+    out = {}
+    for key, d in decisions.items():
+        if key.startswith("muso:") and d.get("choice") == "set":
+            rid, _, field = key[5:].partition(":")
+            if rid.isdigit() and field in EDIT_FIELDS and "value" in (d.get("data") or {}):
+                out.setdefault(int(rid), {})[field] = d["data"]["value"]
+    return out
+
+
+def row_edits(analysis, decisions):
+    """The same, per sheet row: {row index: {field: value}} – a correction counts for every row of its recording."""
+    by_id = edits_of(decisions)
+    return {i: by_id[x] for rid, x in enumerate(analysis["ids"]) if x in by_id for i in analysis["recs"][rid]} if by_id else {}
+
+
+def titles_now(dsp, analysis, decisions):
+    """{recording id: its title, corrected}: what "keep the DSP's title" writes."""
+    edits = edits_of(decisions)
+    return {x: (edits.get(x) or {}).get("Title") or dsp["rows"][analysis["recs"][rid][0]]["title"] for rid, x in enumerate(analysis["ids"])}
+
+
+def follow(decisions, old, new):
+    """Answers that name recordings by their sheet row ("title:" "map:" "muso:") when a newer export has other rows:
+    {key: the key now, or None when the recording is gone} and the data changed with it. A recording is followed by its
+    ISRCs and title; one that cannot be told apart is left behind. old · new: (sheet rows, analysis)."""
+    from .normalize import norm_title
+
+    def names(sheet):
+        rows, analysis = sheet
+        out = {}
+        for rid, x in enumerate(analysis["ids"]):
+            r = rows[analysis["recs"][rid][0]]
+            for k in ([(t, norm_title(r["title"])) for t in r["isrcs"]] or [("", norm_title(r["title"]), norm_title(r["album"]))]):
+                out.setdefault(k, []).append(x)
+        return out
+    was, now = names(old), names(new)
+    at = {}
+    for k, xs in was.items():
+        if len(xs) == 1 and len(now.get(k, [])) == 1:
+            at.setdefault(xs[0], now[k][0])
+    out = {}
+    for key, d in decisions.items():
+        kind, _, rest = key.partition(":")
+        rid, _, field = rest.partition(":")
+        if kind not in ("title", "map", "muso") or not rid.isdigit():
+            continue
+        data = dict(d.get("data") or {})
+        to = at.get(int(rid))
+        if kind == "map":
+            goes = at.get(int(data["to"])) if str(data.get("to", "")).isdigit() else None
+            if goes is None:
+                to = None
+            data["to"] = goes
+        out[key] = None if to is None else (f"{kind}:{to}" + (f":{field}" if kind == "muso" else ""), data)
+    return out
+
+
 def _merge_column(h, cells, c):
     """(original, duplicates) of one column across rows, primary row first – as MRM-Extractor writes them."""
     name = str(h or "").strip().lower()
@@ -288,6 +348,18 @@ def workbook(dsp, analysis, decisions, credits):
     client is not a writer are red."""
     rows, recs, ids = dsp["rows"], analysis["recs"], analysis["ids"]
     header = [str(h or f"Column {c + 1}") for c, h in enumerate(dsp.get("header") or [])]
+    # the reviewer's corrections, in their own columns
+    edits, at = row_edits(analysis, decisions), _columns(dsp.get("header") or [])
+    column = {"Title": "title", "Film / album": "album", "Lyricist": "lyricist", "Composer": "composer", "Singer": "singer",
+              "Publisher": "publisher", "ISRC": "isrc", "Release date": "date", "Link": "link"}
+    if edits:
+        rows = list(rows)
+        for i, fields in edits.items():
+            cells = list(rows[i]["cells"]) + [None] * (len(header) - len(rows[i]["cells"]))
+            for f, v in fields.items():
+                if column.get(f) in at:
+                    cells[at[column[f]]] = ", ".join(v) if isinstance(v, list) else v
+            rows[i] = {**rows[i], "cells": tuple(cells)}
     manual = manual_of(decisions)
     final = _final(analysis, decisions)
     types, song_of = {}, {}
@@ -300,7 +372,8 @@ def workbook(dsp, analysis, decisions, credits):
     not_ours = lambda song: credits.get(recs[song[0]][0], "writer") in ("performer", "medley")
 
     buf = io.BytesIO()
-    wb = xlsxwriter.Workbook(buf, {"in_memory": True, "strings_to_urls": False, "strings_to_numbers": False})
+    # text stays text: a title that starts with "=" is never a formula
+    wb = xlsxwriter.Workbook(buf, {"in_memory": True, "strings_to_urls": False, "strings_to_numbers": False, "strings_to_formulas": False})
     base = {"font_name": "Calibri", "font_size": 10, "valign": "top", "text_wrap": True, "border": 1, "border_color": "#BFBFBF"}
     fmt = {k: wb.add_format({**base, **v}) for k, v in {
         "hdr": {"bold": True, "font_size": 11, "font_color": "#FFFFFF", "bg_color": "#1F4E78", "align": "center", "valign": "vcenter"},
@@ -339,7 +412,7 @@ def workbook(dsp, analysis, decisions, credits):
             ws.write(n, c, _value(v), fmt["miss" if miss else "isrc" if c == isrc_col else "plain"])
     _finish(ws, cols, len(rows))
     wb.close()
-    return buf.getvalue()
+    return compact(buf.getvalue())
 
 
 def _value(v):

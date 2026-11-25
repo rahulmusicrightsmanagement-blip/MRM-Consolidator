@@ -48,7 +48,7 @@ export type MasterEditIn = { master_row: number; field: string; internal_no: str
 
 export type CleanDecisionIn = {
   key: string; choice: CleanChoice | null
-  data?: { keep?: number | string; row?: number; rows?: number[]; excluded?: number[]; type?: string; cover?: string; a?: string; b?: string; songs?: string[]; name?: string; value?: string | string[]; to?: number | string; title?: string; from?: string; ipis?: string[]; also?: number[]; remark?: number | null }
+  data?: { keep?: number | string; row?: number; rows?: number[]; excluded?: number[]; type?: string; cover?: string; a?: string; b?: string; songs?: string[]; name?: string; was?: number[]; family?: string; then?: string; level?: string; value?: string | string[]; to?: number | string; title?: string; from?: string; ipis?: string[]; also?: number[]; remark?: number | null }
   /** for the Undo section: the songs it concerns, what it did in plain words; items with one group are one change */
   log?: ChangeLog
 }
@@ -131,7 +131,8 @@ export const api = {
   cleanRows: (clientId: number, rows: number[]) => request<{ rows: { row: number; fields: { name: string; value: string }[] }[] }>(`/api/clients/${clientId}/clean/rows/?rows=${rows.join(',')}`),
   cleanExportUrl: (clientId: number) => `/api/clients/${clientId}/clean/export/`,
   /** Save step 1 decisions without rebuilding the result (step 1 keeps its own state while the reviewer works). */
-  mergeSave: (clientId: number, items: CleanDecisionIn[]) => request<{ saved: number }>(`/api/clients/${clientId}/clean/decisions/`, send({ items, quiet: true })),
+  mergeSave: (clientId: number, items: CleanDecisionIn[], hold?: Record<string, { rows: Record<string, string>; vers: Record<string, number> }>) =>
+    request<{ saved: number }>(`/api/clients/${clientId}/clean/decisions/`, send({ items, quiet: true, hold })),
   mergeExportUrl: (clientId: number) => `/api/clients/${clientId}/steps/merged/`,
   /** The final LNV: the stage 2 LNV with step 3's (IPRS) answers. */
   lnvUpdateUrl: (clientId: number) => `/api/clients/${clientId}/steps/lnv/`,

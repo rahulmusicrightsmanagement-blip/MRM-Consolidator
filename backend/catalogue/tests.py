@@ -131,6 +131,7 @@ class ToDecideTests(TestCase):
                                     link("linked", "ISWC"), link("linked", "Confirmed by reviewer", "Differs"), link("new")]), 3)
 
 
+@needs_samples
 class ApiTests(TestCase):
     """The step-wise flow: add client → master → one society workspace at a time."""
 
@@ -1044,7 +1045,8 @@ class DataCleanEngineTests(TestCase):
         self.assertEqual([n["name"] for n in r["names"] if n["kind"] == "junk"], ["IPRS"])
         self.assertEqual([(m["title"], m["credit"], m["decision"]["choice"]) for m in r["missing"]], [("Brand New Hit", "writer", "add")])
         isrc_fills = {f["row"]: f["value"] for f in r["fills"] if f["field"] == "ISRC"}
-        self.assertEqual(isrc_fills, {2: "INXY12300011", 3: "INXY12300011"})   # the original's ISRC, not the lofi's
+        # the original's ISRC, not the lofi's – and on one of the song's two rows only (v1.7: never twice within a song)
+        self.assertEqual(isrc_fills, {2: "INXY12300011"})
         self.assertTrue(all(f["decision"]["auto"] for f in r["fills"]))
         self.assertEqual(r["open"]["fills"], 0)
 
@@ -1276,7 +1278,10 @@ class DataCleanApiTests(TestCase):
         cells = [str(c) for r in wb.active.iter_rows(values_only=True) for c in r if c is not None]
         self.assertIn("Typed Film", cells)
         self.assertIn("Malik Varma", cells)
-        self.assertNotIn("Brand New Hit", cells)   # linked to row 6: not added as a new row
+        # linked to row 6: not added as a new row – its name is that row's alternative work name (v1.7)
+        rows = [[c for c in r] for r in wb.active.iter_rows(values_only=True)]
+        self.assertNotIn("Brand New Hit", [r[rows[0].index("Work*")] for r in rows])
+        self.assertEqual([r[rows[0].index("Alternate Work")] for r in rows].count("Brand New Hit"), 1)
 
     def test_lnv_link(self):
         from .engine.steps import lnv_link

@@ -17,8 +17,8 @@ from openpyxl.utils.datetime import CALENDAR_MAC_1904, CALENDAR_WINDOWS_1900, fr
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 ROW = re.compile(rb"<row\b[^>]*?\br=\"(\d+)\"[^>]*?(?:/>|(?<!/)>(.*?)</row>)", re.S)
-# Only cells with content: an empty cell ends in "/>" and never matches the ">" after its attributes.
-CELL = re.compile(rb"<c\b((?:\s+[\w:]+=\"[^\"]*\")*)\s*>(.*?)</c>", re.S)
+# Every cell, an empty one too (no inner part): it counts when the cell after it has no address
+CELL = re.compile(rb"<c((?:\s+[\w:]+=\"[^\"]*\")*)\s*(?:/>|>(.*?)</c>)", re.S)
 REF = re.compile(rb"([A-Z]+)(\d+)")
 ATTR = re.compile(rb"([\w:]+)=\"([^\"]*)\"")
 VALUE = re.compile(rb"<v>(.*?)</v>", re.S)
@@ -49,11 +49,31 @@ def _number(raw):
     return float(raw) if b"." in raw or b"E" in raw or b"e" in raw else int(raw)
 
 
+# Far more than any LNV holds unpacked (the largest seen: 100 MB): a file that unpacks to more is not read at all
+MAX_UNZIPPED = 600 * 1024 * 1024
+MAX_PARTS = 5000
+
+
+class TooBig(Exception):
+    pass
+
+
+def _xml(raw):
+    """A part of the workbook, read. Excel writes no document type and no entities: a part with any is no workbook."""
+    if b"<!DOCTYPE" in raw or b"<!ENTITY" in raw or "<!DOCTYPE".encode("utf-16-le") in raw or "<!DOCTYPE".encode("utf-16-be") in raw:
+        raise ValueError("This is not an Excel workbook")
+    return ET.fromstring(raw)
+
+
 class Book:
     def __init__(self, path):
         self.zip = zipfile.ZipFile(path)
-        wb = ET.fromstring(self.zip.read("xl/workbook.xml"))
-        rels = ET.fromstring(self.zip.read("xl/_rels/workbook.xml.rels"))
+        parts = self.zip.infolist()
+        if len(parts) > MAX_PARTS or sum(i.file_size for i in parts) > MAX_UNZIPPED:
+            self.zip.close()
+            raise TooBig("The file unpacks to far more than a spreadsheet of songs. Save it again in Excel and upload that.")
+        wb = _xml(self.zip.read("xl/workbook.xml"))
+        rels = _xml(self.zip.read("xl/_rels/workbook.xml.rels"))
         targets = {r.get("Id"): r.get("Target") for r in rels}
         self.sheets = []
         for s in wb.iter(f"{NS}sheet"):
@@ -94,7 +114,7 @@ class Book:
         if self._styles is None:
             self._styles = {}
             try:
-                root = ET.fromstring(self.zip.read("xl/styles.xml"))
+                root = _xml(self.zip.read("xl/styles.xml"))
             except KeyError:
                 return self._styles
             custom = {int(f.get("numFmtId")): f.get("formatCode") for f in root.iter(f"{NS}numFmt")}
@@ -182,7 +202,8 @@ def _cells_by_row(xml):
             attrs = dict(ATTR.findall(cm.group(1)))
             ref = REF.fullmatch(attrs.get(b"r", b""))
             col = _col(ref.group(1)) if ref else col + 1
-            out.append((n, col, attrs, cm.group(2)))
+            if cm.group(2) is not None:
+                out.append((n, col, attrs, cm.group(2)))
     return out
 
 

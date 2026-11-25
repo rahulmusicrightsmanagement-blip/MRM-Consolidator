@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AlertTriangle, CalendarDays, CheckCircle2, ChevronRight, RefreshCw, Trash2, UserPlus, Users } from 'lucide-react'
+import { AlertTriangle, CalendarDays, CheckCircle2, ChevronRight, Clock, RefreshCw, Trash2, UserPlus, Users } from 'lucide-react'
 import type { CSSProperties } from 'react'
 import { AppShell } from '../components/AppShell'
 import { Button, ConfirmDialog, DataTable, Empty, Guide } from '../components/ui'
@@ -9,6 +9,7 @@ import { api } from '../lib/api'
 import { fmtDate, pct, today } from '../lib/client'
 import { useToast } from '../lib/toast'
 import type { ClientMetrics, ClientRow, SocietySummary } from '../types'
+import { whenText } from './client/when'
 
 /** The consolidate flow every client goes through, one step after the other. */
 export const STAGES = ['Add the files', 'Muso vs LNV', 'LNV vs IPRS', 'Final LNV']
@@ -200,7 +201,8 @@ export default function Tracker() {
                 <div className="progress-cell"><span className={`journey-n p${at(c)}`}>{at(c) + 1}</span>
                   <div><span className={`stage-name p${at(c)}`}>{STAGES[at(c)]}</span>
                     <span className="stage-steps" aria-hidden>{[0, 1, 2, 3].map((i) => <i key={i} className={i <= at(c) ? 'on' : ''} />)}</span>
-                    <span className="journey-note">{journeyNote(c.journey)}</span></div>
+                    <span className="journey-note">{journeyNote(c.journey)}</span>
+                    {c.last_song && <span className="journey-last" title={`Last updated song: ${c.last_song.title} – ${whenText(c.last_song.at, true)}${c.last_song.by ? ` by ${c.last_song.by}` : ''}`}><Clock size={12} />Last: <b>{c.last_song.title || 'a song'}</b> · {whenText(c.last_song.at)}</span>}</div>
                 </div>
               ) },
               { key: 'societies', header: 'Societies', render: (c) => (

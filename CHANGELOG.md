@@ -1,5 +1,8 @@
 # MRM changelog
 
+## 1.7.0 – 2026-11-25 (minor)
+- Alternative work name filled by itself (the LNV's or Muso's name that is not kept, editable); every ISRC of a song in one cell with a pipe, each once; the complete release date from Muso beside the LNV's release year; Muso data editable like the LNV's (the file's value stays and can be put back) and links editable on both sides; a song's matches stay on screen until every one is answered – one turned down is marked Not a match and can be put back, the song leaves Left to check after the last; Last updated song with date, time, name and Continue, on the step and the client list; Left to check, Partly checked and All checked on every song and match, as filters, progress bar and a Song status Excel; downloads a fraction of the size (5.3 MB to 0.9 MB) with every value, formula, colour and link kept – links, colour rules and notes now move with their rows; checked answers, uploads and file names, content security policy, admin sign-in page closed
+
 ## 1.6.1 – 2026-11-23 (patch)
 - Not in the LNV: Map to existing ISRC / song (exact and possible matches of the Muso list and the LNV list) beside Not the client's, with a Remark dropdown saying why; the remarks are one list for every user, added and edited in the new Settings page; the LNV gets a Remark column at its end with the very words of the dropdown; a mapped song always gets its own LNV row naming the row it was mapped to, also a cover of the same name and film a medley, and while that match is not checked yet; sidebar: the icon pointed at is the one opened (its items moved up as it opened, so the click went to the item below)
 

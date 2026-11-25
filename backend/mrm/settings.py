@@ -84,8 +84,18 @@ if not DEBUG:
     # http -> https redirects are done by the reverse proxy (Caddy / nginx); a redirect here would also
     # break the container's own health check, which calls plain http inside the container.
     SILENCED_SYSTEM_CHECKS = ['security.W008']
-    SECURE_CONTENT_TYPE_NOSNIFF = True
-    X_FRAME_OPTIONS = 'DENY'
+
+# Every answer, also in development: no sniffing, no framing, the address of a page stays with this site.
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+SECURE_REFERRER_POLICY = 'same-origin'
+# Scripts, data and pages only from this site (the font from Google Fonts): a script that got into a title or a link
+# would not run. Inline styles are the screens' own.
+SECURE_CSP = {
+    'default-src': ["'self'"], 'script-src': ["'self'"], 'style-src': ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+    'font-src': ["'self'", 'https://fonts.gstatic.com', 'data:'], 'img-src': ["'self'", 'data:', 'blob:'], 'connect-src': ["'self'"],
+    'object-src': ["'none'"], 'base-uri': ["'self'"], 'form-action': ["'self'"], 'frame-ancestors': ["'none'"],
+}
 
 
 # Application definition
@@ -108,6 +118,7 @@ MIDDLEWARE = [
     'django.middleware.gzip.GZipMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'django.middleware.csp.ContentSecurityPolicyMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -228,6 +239,8 @@ if 'test' in sys.argv[1:2]:
     MEDIA_ROOT = Path(tempfile.mkdtemp(prefix='mrm-test-media-'))
 DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
+# One request, its files included: far more than any spreadsheet the team has (the largest: 12 MB).
+MAX_REQUEST_BYTES = 120 * 1024 * 1024
 
 # One cache for all gunicorn workers (processed reports, login lock-outs), kept on local disk.
 CACHES = {
@@ -240,5 +253,5 @@ CACHES = {
 }
 
 # React dev server (Vite) during development; the built app is served by Django.
-CORS_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173']
+CORS_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173'] if DEBUG else []
 FRONTEND_DIST = Path(os.environ.get('MRM_FRONTEND_DIST', BASE_DIR.parent / 'frontend' / 'dist'))
