@@ -1,10 +1,11 @@
-// v1.8.0: the ISRC first – the main version's ISRC is the exact match, ONE row in the LNV; three sections (Exact match ·
-// Possible match · Other version) the reviewer moves a match between; the singer and production shown; stage names as PA.
+// v1.8.0: the ISRC first, the singer and production shown, stage names as PA · v2.0.0: every match starts in To check
+// against the main version; the reviewer puts it in Original (the first one put there is the song's ONE row in the LNV,
+// the next ones its Alternative work name), Other version (a row of its own) or Deleted; checked through: completed.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { CaseRecord, ReviewCase, Step1 } from '../src/types'
-import { NO_PENDING, checkedIn, chooseClass, chooseSoloClass, classesNow, factsOfGroup, familiesOf, familyFacts, gChecked, pendingItems, progressOf, toCheck } from '../src/pages/client/Families'
-import { companyWords, defaultClass, factsOf } from '../src/pages/client/matchModel'
+import { NO_PENDING, atNow, checkedIn, chooseClass, chooseSoloClass, classesNow, factsOfGroup, familiesOf, familyFacts, pendingItems, progressOf, toCheck } from '../src/pages/client/Families'
+import { companyWords, defaultClass, factsOf, savedClass } from '../src/pages/client/matchModel'
 import { fieldChoices } from '../src/pages/client/fieldModel'
 import { autoAlternative } from '../src/pages/client/editModel'
 import { EACH, listCount, sheetOf } from '../src/pages/client/lists'
@@ -32,54 +33,56 @@ function maula(over: Partial<ReviewCase> = {}): ReviewCase {
 const f0 = (d: Step1) => familiesOf(d.cases)[0]
 const step = (cases: ReviewCase[], over: Partial<Step1> = {}) => ({ source: 'Muso', cases, picks: {}, titles: {}, lnv_only: [], typed: [], ...over } as unknown as Step1)
 
-test('the ISRC decides: the main version’s ISRC is an exact match – a lofi title or another singer too', () => {
+const rows0 = (g: { rows: number[] }) => g.rows[0]
+
+test('the ISRC suggests, it never decides: every match starts in To check', () => {
   assert.equal(defaultClass([MAIN], [MAIN], false), 'exact')
-  assert.equal(defaultClass(['X'], [MAIN], false), 'possible')
+  assert.equal(defaultClass(['X'], [MAIN], false), null)
   assert.equal(defaultClass(['X'], [MAIN], true), 'version')
   assert.equal(defaultClass([MAIN], [MAIN], true), 'exact')   // a version row with the main version's ISRC: one recording
+  assert.equal(savedClass('possible'), 'version')   // a v1.8 Possible match: a row of its own, as before
   const f = familiesOf([maula()])[0]
-  assert.deepEqual([f.exact.map((g) => g.rows[0]), f.possible.map((g) => g.rows[0]), f.version.map((g) => g.rows[0]), f.solos.map((x) => x.r.fields.Title)],
-    [[3, 7], [9], [12], ['Maula - Unplugged']])
-  // the singer is shown, never deciding: row 7 has another singer and is exact all the same
-  assert.deepEqual(factsOfGroup(f, f.exact[1]), { isrc: true, singer: true, production: null })
+  assert.deepEqual([f.todo.map(rows0), f.todo.map((g) => g.def), f.exact.length, f.version.length, f.solos.map((x) => [x.r.fields.Title, x.cls])],
+    [[3, 7, 9, 12], ['exact', 'exact', null, 'version'], 0, 0, [['Maula - Unplugged', null]]])
+  // the singer is shown, never deciding: row 7 has another singer and is suggested as Original all the same
+  assert.deepEqual(factsOfGroup(f, f.todo[1]), { isrc: true, singer: true, production: null })
   assert.deepEqual(factsOf(lnv(1, { Singer: ['Q'], ISRC: [MAIN] }), [f.main]), { isrc: true, singer: false, production: null })
-  assert.deepEqual(factsOfGroup(f, f.possible[0]), { isrc: false, singer: false, production: false })
+  assert.deepEqual(factsOfGroup(f, f.todo[2]), { isrc: false, singer: false, production: false })
   assert.deepEqual(familyFacts(f), { isrc: true, singer: true, production: true })
   assert.ok(companyWords('Saregama India Ltd').has('saregama') && companyWords('T-Series').has('super') && companyWords('Super Cassettes Industries Ltd').has('super'))
 })
 
-test('the app’s exact match waits for the reviewer: Exact match checks it, another button moves it – checked', () => {
+test('Original starts empty: the first put there is the row, the next ones join it; Other version and Delete check too', () => {
   const a = maula(), d = step([a]), f = familiesOf([a])[0]
   assert.deepEqual(progressOf(NO_PENDING, f), { total: 5, left: 5, done: 0, status: 'todo' })   // 3 · 7 · 9 · 12 · the unplugged one
-  // checked where it is
-  const p1 = chooseClass(NO_PENDING, d, f.exact[0], 'exact')
-  const f1 = familiesOf([a], [], [], classesNow(d, p1))[0]
-  assert.ok(gChecked(p1, f1.exact[0]) && !gChecked(p1, f1.exact[1]))
-  assert.deepEqual([checkedIn(p1, f1), toCheck(p1, f1)], [1, 4])
-  // moved: row 7 is a version of the song after all – it leaves Exact match, checked
-  const p2 = chooseClass(p1, d, f1.exact[1], 'version')
-  const f2 = familiesOf([a], [], [], classesNow(d, p2))[0]
-  assert.deepEqual([f2.exact.map((g) => g.rows[0]), f2.version.map((g) => g.rows[0])], [[3], [7, 12]])
-  assert.ok(f2.version[0].chosen && f2.version[0].def === 'exact')
-  // a possible match moved to Exact match: ticked (the same song) and checked
-  const p3 = chooseClass(p2, d, f2.possible[0], 'exact')
-  const items = pendingItems(p3, d)
-  assert.deepEqual(items.filter((x) => x.key.startsWith('class:')), [{ key: 'class:3', choice: 'exact' }, { key: 'class:7', choice: 'version' }, { key: 'class:9', choice: 'exact' }])
-  assert.deepEqual(items.find((x) => x.key === 'link:A')!.data!.rows, [3, 7, 9])
-  // the version beside no LNV row: moved to Exact match – no row of its own (the server's export plan)
-  const x = f2.solos[0]
-  assert.deepEqual(pendingItems(chooseSoloClass(NO_PENDING, d, x, 'exact'), d), [{ key: `class:m${x.r.id}`, choice: 'exact' }])
-  // saved: the server sends the classes back – the same sections, checked
-  const f4 = familiesOf([a], [], [], { 'class:3': 'exact', 'class:7': 'version' })[0]
-  assert.deepEqual([f4.exact.length, f4.version.length, checkedIn(NO_PENDING, f4)], [1, 2, 2])
-  // unchecked: back to the app's section, to check again
-  const p5 = chooseClass(NO_PENDING, step([a], { classes: { 'class:7': 'version' } }), f4.version[0], null)
-  assert.deepEqual(p5.cls, { 'class:7': null })
+  // row 9 first – another ISRC, but the reviewer says it is the song – then row 3
+  const p2 = chooseClass(chooseClass(NO_PENDING, d, f.todo[2], 'exact'), d, f.todo[0], 'exact')
+  const f2 = familiesOf([a], [], [], classesNow(d, p2), atNow(d, p2))[0]
+  assert.deepEqual([f2.exact.map(rows0), f2.todo.map(rows0), checkedIn(p2, f2), toCheck(p2, f2)], [[9, 3], [7, 12], 2, 3])
+  const items = pendingItems(p2, d).filter((x) => x.key.startsWith('class:'))
+  assert.deepEqual(items.map((x) => [x.key, x.choice]), [['class:9', 'exact'], ['class:3', 'exact']])
+  assert.ok(items[0].data!.at! < items[1].data!.at!)
+  assert.deepEqual(pendingItems(p2, d).find((x) => x.key === 'link:A')!.data!.rows, [3, 7, 9])   // ticked: the same song
+  // saved: the server sends the times back – the same order
+  const at = Object.fromEntries(items.map((x) => [x.key, x.data!.at!]))
+  assert.deepEqual(familiesOf([a], [], [], { 'class:9': 'exact', 'class:3': 'exact' }, at)[0].exact.map(rows0), [9, 3])
+  // row 7 another version, row 12 deleted, the unplugged one (beside no LNV row) another version: all checked
+  const p5 = chooseSoloClass(chooseClass(chooseClass(p2, d, f2.todo[0], 'version'), d, f2.todo[1], 'deleted'), d, f2.solos[0], 'version')
+  const f5 = familiesOf([a], [], [], classesNow(d, p5), atNow(d, p5))[0]
+  assert.deepEqual([f5.todo.length, f5.version.map(rows0), f5.deleted.map(rows0), f5.solos[0].cls, progressOf(p5, f5).status], [0, [7], [12], 'version', 'done'])
+  assert.equal(progressOf(p5, f5, ['maula']).status, 'complete')
+  assert.deepEqual(pendingItems(chooseSoloClass(NO_PENDING, d, f.solos[0], 'deleted'), d).map((x) => [x.key, x.choice]), [[`class:m${f.solos[0].r.id}`, 'deleted']])
+  // back to check: unchecked, its time gone
+  const p6 = chooseClass(p5, d, f5.version[0], null)
+  assert.deepEqual([classesNow(d, p6)['class:7'], atNow(d, p6)['class:7']], [undefined, undefined])
+  // as saved by v1.8: a Possible match is an other version
+  assert.deepEqual(familiesOf([a], [], [], classesNow(step([a], { classes: { 'class:9': 'possible' as never } }), NO_PENDING))[0].version.map(rows0), [9])
 })
 
-test('the exact match is one row: the values of every exact row offered, the other titles its alternative work name', () => {
-  const f = familiesOf([maula()])[0]
+test('Original is one row: the values of every row in it offered, the other titles its alternative work name', () => {
+  const f = familiesOf([maula()], [], [], { 'class:3': 'exact', 'class:7': 'exact' }, { 'class:3': 1, 'class:7': 2 })[0]
   const [keep, other] = f.exact
+  assert.deepEqual([keep.rows[0], other.rows[0]], [3, 7])
   const merged = { ...keep, recs: [f.main, ...keep.recs, ...other.recs], entries: [...keep.entries, ...other.entries] }
   const fc = fieldChoices('Publisher', merged, undefined, 'Muso', undefined, [other.lnv])
   assert.deepEqual(fc.rows, [{ row: 7, v: ['Pub B'] }])
@@ -91,16 +94,17 @@ test('the exact match is one row: the values of every exact row offered, the oth
   assert.equal(autoAlternative('Maula - Lofi', keep.lnv, merged.recs, [other.lnv]), 'Old | Maula')
 })
 
-test('the lists: Other versions has its own, and every match says its section', () => {
+test('the lists: To check, Original, Other versions, Deleted matches – every match says its section', () => {
   const a = maula(), d = step([a])
   const x = { families: familiesOf(d.cases), loose: [], newRows: [], deleted: [], isDone: () => true, d, p: NO_PENDING }
   for (const k of EACH) { const s = sheetOf(x, k); assert.equal(s.rows.length, listCount(x, k), k) }
-  // the version beside no LNV row is listed in its section too
-  assert.deepEqual(['exact', 'possible', 'version'].map((k) => listCount(x, k as 'exact')), [2, 1, 2])
-  assert.deepEqual(sheetOf(x, 'version').rows.map((r) => [r[2], r[3], r[4]]), [['Other version', 'Left to check', 12], ['Other version', 'Left to check', 'new row']])
-  // checked: under Checked matches – every match and version checked is in the lists
-  const fs = familiesOf(d.cases, [], [], { [f0(d).solos[0].key]: 'version' })
+  assert.deepEqual(['todo', 'exact', 'version', 'removed'].map((k) => listCount(x, k as 'exact')), [5, 0, 0, 0])
+  assert.deepEqual(sheetOf(x, 'todo').rows.map((r) => [r[2], r[3], r[4]]), [[ 'To check', 'Left to check', 3 ], [ 'To check', 'Left to check', 7 ], [ 'To check', 'Left to check', 9 ],
+    [ 'To check', 'Left to check', 12 ], [ 'To check', 'Left to check', 'new row' ]])
+  const fs = familiesOf(d.cases, [], [], { 'class:3': 'exact', 'class:9': 'deleted', [f0(d).solos[0].key]: 'version' })
   const y = { ...x, families: fs }
-  assert.deepEqual([listCount(y, 'done'), listCount(y, 'todo')], [1, 4])
-  assert.deepEqual(sheetOf(y, 'done').rows.map((r) => [r[2], r[3], r[6]]), [['Other version', 'Checked', 'Maula - Unplugged']])
+  assert.deepEqual(['done', 'todo', 'exact', 'removed', 'version'].map((k) => listCount(y, k as 'exact')), [3, 2, 1, 1, 1])
+  assert.deepEqual(sheetOf(y, 'removed').rows.map((r) => [r[2], r[3], r[4]]), [['Deleted', 'Checked', 9]])
+  assert.deepEqual(sheetOf(y, 'version').rows.map((r) => [r[2], r[3], r[4], r[6]]), [['Other version', 'Checked', 'new row', 'Maula - Unplugged']])
+  assert.deepEqual(sheetOf(y, 'status').rows.map((r) => r.slice(0, 9)), [['Maula', 'Partly checked', 5, 3, 0, 2, 1, 1, 1]])
 })

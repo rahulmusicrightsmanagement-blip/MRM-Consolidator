@@ -1,5 +1,8 @@
 # MRM changelog
 
+## 2.0.0 – 2026-11-28 (major)
+- Step 2 song mapping rebuilt: To check against the main version, Original (first = the row, others its alternative titles), Other version (own row), Delete; preview in LNV, Save to LNV marks a song completed
+
 ## 1.8.2 – 2026-11-28 (patch)
 - Download stage 1 LNV holds only the songs checked in step 2 (Checked songs), or the whole LNV (Every row); the serial number (SN) is 1, 2, 3 … in the file's order, the old row number stays in Row in the uploaded LNV; Mark as completed keeps every row for LNV vs IPRS
 

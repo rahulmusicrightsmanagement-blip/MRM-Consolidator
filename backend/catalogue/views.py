@@ -703,7 +703,7 @@ def client_stage2(request, client_id):
 # ---------------------------------------------------------------- data clean (step 1: today's LNV against one DSP sheet)
 
 # Decisions that point at rows of the LNV: they go when a new LNV arrives. Name, junk and missing-song decisions stay.
-ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:", "off:", "hold:", "class:")
+ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:", "off:", "hold:", "class:", "complete:")
 CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}, "name": {"same", "different"},
                  "junk": {"fix", "ok"}, "missing": {"add", "not_ours", "deleted"}, "fill": {"accept", "reject"}, "link": {"same", "none"},
                  "merge": {"accepted", "rejected", "pending"}, "type": {"set"}, "version": {"same", "none"},
@@ -719,8 +719,10 @@ CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}
                  "map": {"join"}, "title": set(dataclean.TITLE_MODES),
                  # a value of the DSP (Muso) data corrected: "muso:<recording id>:<field>"
                  "muso": {"set"},
-                 # the section a match is checked in: "class:<LNV row>" or "class:m<recording id>"
-                 "class": set(review.CLASSES)}
+                 # the section a match is checked in: "class:<LNV row>" or "class:m<recording id>" (data.at: when)
+                 "class": set(review.CLASSES),
+                 # a song name marked completed after its preview in the LNV: "complete:<song name key>"
+                 "complete": {"yes"}}
 # the LNV fields a value can be chosen for
 PICK_FIELDS = set(export.PICK_FIELDS) | set(export.PICK_SLOTS)
 MAX_ITEMS = 20000   # decisions in one save
@@ -730,7 +732,7 @@ GLOBAL_DECISIONS = ("name:", "writer:", "pub:")
 
 # what a decision's data can hold; anything else sent with it is left out
 DECISION_DATA = {"keep", "row", "rows", "also", "was", "excluded", "type", "cover", "a", "b", "songs", "name", "value", "ipis", "to", "title",
-                 "from", "family", "then", "level", "remark"}
+                 "from", "family", "then", "level", "remark", "at"}
 
 
 class BadDecision(ValueError):
@@ -754,6 +756,8 @@ def _checked(key, choice, data):
         raise BadDecision(f"{key!r} names no recording")
     if kind == "class" and not (rest.isdigit() or (rest[:1] == "m" and rest[1:].isdigit())):
         raise BadDecision(f"{key!r} names no LNV row or recording")
+    if kind == "complete" and len(rest) > 280:
+        raise BadDecision(f"{key[:40]!r}… names no song")
     if kind == "pick":
         row, _, field = rest.partition(":")
         if not row.isdigit() or field not in PICK_FIELDS:
@@ -786,6 +790,8 @@ def _checked(key, choice, data):
             data[k] = [x[:500] for x in data[k]]
     if data.get("remark") is not None and (not isinstance(data["remark"], int) or isinstance(data["remark"], bool)):
         raise BadDecision("remark must be a number")
+    if "at" in data and (not isinstance(data["at"], int) or isinstance(data["at"], bool) or not 0 <= data["at"] < 1 << 53):
+        raise BadDecision("at must be a time in ms")
     if "value" in data:
         v = data["value"]
         if not isinstance(v, (str, int, float, list)) or isinstance(v, bool) or (isinstance(v, list) and (len(v) > 100 or not all(isinstance(x, str) for x in v))):
@@ -1247,22 +1253,31 @@ def _dsp_part(decisions, master, dsp, clean):
                "keep": {r: m["family"] for r, m in plan["keep"].items()}, "checked": plan["checked"], "isrc_checked": plan["isrc_checked"]}
     part["typed"] = _typed_part(step["typed"], parsed, arrange)
     part["versions"] = dataclean.lnv_versions(clean, parsed["songs"], songmerge.moves(decisions))
-    # a recording moved to Exact match gets no row of its own: the exact row has it
-    gone = {rid for rid, x in plan["solo"].items() if x == "exact"} if plan["keep"] else set()
+    # a recording put in Original gets no row of its own (the Original row has it), nor does a deleted one
+    gone = {x for rid in plan["gone"] if (found := dataclean.part_of(clean, rid)) for x in found[1].get("sheet") or ()}
     part["versions"]["rows"] = [v for v in part["versions"].get("rows", []) if not set(v.get("sheet") or ()) & gone]
     # every recording the reviewer checked beside no LNV row is in the LNV – also while its song is not answered yet
     have = {x for v in part["versions"]["rows"] for x in v.get("sheet") or ()}
     by_row = {s["row"]: s for s in parsed["songs"]}
     for x in plan["solo_rows"]:
-        found = dataclean.part_of(clean, x["id"]) if x["id"] not in have else None
+        found = dataclean.part_of(clean, x["id"])
         if not found:
             continue
         song, p = found
-        home = by_row.get(x["home"])
-        original = {"title": home["title"], "album": home.get("movie", ""), "row": home["row"], "add": None, "language": home.get("language", "")} if home \
-            else {"title": x["main"], "album": "", "row": None, "add": None, "language": ""}
-        part["versions"]["rows"].append({"lyricists": song["lyricists"], "composers": song["composers"], **p, "original": original})
-        have.update(p.get("sheet") or ())
+        if set(p.get("sheet") or ()) & have:
+            row = next(v for v in part["versions"]["rows"] if set(v.get("sheet") or ()) & set(p.get("sheet") or ()))
+        else:
+            home = by_row.get(x["home"])
+            original = {"title": home["title"], "album": home.get("movie", ""), "row": home["row"], "add": None, "language": home.get("language", "")} if home \
+                else {"title": x["main"], "album": "", "row": None, "add": None, "language": ""}
+            row = {"lyricists": song["lyricists"], "composers": song["composers"], **p, "original": original}
+            part["versions"]["rows"].append(row)
+            have.update(p.get("sheet") or ())
+        # Original held recordings only: this one is the row, the others' titles its work names, their ISRCs its own
+        if x.get("alt"):
+            row["alt"] = list(OrderedDict.fromkeys([*(row.get("alt") or []), *x["alt"]]))
+        if x.get("isrcs"):
+            row["isrcs"] = list(OrderedDict.fromkeys([*(row.get("isrcs") or []), *x["isrcs"]]))
     # the titles the reviewer chose, where each recording lands (after the older Title picks: they win)
     titles = dataclean.titles_of(decisions, songmerge.titles_now(sheet, merge, decisions))
     titled, part["versions"], part["adds"] = dataclean.apply_titles(clean, part["versions"], part["adds"], titles)
@@ -1273,7 +1288,9 @@ def _dsp_part(decisions, master, dsp, clean):
     part["remarks"], part["versions"], part["adds"] = dataclean.place_remarks(
         clean, part["versions"], part["adds"], {k: v["name"] for k, v in remarks.of(decisions).items()})
     part["versions"], part["adds"] = dataclean.isrcs_once(part["versions"], part["adds"], part["isrcs"], clean.get("isrc_rows") or {})
-    # the exact match's one row: its other rows go, their titles join its Alternative Work Name, their ISRCs its ISRC cell
+    # Deleted in step 2: the LNV row leaves the file
+    part["delete"] = sorted(set(plan["delete"]))
+    # the Original's one row: its other rows go, their titles join its Alternative Work Name, their ISRCs its ISRC cell
     part["merge"] = {}
     for keep, m in plan["keep"].items():
         part["merge"][keep] = m["drop"]

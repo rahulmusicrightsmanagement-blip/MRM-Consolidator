@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
-import { ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpDown, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Circle, CircleCheck, CircleDot, Clock, Link2, Pencil, Plus, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpDown, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Circle, CircleCheck, CircleDot, Clock, Eye, Link2, Pencil, Plus, Trash2, Undo2, X } from 'lucide-react'
 import { ConfirmDialog, Dropdown, Guide } from '../../components/ui'
 import type { DropOption } from '../../components/ui'
 import type { CleanDecisionIn } from '../../lib/api'
 import type { CaseRecord, MatchClass, MovedOut, RemarkChoice, ReviewCase, Step1, TitleMode, TypedSong } from '../../types'
-import { CLASSES, CLASS_NAME, defaultClass, factsOf, recClassKey, rowClassKey } from './matchModel'
+import { CLASSES, CLASS_NAME, defaultClass, factsOf, recClassKey, rowClassKey, savedClass } from './matchModel'
 import type { Facts } from './matchModel'
 import { list, n, norm } from './Block'
 import { Checks, Links, LnvRowDetails, MapDialog, Part, VersionDetails, differs, hasLink, useKeys, useStored, value } from './CaseParts'
@@ -46,16 +46,20 @@ export type Group = {
   recs: CaseRecord[]
   /** the recordings whose titles go on its rows */
   trs: CaseRecord[]
-  /** its section: the reviewer's (chosen – then it is checked), else the app's (def) */
-  cls: MatchClass; def: MatchClass; chosen: boolean
+  /** its section, put there by the reviewer (then it is checked) – null: to check. def: what the screen suggests. at:
+   *  when it was put there (the first one in Original is the song's row) */
+  cls: MatchClass | null; def: MatchClass | null; chosen: boolean; at: number
 }
-/** A recording of the song beside no LNV row (a version the LNV lacks): in Other version until the reviewer moves it –
- *  to Exact match (no row of its own: the exact row takes its title and ISRC) or Possible match. */
-export type Solo = { key: string; c: ReviewCase; r: CaseRecord; cls: MatchClass; def: MatchClass; chosen: boolean }
+/** A recording of the song beside no LNV row (a version the LNV lacks): to check until the reviewer puts it in Original
+ *  (no row of its own: the Original row takes its title and ISRC), Other version (a new row) or Deleted. */
+export type Solo = { key: string; c: ReviewCase; r: CaseRecord; cls: MatchClass | null; def: MatchClass | null; chosen: boolean; at: number }
 export type Family = {
   id: string; title: string; cases: ReviewCase[]; main: CaseRecord
-  /** the three sections: the main version's ISRC (one row in the LNV), another ISRC, a version of the song */
-  exact: Group[]; possible: Group[]; version: Group[]
+  /** every match (an LNV row card), in LNV row order */
+  groups: Group[]
+  /** v2.0: the ones nobody checked yet (compared with the main version on top), then the sections: Original (one row
+   *  in the LNV, the first one put there first), Other version (a row each), Deleted (out of the LNV) */
+  todo: Group[]; exact: Group[]; version: Group[]; deleted: Group[]
   /** the song's versions beside no LNV row, each in its section */
   solos: Solo[]
   /** other recordings beside no LNV row (the main version among them): each gets a row of its own once its song is answered */
@@ -120,12 +124,12 @@ export const variants = (f: string, rs: CaseRecord[]) => {
 const sig = (rs: CaseRecord[]) => SIG.map((f) => variants(f, rs).map((v) => f === 'Year' ? v[0].slice(0, 4) : v.map(norm).sort().join(',')).sort().join('/')).join('|')
 
 /** The cards of a song name: the entries of each LNV row together, then rows whose data and recordings are the very
- *  same joined ("LNV rows 468, 475") – each in its section: the reviewer's (classes), else the app's (the main version's
- *  ISRC – exact; a version the LNV has – other version; else possible). */
-function groupsOf(entries: Entry[], mainIsrcs: string[], classes: Record<string, MatchClass>): Group[] {
+ *  same joined ("LNV rows 468, 475") – each in the section the reviewer put it in (classes), else to check (with the
+ *  screen's suggestion: the main version's ISRC – Original; a version the LNV has – Other version). */
+function groupsOf(entries: Entry[], mainIsrcs: string[], classes: Record<string, MatchClass>, at: Record<string, number>): Group[] {
   const byRow = new Map<number, Entry[]>()
   entries.forEach((e) => byRow.set(e.row, [...(byRow.get(e.row) ?? []), e]))
-  const out: (Omit<Group, 'cls' | 'def' | 'chosen'> & { sig: string })[] = []
+  const out: (Omit<Group, 'cls' | 'def' | 'chosen' | 'at'> & { sig: string })[] = []
   for (const [row, es] of byRow) {
     const recs = uniq(es.map((e) => e.rec))
     const s = `${sig([es[0].lnv])}#${sig(recs)}#${es.every((e) => e.v)}`
@@ -139,10 +143,13 @@ function groupsOf(entries: Entry[], mainIsrcs: string[], classes: Record<string,
   return out.map(({ sig: _, ...g }) => {   // eslint-disable-line @typescript-eslint/no-unused-vars
     const rows = [...g.rows].sort((a, b) => a - b)
     const def = defaultClass(list(g.lnv.fields.ISRC), mainIsrcs, g.entries.every((e) => !!e.v))
-    const chosen = rows.map((r) => classes[rowClassKey(r)]).find(Boolean)
-    return { ...g, rows, def, cls: chosen ?? def, chosen: !!chosen }
+    const chosen = rows.map((r) => savedClass(classes[rowClassKey(r)])).find(Boolean) ?? null
+    const when = Math.min(...rows.map((r) => at[rowClassKey(r)] ?? Number.MAX_SAFE_INTEGER))
+    return { ...g, rows, def, cls: chosen, chosen: !!chosen, at: when }
   }).sort((a, b) => a.rows[0] - b.rows[0])
 }
+/** Original in the order its matches were put there: the first is the song's row in the LNV. */
+const byAt = <T extends { at: number },>(xs: T[], first: (x: T) => number) => [...xs].sort((a, b) => a.at - b.at || first(a) - first(b))
 
 /** How plain a recording is, for the main version: 0 – no tag at all, not even in its title ('Maula Mere Maula',
  *  'Maula Mere Maula (From "Anwar")'), 1 – no version tag ('Maula Mere Maula, Pt. 1', '- Stutter'), 2 – a version. */
@@ -184,9 +191,9 @@ function outOf(cs: ReviewCase[], gone: ReviewCase[], moved: MovedOut[]): Out[] {
   return out.sort((a, b) => a.rows[0] - b.rows[0])
 }
 
-/** The songs of the LNV match grouped by song name, each with its main version and its three sections. classes: the
- *  sections the reviewer chose (saved, with the ones waiting in the queue). */
-export function familiesOf(cases: ReviewCase[], typed: TypedSong[] = [], moved: MovedOut[] = [], classes: Record<string, MatchClass> = {}): Family[] {
+/** The songs of the LNV match grouped by song name, each with its main version, its matches to check and its sections.
+ *  classes: the sections the reviewer chose (saved, with the ones waiting in the queue) · at: when. */
+export function familiesOf(cases: ReviewCase[], typed: TypedSong[] = [], moved: MovedOut[] = [], classes: Record<string, MatchClass> = {}, at: Record<string, number> = {}): Family[] {
   // a song the reviewer added to another never makes or unmakes a name, nor becomes its main version
   const own = (cs: ReviewCase[]) => { const x = cs.filter((c) => !c.joined); return x.length ? x : cs }
   const by = new Map<string, ReviewCase[]>()
@@ -223,7 +230,7 @@ export function familiesOf(cases: ReviewCase[], typed: TypedSong[] = [], moved: 
     const entries = cs.flatMap(entriesOf)
     const used = new Set(entries.flatMap((e) => [e.rec.id, e.tr.id]))
     // every section in LNV row order, the lowest row first
-    const groups = groupsOf(entries, list(main?.fields.ISRC), classes)
+    const groups = groupsOf(entries, list(main?.fields.ISRC), classes, at)
     // the main version first on every card it is on
     groups.forEach((g) => { g.recs.sort((a, b) => Number(b.id === main?.id) - Number(a.id === main?.id)) })
     const rest = cs.flatMap((c) => c.muso.filter((r) => r.in && !used.has(r.id)).map((r) => ({ c, r })))
@@ -231,11 +238,12 @@ export function familiesOf(cases: ReviewCase[], typed: TypedSong[] = [], moved: 
     return {
       id: `f:${k}`, title: value(main?.fields.Title) || cs[0].title, cases: cs, main,
       recs: [main, ...all.filter((r) => r !== main)],
-      exact: groups.filter((g) => g.cls === 'exact'), possible: groups.filter((g) => g.cls === 'possible'), version: groups.filter((g) => g.cls === 'version'),
-      solos: rest.filter(solo).map(({ c, r }): Solo => {
-        const key = recClassKey(r.id!), chosen = classes[key]
-        return { key, c, r, def: 'version', cls: chosen ?? 'version', chosen: !!chosen }
-      }),
+      groups, todo: groups.filter((g) => !g.cls), exact: byAt(groups.filter((g) => g.cls === 'exact'), (g) => g.rows[0]),
+      version: groups.filter((g) => g.cls === 'version'), deleted: groups.filter((g) => g.cls === 'deleted'),
+      solos: byAt(rest.filter(solo).map(({ c, r }): Solo => {
+        const key = recClassKey(r.id!), chosen = savedClass(classes[key])
+        return { key, c, r, def: 'version', cls: chosen, chosen: !!chosen, at: at[key] ?? Number.MAX_SAFE_INTEGER }
+      }), (x) => x.r.id ?? 0),
       rest: rest.filter((x) => !solo(x)),
       typed: typed.filter((t) => t.family && names.has(t.family)),
       out: outOf(cs, gone.get(k) ?? [], left.get(k) ?? []),
@@ -251,16 +259,25 @@ export function familiesOf(cases: ReviewCase[], typed: TypedSong[] = [], moved: 
 export type Pending = {
   link: Record<string, number[] | null>; picks: Record<string, string | string[] | null>
   titles: Record<string, { mode: TitleMode; value: string } | null>; vers: Record<string, 'same' | null>
-  /** the section a match is checked in: "class:<row>" · "class:m<recording id>" -> exact · possible · version (null – back to the app's) */
-  cls: Record<string, MatchClass | null>
+  /** the section a match is checked in: "class:<row>" · "class:m<recording id>" -> exact (Original) · version · deleted
+   *  (null – to check again) · at: when it was put there (the first one in Original is the song's row) */
+  cls: Record<string, MatchClass | null>; at?: Record<string, number>
 }
-export const NO_PENDING: Pending = { link: {}, picks: {}, titles: {}, vers: {}, cls: {} }
+export const NO_PENDING: Pending = { link: {}, picks: {}, titles: {}, vers: {}, cls: {}, at: {} }
 export const pendingCount = (p: Pending) => Object.keys(p.link).length + Object.keys(p.picks).length + Object.keys(p.titles).length + Object.keys(p.vers).length
   + Object.keys(p.cls ?? {}).length
 /** The sections as they are now: the saved ones with the queue's over them. */
 export function classesNow(d: Step1, p: Pending): Record<string, MatchClass> {
-  const out: Record<string, MatchClass> = { ...(d.classes ?? {}) }
+  const out: Record<string, MatchClass> = {}
+  Object.entries(d.classes ?? {}).forEach(([k, v]) => { const x = savedClass(v); if (x) out[k] = x })
   Object.entries(p.cls ?? {}).forEach(([k, v]) => { if (v) out[k] = v; else delete out[k] })
+  return out
+}
+/** When each match was put in its section: saved, with the queue's over them. */
+export function atNow(d: Step1, p: Pending): Record<string, number> {
+  const out: Record<string, number> = { ...(d.class_at ?? {}) }
+  Object.entries(p.cls ?? {}).forEach(([k, v]) => { if (!v) delete out[k] })
+  Object.entries(p.at ?? {}).forEach(([k, v]) => { out[k] = v })
   return out
 }
 
@@ -274,8 +291,9 @@ function put<T>(m: Record<string, T>, k: string, v: T, saved: T): Record<string,
 /** Drop from the queue what a save took, unless it changed again meanwhile. */
 export function stripSaved(p: Pending, done: Pending): Pending {
   const strip = <T,>(m: Record<string, T>, d: Record<string, T>) => Object.fromEntries(Object.entries(m).filter(([k, v]) => !(k in d) || !same(v, d[k])))
+  const cls = strip(p.cls ?? {}, done.cls ?? {})
   return { link: strip(p.link, done.link), picks: strip(p.picks, done.picks), titles: strip(p.titles, done.titles), vers: strip(p.vers, done.vers),
-    cls: strip(p.cls ?? {}, done.cls ?? {}) }
+    cls, at: Object.fromEntries(Object.entries(p.at ?? {}).filter(([k]) => k in cls)) }
 }
 
 /** The LNV rows a song is linked to as saved: by the reviewer, or by the app when it linked the song by itself. */
@@ -288,37 +306,55 @@ const locked = (e: Entry) => !e.v && !!e.c.auto && savedLinks(e.c).includes(e.ro
 /** A card is ticked (linked: the same song) when every recording on it is; locked when the app linked them all by itself. */
 export const gTicked = (p: Pending, g: Group) => g.entries.every((e) => ticked(p, e))
 const gLocked = (g: Group) => g.entries.every(locked)
-/** Checked: put in its section by the reviewer (one of the three buttons) – or ticked by them. A match the app linked by
- *  itself (the same ISRC) waits for the reviewer's Exact match too. */
-export const gChecked = (p: Pending, g: Group) => g.chosen || g.entries.every((e) => ticked(p, e) && !locked(e))
-/** Every card of a song name, the three sections in order. */
-export const groupsIn = (f: Family) => [...f.exact, ...f.possible, ...(f.version ?? [])]
+/** Checked (v2.0): put in a section by the reviewer – Original, Other version or Deleted. Nothing is checked by itself:
+ *  a match the app linked (the same ISRC) waits in To check too. */
+export const gChecked = (_p: Pending, g: Group) => g.chosen
+/** Every card of a song name, in LNV row order. */
+export const groupsIn = (f: Family) => f.groups
 export const toCheck = (p: Pending, f: Family) => groupsIn(f).filter((g) => !gChecked(p, g)).length + (f.solos ?? []).filter((x) => !x.chosen).length
 /** A song name's checked matches – with the songs the reviewer typed into it. */
 export const checkedIn = (p: Pending, f: Family) => groupsIn(f).filter((g) => gChecked(p, g)).length + (f.solos ?? []).filter((x) => x.chosen).length + f.typed.length
 /** The LNV rows of a song on screen as its own (not its versions'): linking one leaves the others to check. */
 const ownRows = (c: ReviewCase) => entriesOf(c).filter((e) => !e.v).map((e) => e.row)
 /** How far a song name is: its matches (the ones turned down too), how many are answered, and what is left. */
-export type Status = 'todo' | 'part' | 'done'
-export const STATUS: Record<Status, string> = { todo: 'Left to check', part: 'Partly checked', done: 'All checked' }
-export function progressOf(p: Pending, f: Family) {
+export type Status = 'todo' | 'part' | 'done' | 'complete'
+export const STATUS: Record<Status, string> = { todo: 'Left to check', part: 'Partly checked', done: 'All checked', complete: 'Completed' }
+/** The song names marked completed after their preview (complete:<song name key>) – one is completed while every match
+ *  of it stays checked. */
+export const familyKey = (f: Family) => f.id.slice(2)
+export const completeKey = (f: Family) => `complete:${familyKey(f)}`
+export function progressOf(p: Pending, f: Family, completed?: ReadonlySet<string> | string[]) {
   const total = groupsIn(f).length + (f.solos ?? []).length + f.out.length, left = toCheck(p, f)
-  return { total, left, done: total - left, status: (!left ? 'done' : left === total ? 'todo' : 'part') as Status }
+  const done = !!completed && (Array.isArray(completed) ? completed.includes(familyKey(f)) : completed.has(familyKey(f)))
+  return { total, left, done: total - left, status: (!left ? (done ? 'complete' : 'done') : left === total ? 'todo' : 'part') as Status }
 }
-/** A song name's matches not checked yet, by section. */
-export const openOf = (p: Pending, f: Family) => ({ exact: f.exact.filter((g) => !gChecked(p, g)).length, possible: f.possible.filter((g) => !gChecked(p, g)).length,
-  version: (f.version ?? []).filter((g) => !gChecked(p, g)).length + (f.solos ?? []).filter((x) => !x.chosen).length })
-/** A card or a recording put in a section by the reviewer: checked, and – an LNV row – ticked (the same song). The
- *  class already chosen, clicked again: unchecked (back to the app's section, and unticked unless the app linked it). */
+/** A song name's matches by section now: to check, Original, Other version, Deleted. */
+export const openOf = (p: Pending, f: Family) => ({ todo: toCheck(p, f), exact: f.exact.length + f.solos.filter((x) => x.cls === 'exact').length,
+  version: f.version.length + f.solos.filter((x) => x.cls === 'version').length, deleted: f.deleted.length + f.solos.filter((x) => x.cls === 'deleted').length })
+/** When a match is put in a section – a click: the first one put in Original is the song's row. */
+let clock = 0
+const now = () => (clock = Math.max(clock + 1, Date.now()))
+/** A card or a recording put in a section by the reviewer: checked, and – an LNV row – ticked (the same song: its row is
+ *  the song's, an other version of it, or deleted with it). null: to check again (unticked unless the app linked it). */
 export function chooseClass(p: Pending, d: Step1, g: Group, to: MatchClass | null): Pending {
-  let next: Pending = { ...p, cls: { ...(p.cls ?? {}) } }
-  g.rows.forEach((row) => { const k = rowClassKey(row); next = { ...next, cls: put(next.cls, k, to, d.classes?.[k] ?? null) } })
+  let next: Pending = { ...p, cls: { ...(p.cls ?? {}) }, at: { ...(p.at ?? {}) } }
+  const at = now()
+  g.rows.forEach((row) => {
+    const k = rowClassKey(row)
+    next = { ...next, cls: put(next.cls, k, to, savedClass(d.classes?.[k]) ?? null) }
+    if (to && to !== g.cls) next.at![k] = at
+    else if (!to || !(k in next.cls)) delete next.at![k]
+  })
   if (to && !gTicked(next, g)) next = tickGroup(next, g, true, d.picks)
   if (!to && gTicked(next, g) && !gLocked(g)) next = tickGroup(next, g, false, d.picks)
   return next
 }
-export const chooseSoloClass = (p: Pending, d: Step1, x: Solo, to: MatchClass | null): Pending =>
-  ({ ...p, cls: put(p.cls ?? {}, x.key, to, d.classes?.[x.key] ?? null) })
+export function chooseSoloClass(p: Pending, d: Step1, x: Solo, to: MatchClass | null): Pending {
+  const next: Pending = { ...p, cls: put(p.cls ?? {}, x.key, to, savedClass(d.classes?.[x.key]) ?? null), at: { ...(p.at ?? {}) } }
+  if (to && to !== x.cls) next.at![x.key] = now()
+  else if (!to || !(x.key in next.cls)) delete next.at![x.key]
+  return next
+}
 /** What a card has in common with its song: the ISRC, a singer, the production – against its own recordings and the main version. */
 export const factsOfGroup = (f: Family, g: Group): Facts => factsOf(g.lnv, uniq([...g.recs, f.main]))
 /** A song name with a match on the ISRC, a singer, the production. */
@@ -432,7 +468,7 @@ export function pendingItems(p: Pending, d: Step1): CleanDecisionIn[] {
   Object.entries(p.picks).forEach(([k, v]) => { if (!handled.has(k)) out.push(v == null ? { key: k, choice: null } : pickItem(k, v, recsOf(Number(k.split(':')[1])), lnvOf(Number(k.split(':')[1])))) })
   const vers = new Map(d.cases.flatMap((c) => c.in_lnv ?? []).map((v) => [v.key, v.row]))
   Object.entries(p.vers).forEach(([k, v]) => out.push(v ? { key: k, choice: 'same', data: { rows: vers.has(k) ? [vers.get(k)!] : [] } } : { key: k, choice: null }))
-  Object.entries(p.cls ?? {}).forEach(([k, v]) => out.push(v ? { key: k, choice: v } : { key: k, choice: null }))
+  Object.entries(p.cls ?? {}).forEach(([k, v]) => out.push(v ? { key: k, choice: v, data: { at: p.at?.[k] ?? d.class_at?.[k] ?? Date.now() } } : { key: k, choice: null }))
   Object.entries(p.titles).forEach(([id, t]) => out.push(t ? { key: `title:${id}`, choice: t.mode, data: { value: t.value } } : { key: `title:${id}`, choice: null }))
   return out
 }
@@ -453,10 +489,12 @@ export function SaveBar({ count, busy, flush }: { count: number; busy: boolean; 
 
 /** What the downloaded LNV does with a match in each section – said where it is moved. */
 const CLASS_EFFECT: Record<MatchClass, string> = {
-  exact: 'In the downloaded LNV every exact match of the song is one row: its title goes into the Alternative work name (with a | between titles), its ISRC into the ISRC cell.',
-  possible: 'In the downloaded LNV it keeps a row of its own, right under the song’s main version, with the main version’s title beside it.',
-  version: 'In the downloaded LNV it keeps a row of its own as another version of the song, after the possible matches.',
+  exact: 'The first match put in Original is the song’s row in the downloaded LNV; every one put there after it is merged into that row – its title goes into the Alternative work name (a | between titles), its ISRC into the ISRC cell. One row, never two.',
+  version: 'It gets a row of its own in the downloaded LNV, right under the Original, with the main version’s title beside it – an LNV row stays a row, a recording beside no LNV row gets a new row.',
+  deleted: 'It leaves the downloaded LNV: the LNV row is left out of the file and its recording gets no row. Put back brings it back to check.',
 }
+/** A section's three buttons, said shortly. */
+const CLASS_BTN: Record<MatchClass, string> = { exact: 'Original', version: 'Other version', deleted: 'Delete' }
 
 /** One column of a section's table: the main version, the exact match's one row (merged), an LNV row, a recording of
  *  the song (beside its LNV row, or beside none), a match turned down. */
@@ -465,8 +503,10 @@ type Col =
   | { kind: 'lnv'; key: string; g: Group; at: number }
   | { kind: 'muso'; key: string; r: CaseRecord; rows: number[]; solo?: Solo; at: number }
   | { kind: 'out'; key: string; o: Out; at: number }
+/** The tables of the song screen: the matches to check (against the main version), Original, Other version. */
+type Kind = 'todo' | 'exact' | 'version'
 
-export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targets, commit, toast, families, loose, act, showUndo, updated }: {
+export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targets, commit, toast, families, loose, act, showUndo, updated, completed = false }: {
   f: Family; d: Step1; p: Pending; set: (fn: (p: Pending) => Pending) => void
   pos: number; total: number; prev: () => void; next: () => void; wideBtn: ReactNode
   targets: Target[]
@@ -480,6 +520,8 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
   showUndo: (song: string) => void
   /** when a change to this song was last saved */
   updated?: string
+  /** marked completed after its preview in the LNV */
+  completed?: boolean
 }) {
   const source = d.source
   const [opened, setOpened] = useState<number | null>(null)   // the recording whose details are open (index in f.recs)
@@ -494,10 +536,11 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
   const [moving, setMoving] = useState<{ g?: Group; x?: Solo; to: MatchClass | null } | null>(null)
   // a Muso value corrected on a recording that stands beside an LNV row: the same change on that row too?
   const [syncing, setSyncing] = useState<{ r: CaseRecord; fl: string; v: string[]; gs: Group[] } | null>(null)
-  const [axis, setAxis] = useAxis()   // the possible matches and other versions: one table scrolled across (X, the default) or cards one below another (Y)
-  const across = useAcross(f.id)   // the exact matches scrolled across: drag, ← →, the arrow buttons
-  const acrossP = useAcross(`${f.id}:p:${axis}`, '.fx-col', axis === 'x')   // the possible matches, Muso and LNV side by side
-  const acrossV = useAcross(`${f.id}:v:${axis}`, '.fx-col', axis === 'x')   // the other versions
+  const [previewing, setPreviewing] = useState(false)   // how the song looks in the LNV: the popup
+  const [axis, setAxis] = useAxis()   // the other versions: one table scrolled across (X, the default) or cards one below another (Y)
+  const acrossT = useAcross(`${f.id}:t`)   // the matches to check, against the main version: drag, ← →, the arrow buttons
+  const across = useAcross(f.id)   // Original
+  const acrossV = useAcross(`${f.id}:v:${axis}`, '.fx-col', axis === 'x')   // the other versions, Muso and LNV side by side
   useKeys({ arrowdown: next, j: next, arrowup: prev, k: prev })
 
   const cards = groupsIn(f)
@@ -508,7 +551,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
   const plainMain = plainness(main) < 2
   const rowsLabel = (g: Group) => `LNV row${g.rows.length > 1 ? 's' : ''} ${g.rows.join(', ')}`
   const solos = f.solos ?? []
-  const solosIn = (k: MatchClass) => solos.filter((x) => x.cls === k)
+  const solosIn = (k: MatchClass | null) => solos.filter((x) => x.cls === k)
 
   // ---- titles: one line per recording that goes into the LNV
   const { lines, mainLine, modeOf, finalOf } = titleModel(f, d, p)
@@ -534,17 +577,17 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
 
   const titleFinal = (g: Group) => { const l = g.trs.flatMap((r) => (r.id != null && lines.get(r.id)) || [])[0]; return l ? finalOf(l) : value(g.lnv.fields.Title) }
 
-  // ---- the exact match: ONE row in the LNV – its first LNV row, the others merged into it
+  // ---- Original: ONE row in the LNV – the first LNV row put there, the others merged into it
   const keepG = f.exact[0]
   const mergedRows = f.exact.slice(1).map((g) => g.lnv)
   const merged: Group | null = keepG ? { ...keepG, entries: f.exact.flatMap((g) => g.entries),
     recs: uniq([main, ...f.exact.flatMap((g) => g.recs), ...solosIn('exact').map((x) => x.r)]), trs: keepG.trs } : null
   /** The titles the exact match's one row can take besides its own: the other rows' and recordings'. */
   const exactTitles = merged ? [...new Set([...mergedRows.map((r) => value(r.fields.Title)), ...merged.recs.map((r) => value(r.fields.Title))].filter(Boolean))] : []
-  // the rows that leave the file for it: the ones checked as an exact match (an unchecked one stays a row of its own)
-  const goneG = f.exact.slice(1).filter((g) => g.chosen), waitG = f.exact.slice(1).filter((g) => !g.chosen)
+  // the rows that leave the file for it: every one put in Original after the first
+  const goneG = f.exact.slice(1)
   const mergedAlt = keepG ? autoAlternative(titleFinal(keepG), keepG.lnv,
-    uniq([...keepG.trs, ...keepG.recs, ...goneG.flatMap((g) => g.recs), ...solosIn('exact').filter((x) => x.chosen).map((x) => x.r)]), goneG.map((g) => g.lnv)) : ''
+    uniq([...keepG.trs, ...keepG.recs, ...goneG.flatMap((g) => g.recs), ...solosIn('exact').map((x) => x.r)]), goneG.map((g) => g.lnv)) : ''
 
   // ---- values: where Muso and the LNV row differ, the one the LNV keeps – on every row of the card
   const pickOf = (k: string) => (k in p.picks ? p.picks[k] ?? undefined : d.picks[k])
@@ -571,8 +614,8 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
     if (ok) toast(v == null ? `${labelOf(fl)}: back to the ${source} file’s value` : `${source} ${labelOf(fl).toLowerCase()} corrected`, 'good')
     return ok
   }
-  /** The LNV rows a recording stands beside in Possible match and Other version: a change to it is offered to them too. */
-  const pairedOf = (r: CaseRecord) => r.id == null || r.id === main.id ? [] : [...f.possible, ...(f.version ?? [])].filter((g) => g.recs.some((x) => x.id === r.id))
+  /** The LNV rows a recording stands beside in Other version: a change to it is offered to them too. */
+  const pairedOf = (r: CaseRecord) => r.id == null || r.id === main.id ? [] : f.version.filter((g) => g.recs.some((x) => x.id === r.id))
   const editing: MusoEditing = {
     source, busy,
     save: (r, fl, v) => {
@@ -591,23 +634,28 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
         const saved = (id: number) => d.titles?.[String(id)] ?? null
         ls.forEach((l) => { out = { ...out, titles: put(out.titles, String(l.id), { mode: 'custom', value: s.v.join(', ') }, saved(l.id)) } })
       } else g.rows.forEach((row) => { const k = pickKey(row, s.fl); out = { ...out, picks: put(out.picks, k, s.v.length === 1 ? s.v[0] : s.v, d.picks[k] ?? null) } })
-      return chooseClass(out, d, g, g.cls)
+      return chooseClass(out, d, g, g.cls ?? 'version')
     }, q))
     const ok = await saveEdit(s.r, s.fl, s.v)
     if (ok) toast(`${labelOf(s.fl)} changed on ${source} and on ${s.gs.map(rowsLabel).join(', ')} – one row in the LNV`, 'good')
   }
 
-  // ---- the three sections: a match checked where it is, or moved (after a yes) – checked either way
+  // ---- the sections: a match put in Original, Other version or Deleted – checked; moved again (after a yes)
   const exactRows = (gs: Group[]) => gs.flatMap((g) => g.rows).sort((a, b) => a - b)
+  const where = (cls: MatchClass | null) => cls ? CLASS_NAME[cls] : 'To check'
   const move = (m: NonNullable<typeof moving>) => {
     setMoving(null)
-    if (m.x) { set((q) => chooseSoloClass(q, d, m.x!, m.to)); toast(m.to ? `“${value(m.x.r.fields.Title)}” is in ${CLASS_NAME[m.to]} – checked` : `“${value(m.x.r.fields.Title)}” is to check again`, 'good'); return }
+    if (m.x) {
+      set((q) => chooseSoloClass(q, d, m.x!, m.to))
+      toast(m.to ? `“${value(m.x.r.fields.Title)}” ${m.to === 'deleted' ? 'deleted – it gets no row in the LNV' : `is in ${CLASS_NAME[m.to]} – checked`}` : `“${value(m.x.r.fields.Title)}” is to check again`, 'good')
+      return
+    }
     const g = m.g!
     set((q) => {
       let out = chooseClass(q, d, g, m.to)
-      // the exact match's one row is its first LNV row: when another row becomes the first, the values chosen go with it
+      // the Original's one row is the first LNV row put there: when another one becomes the first, the values chosen go with it
       const before = keepG?.rows[0]
-      const now = exactRows([...f.exact.filter((x) => x.key !== g.key), ...(m.to === 'exact' || (!m.to && g.def === 'exact') ? [g] : [])])[0]
+      const now = m.to === 'exact' ? (keepG ?? g).rows[0] : f.exact.filter((x) => x.key !== g.key)[0]?.rows[0]
       if (before != null && now != null && before !== now) PICKABLE.forEach((fl) => {
         const from = pickKey(before, fl), to = pickKey(now, fl)
         const v = from in out.picks ? out.picks[from] : d.picks[from]
@@ -616,27 +664,30 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
       })
       return out
     })
-    toast(m.to ? `${rowsLabel(g)} ${m.to === g.cls ? 'checked' : `moved to ${CLASS_NAME[m.to]} – checked`}` : `${rowsLabel(g)} is to check again`, 'good')
+    const first = m.to === 'exact' && !keepG
+    toast(!m.to ? `${rowsLabel(g)} is to check again` : m.to === 'deleted' ? `${rowsLabel(g)} deleted – it leaves the LNV`
+      : m.to === 'exact' ? (first ? `${rowsLabel(g)} is the Original – the song’s row in the LNV` : `${rowsLabel(g)} is in Original – merged into LNV row ${keepG!.rows[0]}, its title in the Alternative work name`)
+      : `${rowsLabel(g)} is an other version – a row of its own`, 'good')
   }
-  /** The three buttons under a match: its section now is lit; a click on it checks it there, on another moves it. */
-  const classBtns = (what: string, cls: MatchClass, chosen: boolean, pick: (to: MatchClass | null, ask: boolean) => void) => (
-    <div className="cls-btns" role="group" aria-label={`Which section ${what} is in`}>
+  /** The three buttons under a match – Original · Other version · Delete: its section is lit, the suggested one ringed.
+   *  From To check a click puts it there at once (Delete asks first); moving it again, or back to check, asks first. */
+  const classBtns = (what: string, cls: MatchClass | null, def: MatchClass | null, pick: (to: MatchClass | null, ask: boolean) => void) => (
+    <div className="cls-btns" role="group" aria-label={`Where ${what} goes`}>
       {CLASSES.map((k) => (
-        <button key={k} type="button" className={`cls-btn ${k} ${cls === k ? (chosen ? 'on' : 'now') : ''}`} aria-pressed={cls === k && chosen} disabled={busy}
-          title={cls === k ? (chosen ? `Checked as ${CLASS_NAME[k]} – click to check it again later` : `It is a ${CLASS_NAME[k].toLowerCase()} – click to confirm (checked)`)
-            : `Move it to ${CLASS_NAME[k]} – it is then checked, no need to check it again`}
-          onClick={() => (cls === k ? pick(chosen ? null : k, chosen) : pick(k, true))}>
-          {cls === k && chosen ? <CircleCheck size={14} /> : cls === k ? <Circle size={14} /> : <ArrowRight size={14} />}{CLASS_NAME[k]}</button>
+        <button key={k} type="button" className={`cls-btn ${k} ${cls === k ? 'on' : !cls && def === k ? 'now' : ''}`} aria-pressed={cls === k} disabled={busy}
+          title={cls === k ? `In ${CLASS_NAME[k]} – click to check it again (back to To check)` : `${!cls && def === k ? 'Suggested – ' : ''}${CLASS_EFFECT[k]}`}
+          onClick={() => (cls === k ? pick(null, true) : pick(k, !!cls || k === 'deleted'))}>
+          {cls === k ? <CircleCheck size={14} /> : k === 'deleted' ? <Trash2 size={14} /> : !cls && def === k ? <Circle size={14} /> : <ArrowRight size={14} />}{CLASS_BTN[k]}</button>
       ))}
     </div>
   )
-  const groupBtns = (g: Group) => classBtns(rowsLabel(g), g.cls, g.chosen, (to, ask) => {
+  const groupBtns = (g: Group) => classBtns(rowsLabel(g), g.cls, g.def, (to, ask) => {
     if (ask) setMoving({ g, to })
-    else { set((q) => chooseClass(q, d, g, to)); toast(`${rowsLabel(g)} checked as ${CLASS_NAME[to!]}`, 'good') }
+    else move({ g, to })
   })
-  const soloBtns = (x: Solo) => classBtns(`“${value(x.r.fields.Title)}”`, x.cls, x.chosen, (to, ask) => {
+  const soloBtns = (x: Solo) => classBtns(`“${value(x.r.fields.Title)}”`, x.cls, x.def, (to, ask) => {
     if (ask) setMoving({ x, to })
-    else { set((q) => chooseSoloClass(q, d, x, to)); toast(`“${value(x.r.fields.Title)}” checked as ${CLASS_NAME[to!]}`, 'good') }
+    else move({ x, to })
   })
 
   // ---- not a match: a row of its own, or onto another song – saved at once, with the queue. One answer never takes
@@ -692,18 +743,21 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
     if (ok) toast(`“${cs[0].title}”${cs.length > 1 ? ` and ${cs.length - 1} more song${cs.length > 2 ? 's' : ''}` : ''} deleted – under “Deleted songs” now, from where it maps back`, 'good')
   }
   const songsOf = (g: Group) => g.entries.map((e) => e.c).filter((c, i, cs) => cs.findIndex((x) => x.id === c.id) === i)
-  /** Check every exact match not checked yet, where it is. */
-  const checkAll = (gs: Group[]) => { set((q) => gs.reduce((acc, g) => chooseClass(acc, d, g, 'exact'), q)); toast(`${n(gs.length)} exact matches checked`, 'good') }
+  /** Every match to check with the main version's ISRC into Original, in LNV row order (the first one is the row). */
+  const allOriginal = (gs: Group[]) => { set((q) => gs.reduce((acc, g) => chooseClass(acc, d, g, 'exact'), q)); toast(`${n(gs.length)} matches put in Original – one row in the LNV`, 'good') }
 
   const hintOf = (g: Group) => {
     const e = g.entries[0]
     const part = g.entries.length > 1 ? g.entries.filter((x) => ticked(p, x)).length : 0
     const of = part && part < g.entries.length ? ` · ${part} of ${g.entries.length} recordings ticked` : ''
-    if (g.chosen) return g.cls !== g.def ? `Checked by you – moved here from ${CLASS_NAME[g.def]}` : 'Checked by you'
-    if (gLocked(g)) return g.cls === 'exact' ? 'Same ISRC as the main version – choose what the LNV keeps, then Exact match' : 'Linked by the app – check it with one of the buttons'
+    if (g.chosen) return g.cls === 'exact' ? (keepG?.key === g.key ? 'The song’s row in the LNV – the first one put in Original' : `Merged into LNV row ${keepG?.rows[0]} – its title goes into the Alternative work name`)
+      : g.cls === 'deleted' ? 'Deleted – out of the LNV' : 'Checked by you – a row of its own'
     if (e.v?.taken) return `LNV row ${e.row} was given to ${e.v.taken} – check it only if it is this one too, else “Not a match”` + of
-    if (e.v) return (e.v.answer === 'same' ? 'Ticked by you' : `A version the LNV has – the app matched it${e.v.isrc ? ' by its ISRC' : ''}`) + of
-    if (savedLinks(e.c).includes(e.row)) return 'Ticked by you' + of
+    const before = (e.v ? e.v.answer === 'same' : savedLinks(e.c).includes(e.row) && e.c.answer.by === 'you') ? ' · ticked before – choose its section' : ''
+    if (g.def === 'exact') return 'Suggested: Original – the main version’s ISRC' + before + of
+    if (g.def === 'version') return 'Suggested: Other version – a version the LNV has' + before + of
+    if (before) return before.slice(3) + of
+    if (e.v) return `A version the LNV has – the app matched it${e.v.isrc ? ' by its ISRC' : ''}` + of
     if (e.c.answer.choice === 'same' && (e.c.answer.rows ?? []).includes(e.row)) return 'The app says it is this row – check it with a button' + of
     if (e.c.answer.choice === 'add') return 'The app would add it as a new row – check it if it is this LNV row' + of
     return of.replace(/^ · /, '')
@@ -726,14 +780,8 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
       </div>
     ) : <button type="button" className="rv-text-btn nm-open" onClick={() => setAsking(g.key)}><X size={14} />Not {what}</button>
   }
-  /** A match's answers: "Not a match" (a new row, or mapped onto another song) and, on its own, Delete. */
-  const actions = (g: Group, what: string) => (
-    <div className="fx-acts">
-      {notMatch(g, what)}
-      <button type="button" className="btn sm danger del-btn" disabled={busy} onClick={() => setDeleting(songsOf(g))}
-        title={`Delete “${g.entries[0].c.title}” – nothing of it goes into the LNV; it is listed under Deleted songs, from where it maps back`}><Trash2 size={14} />Delete song</button>
-    </div>
-  )
+  /** A match's other answer: "Not a match" – a new row, mapped onto another song, or only this row is not it. */
+  const actions = (g: Group, what: string) => <div className="fx-acts">{notMatch(g, what)}</div>
   /** What a match has in common with the song – the ISRC first, then the singer, then the production (label) – and, for
    *  an LNV row the app matched, its own marks. */
   const factsLine = (g: Group) => {
@@ -782,11 +830,12 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
   const rowBtn = (row: number) => <button key={row} type="button" className="cv-badge lnv cv-rowbtn" onClick={() => setOpenedRow(row)} title="See this LNV row">LNV row {row}<ChevronRight size={14} /></button>
   type Across = ReturnType<typeof useAcross>
 
-  /** A section as one table scrolled across, against the main version on the left: Exact match – the one row the LNV
-   *  gets (its values chosen), then each LNV row and recording merged into it; Possible match and Other version – each
-   *  recording beside the LNV row it matches (what the LNV keeps chosen on the row), and the recordings beside none.
-   *  Under each match its three buttons; a match turned down stays in its place, answered. */
-  const table = (kind: MatchClass, cols: Col[], sc: Across) => {
+  /** A table scrolled across, against the main version on the left: To check – every match not checked yet, each LNV
+   *  row with its recording's values under it; Original – the one row the LNV gets (its values chosen), then each LNV
+   *  row and recording merged into it, in the order they were put there; Other version – each recording beside the LNV
+   *  row it matches (what the LNV keeps chosen on the row), and the recordings beside none. Under each match its three
+   *  buttons. */
+  const table = (kind: Kind, cols: Col[], sc: Across) => {
     const lnvCell = (g: Group, fl: string) => {
       if (fl === 'Title') return (
         <td key={g.key} className={`fx-t ${mark(fl, [titleFinal(g)], g.lnv) ? 'fx-dm' : ''}`}>{titlePick(g.trs.map((r) => r.id), () => mapCard(g))}<MusoLine recs={g.trs} fl={fl} source={source} open={openRec} /></td>)
@@ -794,7 +843,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
       return (
         <td key={g.key} className={`${mark(fl, fc.now, g.lnv) ? 'fx-dm' : ''} ${fl === 'ISRC' ? 'mono' : ''}`}>
           <FieldChoice key={`${fl}-${JSON.stringify(pickOf(pickKey(g.rows[0], fl)) ?? null)}`} fl={fl} fc={fc} source={source} pick={(v) => choosePick(g, fl, v)} text={g.lnv.isrc_text} />
-          {fl !== 'Alternate title' && kind === 'exact' && <MusoLine recs={g.recs} fl={fl} source={source} open={openRec} />}
+          {fl !== 'Alternate title' && kind !== 'version' && <MusoLine recs={g.recs} fl={fl} source={source} open={openRec} />}
         </td>
       )
     }
@@ -818,7 +867,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
       <td key={key} className={`fx-mc ${mark(fl, shownOf(r, fl), r) ? 'fx-dm' : ''} ${fl === 'ISRC' ? 'mono' : ''} ${fl === 'Title' ? 'fx-t' : ''}`}>
         {fl === 'Alternate title' ? <span className="muted">—</span> : <Listed r={r} fl={fl} source={source} />}</td>
     )
-    const cell = (c: Col, fl: string) => c.kind === 'merged' ? mergedCell(c.g, fl) : c.kind === 'lnv' ? (kind === 'exact' ? srcCell(c.g, fl) : lnvCell(c.g, fl))
+    const cell = (c: Col, fl: string) => c.kind === 'merged' ? mergedCell(c.g, fl) : c.kind === 'lnv' ? (kind !== 'version' ? srcCell(c.g, fl) : lnvCell(c.g, fl))
       : c.kind === 'muso' ? musoCell(c.r, c.key, fl) : <OutCell key={c.key} o={c.o} fl={fl} source={source} />
     return (
     <div className={`fx-wrap ${sc.end && sc.start ? '' : 'can'}`} ref={sc.ref} onScroll={sc.measure} onPointerDown={sc.down}>
@@ -830,22 +879,23 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
             {cols.map((c) => c.kind === 'merged' ? (
               <th key={c.key} className="fx-col fx-merged">
                 <span className="cv-badge keep">Goes into the LNV · one row</span>
-                <span className="gr-rows">{rowBtn(c.g.rows[0])}{goneG.length > 0 && <small className="muted">+ {exactRows(goneG).join(', ')} merged</small>}
-                  {waitG.length > 0 && <small className="muted" title="Check them as Exact match: they are then merged into this row">{exactRows(waitG).join(', ')} once checked</small>}</span>
-                <small className="fx-merged-why">Every exact match is one row: choose its title and each value – the other titles go into the Alternative work name.</small>
+                <span className="gr-rows">{rowBtn(c.g.rows[0])}{goneG.length > 0 && <small className="muted">+ {exactRows(goneG).join(', ')} merged</small>}</span>
+                <small className="fx-merged-why">The first match put in Original is the song’s row: choose its title and each value – the titles of the others go into the Alternative work name.</small>
               </th>
             ) : c.kind === 'lnv' ? (
               <th key={c.key} className={`fx-col ${gChecked(p, c.g) ? 'on' : ''}`}>
+                {kind === 'exact' && <span className={`fx-order ${c.g.key === keepG?.key ? 'first' : ''}`}>{c.g.key === keepG?.key ? '1st · the song’s row' : `${ordinal(f.exact.indexOf(c.g) + 1)} · Alternative work name`}</span>}
                 <span className="gr-rows">{c.g.rows.map(rowBtn)}{stateOf(c.g)}</span>
                 {c.g.rows.length > 1 && <small className="gr-same">The same data in each of these rows</small>}
                 {recsLine(c.g, 'fx-rec')}
                 {checksOf(c.g)}
                 {joinedOf(c.g)}
-                {kind !== 'exact' && c.g.rows.filter((row) => exactAt.has(row)).map((row) => (
+                {kind === 'version' && c.g.rows.filter((row) => exactAt.has(row)).map((row) => (
                   <p key={row} className="pc-warn">LNV row {row} is already the exact match of “{exactAt.get(row)}” – check it is this song.</p>))}
               </th>
             ) : c.kind === 'muso' ? (
               <th key={c.key} className={`fx-col fx-mcol ${c.solo?.chosen ? 'on' : ''}`}>
+                {kind === 'exact' && c.solo && <span className="fx-order">{keepG ? 'Into the song’s row' : solosIn('exact')[0]?.key === c.solo.key ? '1st · a new row, the song’s' : 'Alternative work name'}</span>}
                 <button type="button" className="cv-badge muso cv-rowbtn" onClick={() => openRec(c.r)} title={`Everything ${source} holds for it`}>{source} · {c.r.version ?? 'Original'}<ChevronRight size={14} /></button>
                 <button type="button" className="fx-rec" onClick={() => openRec(c.r)}>{value(c.r.fields.Title)}</button>
                 {c.rows.length ? <span className="gr-rows fx-to" title={`This ${source} recording matches these LNV rows – a change to it is offered to them too`}>
@@ -876,7 +926,7 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
             {cols.map((c) => {
               if (c.kind === 'out') return <OutCell key={c.key} o={c.o} fl="Link" source={source} />
               if (c.kind === 'muso') return <td key={c.key}><MusoField r={c.r} f="Link">{hasLink([c.r]) ? <Links urls={[c.r.link]} /> : <span className="muted">—</span>}</MusoField></td>
-              if (c.kind === 'lnv' && kind === 'exact') return <td key={c.key} className="fx-src">{list(c.g.lnv.fields.Link).length ? <Links urls={list(c.g.lnv.fields.Link)} /> : <span className="muted">—</span>}</td>
+              if (c.kind === 'lnv' && kind !== 'version') return <td key={c.key} className="fx-src">{list(c.g.lnv.fields.Link).length ? <Links urls={list(c.g.lnv.fields.Link)} /> : <span className="muted">—</span>}</td>
               const g = c.kind === 'merged' ? merged! : c.g
               const fc = choicesOf(g, 'Link', c.kind === 'merged' ? mergedRows : [])
               return <td key={c.key} className={c.kind === 'merged' ? 'fx-merged' : ''}><FieldChoice key={`Link-${JSON.stringify(pickOf(pickKey(c.g.rows[0], 'Link')) ?? null)}`} fl="Link" fc={fc} source={source} pick={(v) => choosePick(c.g, 'Link', v)} />
@@ -891,20 +941,20 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
               {cols.map((c) => c.kind === 'lnv' ? <td key={c.key}><RemarkPick d={d} now={remarkOf(d, c.g.recs)} busy={busy} pick={(r) => void setRemark(c.g.recs, r)} /></td> : <td key={c.key} className="fx-out" />)}
             </tr>
           )}
-          {/* the answer, one row each: the three sections, then "not a match" and delete */}
+          {/* the answer, one row each: Original · Other version · Delete, then "not a match" */}
           <tr className="fx-yes">
-            <th className="fx-f">Which section?</th>
+            <th className="fx-f">{kind === 'todo' ? 'Where does it go?' : 'Section'}</th>
             <td className="fx-main" />
             {cols.map((c) => c.kind === 'lnv' ? <td key={c.key} className={gChecked(p, c.g) ? 'on' : ''}>{groupBtns(c.g)}{hintOf(c.g) && <small className="fx-hint">{hintOf(c.g)}</small>}</td>
-              : c.kind === 'muso' && c.solo ? <td key={c.key} className={c.solo.chosen ? 'on' : ''}>{soloBtns(c.solo)}<small className="fx-hint">{c.solo.chosen ? (c.solo.cls !== c.solo.def ? `Checked by you – moved here from ${CLASS_NAME[c.solo.def]}` : 'Checked by you') : 'A version the LNV lacks – it gets a row of its own'}</small></td>
+              : c.kind === 'muso' && c.solo ? <td key={c.key} className={c.solo.chosen ? 'on' : ''}>{soloBtns(c.solo)}<small className="fx-hint">{c.solo.chosen ? (c.solo.cls === 'exact' ? (keepG ? `Into LNV row ${keepG.rows[0]} – its title in the Alternative work name` : 'In Original – no LNV row there: the first recording put there is the new row') : 'Checked by you – a new row') : 'A version the LNV lacks – suggested: Other version (a new row)'}</small></td>
               : c.kind === 'muso' ? <td key={c.key} className="fx-out"><small className="muted">Answered under {c.rows.length > 1 ? 'its LNV rows' : `LNV row ${c.rows[0]}`} →</small></td>
-              : c.kind === 'merged' ? <td key={c.key} className="fx-merged"><small className="fx-hint">LNV row {c.g.rows[0]} stays{goneG.length ? `; row${goneG.length > 1 ? 's' : ''} ${exactRows(goneG).join(', ')} merged into it – out of the file` : ''}{waitG.length ? `; row${waitG.length > 1 ? 's' : ''} ${exactRows(waitG).join(', ')} join${waitG.length > 1 ? '' : 's'} it once checked as Exact match` : ''}.</small></td>
+              : c.kind === 'merged' ? <td key={c.key} className="fx-merged"><small className="fx-hint">LNV row {c.g.rows[0]} is the song’s row{goneG.length ? `; row${goneG.length > 1 ? 's' : ''} ${exactRows(goneG).join(', ')} merged into it – out of the file` : ''}.</small></td>
               : <td key={c.key} className="fx-out"><b className="fx-out-why">{c.o.text}</b></td>)}
           </tr>
           <tr className="fx-act">
             <th className="fx-f" />
             <td className="fx-main" />
-            {cols.map((c) => c.kind === 'lnv' ? <td key={c.key}>{actions(c.g, kind === 'exact' ? 'an exact match' : kind === 'version' ? 'this version' : 'a possible match')}</td>
+            {cols.map((c) => c.kind === 'lnv' ? <td key={c.key}>{actions(c.g, kind === 'version' ? 'this version' : 'this song')}</td>
               : c.kind === 'out' ? <td key={c.key} className="fx-out"><button type="button" className="btn sm" disabled={busy} onClick={() => void putBack(c.o)} title="Take this answer back – the match is to check again"><Undo2 size={14} />Put back</button></td>
               : <td key={c.key} className="fx-out" />)}
           </tr>
@@ -913,30 +963,28 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
     </div>
     )
   }
-  /** The columns of a section. Exact: the one row, then its rows and recordings. Possible / Other version: each
-   *  recording next to the LNV row it matches, then the recordings beside none. */
-  const colsOf = (kind: MatchClass): Col[] => {
-    const gs = kind === 'exact' ? f.exact : kind === 'possible' ? f.possible : f.version ?? []
-    const outs = kind === 'version' ? [] : f.out.filter((o) => o.match === kind)
+  /** The columns of a table. To check: each LNV row, then the recordings beside none. Original: the one row, then its
+   *  rows and recordings in the order they were put there. Other version: each recording next to the LNV row it
+   *  matches, then the recordings beside none. */
+  const colsOf = (kind: Kind): Col[] => {
+    const gs = kind === 'todo' ? f.todo : kind === 'exact' ? f.exact : f.version
     const out: Col[] = []
     if (kind === 'exact' && keepG) out.push({ kind: 'merged', key: 'merged', g: keepG, at: -1 })
     const shown = new Set<number>()
     for (const g of gs) {
-      if (kind !== 'exact') for (const r of g.recs) if (r.id != null && r.id !== main.id && !shown.has(r.id)) {
+      if (kind === 'version') for (const r of g.recs) if (r.id != null && r.id !== main.id && !shown.has(r.id)) {
         shown.add(r.id)
         out.push({ kind: 'muso', key: `m:${g.key}:${r.id}`, r, rows: [...new Set(gs.filter((x) => x.recs.some((y) => y.id === r.id)).flatMap((x) => x.rows))].sort((a, b) => a - b), at: g.rows[0] })
       }
       out.push({ kind: 'lnv', key: g.key, g, at: g.rows[0] })
     }
-    solosIn(kind).forEach((x) => out.push({ kind: 'muso', key: x.key, r: x.r, rows: [], solo: x, at: Number.MAX_SAFE_INTEGER }))
-    outs.forEach((o) => out.push({ kind: 'out', key: o.key, o, at: o.rows[0] }))
-    // the turned-down ones where they were, in LNV row order
-    return kind === 'exact' ? out : out.sort((a, b) => (a.kind === 'merged' ? -1 : b.kind === 'merged' ? 1 : 0) || (a.at - b.at) || (a.kind === 'muso' ? -1 : 1))
+    solosIn(kind === 'todo' ? null : kind).forEach((x) => out.push({ kind: 'muso', key: x.key, r: x.r, rows: [], solo: x, at: Number.MAX_SAFE_INTEGER }))
+    return kind === 'version' ? out.sort((a, b) => (a.at - b.at) || (a.kind === 'muso' ? -1 : 1)) : out
   }
 
-  /** Possible match and Other version as cards one below another (Y): each recording beside its LNV row. */
-  const cardsOf = (kind: MatchClass) => {
-    const gs = kind === 'possible' ? f.possible : f.version ?? []
+  /** Other version as cards one below another (Y): each recording beside its LNV row. */
+  const cardsOf = () => {
+    const gs = f.version, kind = 'version' as const
     return (
       <div className="pc-list y">
       {gs.map((g) => {
@@ -984,8 +1032,8 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
                 {hasRemark(g.recs) && <tr><th>Remark</th><td colSpan={2}><RemarkPick d={d} now={remarkOf(d, g.recs)} busy={busy} pick={(r) => void setRemark(g.recs, r)} /></td></tr>}
                 <tr className="pc-link"><th>Link</th><td>{g.recs.length === 1 ? <MusoField r={g.recs[0]} f="Link">{hasLink(g.recs) ? <Links urls={[g.recs[0].link]} /> : <span className="muted">—</span>}</MusoField> : <Links urls={g.recs.map((r) => r.link)} />}</td>
                   <td><FieldChoice key={`Link-${JSON.stringify(pickOf(pickKey(g.rows[0], 'Link')) ?? null)}`} fl="Link" fc={choicesOf(g, 'Link')} source={source} pick={(v) => choosePick(g, 'Link', v)} /></td></tr>
-                <tr className="pc-yes"><th>Which section?</th><td colSpan={2} className={on ? 'on' : ''}>{groupBtns(g)}{hintOf(g) && <small className="fx-hint">{hintOf(g)}</small>}</td></tr>
-                <tr className="pc-act"><th /><td colSpan={2}>{actions(g, kind === 'version' ? 'this version' : 'a possible match')}</td></tr>
+                <tr className="pc-yes"><th>Section</th><td colSpan={2} className={on ? 'on' : ''}>{groupBtns(g)}{hintOf(g) && <small className="fx-hint">{hintOf(g)}</small>}</td></tr>
+                <tr className="pc-act"><th /><td colSpan={2}>{actions(g, 'this version')}</td></tr>
               </tbody>
             </table>
           </article>
@@ -1001,30 +1049,100 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
           <div className="pc-solo-btns">{soloBtns(x)}</div>
         </article>
       ))}
-      {kind === 'possible' && f.out.filter((o) => o.match === 'possible').map((o) => (
+      </div>
+    )
+  }
+  /** The matches deleted (out of the LNV) and the ones answered "not a match": each with its Put back. */
+  const deletedList = () => (
+    <div className="pc-list y">
+      {f.deleted.map((g) => (
+        <article key={g.key} className="pc out del">
+          <header className="pc-head"><div className="pc-pair"><span className="cv-badge lnv">LNV</span><b className="pc-title">{value(g.lnv.fields.Title)}</b>{g.rows.map(rowBtn)}
+            <span className="muted">{source}: {value(g.recs[0]?.fields.Title)}</span><span className="st out"><Trash2 size={13} />Deleted</span></div></header>
+          <div className="pc-out"><b className="fx-out-why">Out of the LNV – the row is left out of the downloaded file</b><span className="muted">{[value(g.lnv.fields['Film / album']), value(g.lnv.fields.Year), list(g.lnv.fields.ISRC).join(' | ')].filter(Boolean).join(' · ')}</span>
+            {groupBtns(g)}</div>
+        </article>))}
+      {solosIn('deleted').map((x) => (
+        <article key={x.key} className="pc out del">
+          <header className="pc-head"><div className="pc-pair"><span className="cv-badge muso">{source} · {x.r.version ?? 'Version'}</span><button type="button" className="pc-title" onClick={() => openRec(x.r)}>{value(x.r.fields.Title)}</button>
+            <span className="muted">beside no LNV row</span><span className="st out"><Trash2 size={13} />Deleted</span></div></header>
+          <div className="pc-out"><b className="fx-out-why">Gets no row in the LNV</b><span className="muted">{[value(x.r.fields['Film / album']), value(x.r.fields.Year), list(x.r.fields.ISRC).join(' | ')].filter(Boolean).join(' · ')}</span>
+            {soloBtns(x)}</div>
+        </article>))}
+    </div>
+  )
+  const outList = () => (
+    <div className="pc-list y">
+      {f.out.map((o) => (
         <article key={o.key} className="pc out">
           <header className="pc-head"><div className="pc-pair"><span className="cv-badge muso">{source}</span><b className="pc-title">{value(o.recs[0]?.fields.Title)}</b><ArrowRight size={16} className="muted" />
             {o.rows.map(rowBtn)}<span className="st out"><X size={13} />Not a match</span></div></header>
           <div className="pc-out"><b className="fx-out-why">{o.text}</b><span className="muted">{[value(o.lnv.fields.Title), value(o.lnv.fields['Film / album']), value(o.lnv.fields.Year)].filter(Boolean).join(' · ')}</span>
             <button type="button" className="btn sm" disabled={busy} onClick={() => void putBack(o)} title="Take this answer back – the match is to check again"><Undo2 size={14} />Put back</button></div>
         </article>))}
-      </div>
-    )
+    </div>
+  )
+
+  // ---- how the song looks in the LNV: its rows as the download writes them, each value editable there
+  const linesOf = (rs: CaseRecord[]) => rs.flatMap((r) => (r.id != null && lines.get(r.id)) || [])
+  const rowPreview = (g: Group, label: string, tone: PreviewRow['tone'], note: string): PreviewRow => {
+    const one = g.key === keepG?.key
+    return { key: g.key, label, tone, note, cells: Object.fromEntries(PREVIEW_FIELDS.map((fl) => {
+      if (fl === 'Title') return [fl, { v: [titleFinal(g)], edit: (v: string[]) => chooseTitle(linesOf(g.trs), 'custom', v.join(', ')) }]
+      const fc = one ? choicesOf(merged!, fl, mergedRows, mergedAlt) : choicesOf(g, fl)
+      // the Original's one row: the ISRCs of the rows and recordings merged into it join its ISRC cell (unless chosen)
+      const v = one && fl === 'ISRC' && pickOf(pickKey(g.rows[0], fl)) == null && !g.lnv.isrc_text
+        ? [...new Set([...fc.now, ...goneG.flatMap((x) => list(x.lnv.fields.ISRC)), ...solosIn('exact').flatMap((x) => list(x.r.fields.ISRC))])] : fc.now
+      return [fl, { v, edit: (x: string[]) => choosePick(g, fl, x) }]
+    })) }
   }
+  const recPreview = (r: CaseRecord, label: string, tone: PreviewRow['tone'], note: string, alt = ''): PreviewRow => {
+    const l = r.id != null ? lines.get(r.id) : undefined
+    return { key: `r:${r.id}`, label, tone, note, cells: Object.fromEntries(PREVIEW_FIELDS.map((fl) => fl === 'Title'
+      ? [fl, { v: [l ? finalOf(l) : value(r.fields.Title)], edit: l ? (v: string[]) => chooseTitle([l], 'custom', v.join(', ')) : undefined }]
+      : fl === 'Alternate title' ? [fl, { v: alt ? [alt] : [] }]
+        : [fl, { v: fl === 'Link' ? (r.link ? [r.link] : []) : shownOf(r, fl), edit: (v: string[]) => editing.save(r, fl, v) }])) }
+  }
+  const leadSolo = keepG ? undefined : solosIn('exact')[0]
+  const merges = [...goneG.map(rowsLabel), ...solosIn('exact').filter((x) => x !== leadSolo).map((x) => `“${value(x.r.fields.Title)}”`)]
+  const previewRows: PreviewRow[] = [
+    ...(keepG ? [rowPreview(keepG, rowsLabel(keepG).replace(/, .*/, ''), 'keep', merges.length ? `Original · ${merges.join(', ')} merged into it` : 'Original')]
+      : leadSolo ? [recPreview(leadSolo.r, 'New row', 'keep', merges.length ? `Original · ${merges.join(', ')} merged into it` : 'Original',
+        solosIn('exact').slice(1).map((x) => value(x.r.fields.Title)).join(' | '))] : []),
+    ...f.version.map((g) => rowPreview(g, rowsLabel(g), 'version', 'Other version')),
+    ...solosIn('version').map((x) => recPreview(x.r, 'New row', 'new', `Other version · ${x.r.version ?? 'version'}`)),
+  ]
+  /** The rows the song's answers leave out of the LNV. */
+  const leftOut = [...goneG.map((g) => `${rowsLabel(g)} – merged into LNV row ${keepG!.rows[0]}`), ...f.deleted.map((g) => `${rowsLabel(g)} – deleted`),
+    ...solosIn('deleted').map((x) => `“${value(x.r.fields.Title)}” – deleted, no row`)]
 
   // what "Delete" takes out: every LNV row the songs are matched to – not only the match it was pressed on
   const delRows = deleting ? [...new Set(cards.filter((g) => g.entries.some((e) => deleting.some((c) => c.id === e.c.id))).flatMap((g) => g.rows))].sort((a, b) => a - b) : []
-  const exactOpen = f.exact.filter((g) => !gChecked(p, g))
-  const prog = progressOf(p, f)
+  const suggested = f.todo.filter((g) => g.def === 'exact')
+  const prog = progressOf(p, f, completed ? [familyKey(f)] : [])
   const todo = prog.left
-  // the last match answered: said once, since the song now leaves the list of songs left to check
+  // the last match checked: said once – and the song's preview in the LNV opens, to save it to the LNV
   const before = useRef(todo)
   useEffect(() => {
-    if (before.current > 0 && !todo && prog.total > 1) toast(`All ${prog.total} matches of “${f.title}” are checked – the song moves to “All checked”`, 'good')
+    if (before.current > 0 && !todo && prog.total > 0) {
+      toast(`All ${prog.total} matches of “${f.title}” are checked – see how it looks in the LNV, then save it`, 'good')
+      if (!completed) setPreviewing(true)
+    }
     before.current = todo
   }, [todo])   // eslint-disable-line react-hooks/exhaustive-deps
-  const counts: [MatchClass, number][] = [['exact', f.exact.length + solosIn('exact').length], ['possible', f.possible.length + solosIn('possible').length], ['version', (f.version ?? []).length + solosIn('version').length]]
-  const none = (k: MatchClass) => !colsOf(k).some((c) => c.kind !== 'merged')
+  const open = openOf(p, f)
+  const counts: [Kind | 'deleted', string, number][] = [['todo', 'To check', open.todo], ['exact', 'Original', open.exact], ['version', 'Other version', open.version], ['deleted', 'Deleted', open.deleted]]
+  const none = (k: Kind) => !colsOf(k).some((c) => c.kind !== 'merged')
+  /** Saved to the LNV: the song is marked completed (its preview seen) – or taken back. */
+  const markComplete = async (on: boolean) => {
+    setBusy(true)
+    const ok = await commit([{ key: completeKey(f), choice: on ? 'yes' : null,
+      log: { group: completeKey(f), songs: [{ key: f.id, title: f.title }], text: on ? `“${f.title}” saved to the LNV – completed` : `“${f.title}”: completed taken back` } }])
+    setBusy(false)
+    if (!ok) return
+    toast(on ? `“${f.title}” is saved to the LNV – completed. Preview in LNV shows it again any time` : `“${f.title}” is not completed any more`, 'good')
+    if (on) setPreviewing(false)
+  }
   /** The section's head: its name and count, what it means, and the X / Y choice for the two that scroll either way. */
   const axisBtns = (
     <span className="axis" role="group" aria-label="How the possible matches and other versions scroll">
@@ -1048,12 +1166,12 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
           {wideBtn}
         </div>
         <div className="fam-counts">
-          {counts.map(([k, x]) => <a key={k} href={`#fam-${k}`} className={`fam-count ${k}`}>{CLASS_NAME[k]} : <b>{n(x)}</b></a>)}
+          {counts.map(([k, label, x]) => <a key={k} href={`#fam-${k}`} className={`fam-count ${k === 'todo' ? (x ? 'todo' : 'checked') : k}`}>{label} : <b>{n(x)}</b></a>)}
           <span className="fam-count checked">Checked : <b>{n(checkedIn(p, f))}</b></span>
-          {f.out.length > 0 && <span className="fam-count gone" title="Matches you said are not this song – they stay on screen until every match is checked">Not a match : <b>{n(f.out.length)}</b></span>}
-          <span className={`fam-count ${todo ? 'todo' : 'checked'}`}>To check : <b>{n(todo)}</b></span>
+          {f.out.length > 0 && <a href="#fam-out" className="fam-count gone" title="Matches you said are not this song">Not a match : <b>{n(f.out.length)}</b></a>}
           {f.cases.length > 1 && <span className="muted" title={`${n(f.cases.length)} ${source} songs under this name`}>{n(f.cases.length)} {source} songs</span>}
           <span className="grow" />
+          <button type="button" className={`btn sm ${!todo && !completed ? 'primary' : ''}`} onClick={() => setPreviewing(true)} title="How this song looks in the downloaded LNV – change a value there, then save it to the LNV"><Eye size={14} />Preview in LNV</button>
           <button type="button" className="btn sm" disabled={busy} onClick={() => setAdding({})} title="Add a song to this one – from the sheets, or typed"><Plus size={14} />Add a song</button>
           <button type="button" className="btn sm" onClick={() => showUndo(f.id)} title="The changes made to this song – undo any of them"><Undo2 size={14} />Undo</button>
           <button type="button" className="btn sm danger fam-del" disabled={busy} onClick={() => setDeleting(f.cases)}
@@ -1081,43 +1199,66 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
           </dl>}
         </section>
 
-        <Guide id="family-v18" title="How to check a song" steps={[
-          <>On top: the song's <b>main version</b> – the oldest {source} recording with no remix, lofi or other tag. Everything is compared with it; what differs is yellow.</>,
-          <><b>Exact match</b>: the LNV rows with the main version's <b>ISRC</b> (whatever their title or singer). They become <b>one row</b> in the LNV: choose its title and each value in <b>Goes into the LNV</b> – the other titles go into the Alternative work name.</>,
-          <><b>Possible match</b>: another ISRC – each {source} recording next to its LNV row. <b>Other version</b>: the song's remixes, lofis … Pick what the LNV keeps.</>,
-          <>Under each match: <b>Exact match · Possible match · Other version</b>. The lit one checks it where it is; another one moves it there (you are asked first) – checked, no need to check it again.</>,
-          <>A correction to a {source} recording that matches an LNV row is offered to that row too. Changes save by themselves; <b>Save</b> at the top saves them at once.</>,
+        <Guide id="family-v20" title="How to check a song" steps={[
+          <>On top: the song's <b>main version</b> – the oldest {source} recording with no remix, lofi or other tag. Every match is compared with it in <b>To check</b>; what differs is yellow.</>,
+          <>Under each match: <b>Original</b> (it is the song itself) · <b>Other version</b> (a remix, lofi …) · <b>Delete</b> (out of the LNV). The ringed button is the app's suggestion – the main version's ISRC is Original.</>,
+          <><b>Original</b> starts empty. The first match put there is the song's <b>one row</b> in the LNV; the titles of the ones put there after it go into its Alternative work name (with a | between them), their ISRCs into its ISRC cell.</>,
+          <><b>Other version</b>: a row of its own each, right under the Original – the LNV row stays a row, a {source} recording beside no LNV row gets a new row. Pick what the LNV keeps.</>,
+          <>Each match checked adds to <b>Checked</b>. When none is left to check, <b>Preview in LNV</b> opens: change what needs changing, then <b>Save to LNV</b> – the song is completed. The preview opens again any time.</>,
         ]} />
 
-        <section className="fam-sec" id="fam-exact">
+        <section className="fam-sec todo" id="fam-todo">
           <header className="fam-sec-head">
             <div className="grow">
-              <h4>Exact match : {n(f.exact.length + solosIn('exact').length)}</h4>
-              <p>The LNV rows with the main version’s ISRC – the singer is shown, it never moves a match. All of them are one row in the LNV. Scroll across – drag the table, or use the ← → keys or buttons.</p>
+              <h4>To check : {n(open.todo)}</h4>
+              <p>Every match of the song not checked yet, against the main version on the left – each LNV row with its {source} recording’s values under it. Put each in <b>Original</b>, <b>Other version</b> or <b>Delete</b> it.</p>
+              <p className="fam-legend"><span><i className="fam-sw dm" />differs from the main version</span>
+                {d.ipi && <span><i className="fam-sw ipi" /><b>IPI List</b> – the member’s real name (PA) in the IPI / CAE list, which goes into the LNV</span>}</p>
             </div>
-            {!none('exact') && <Nav sc={across} what="exact matches" />}
-            {exactOpen.length > 1 && <button type="button" className="btn sm" onClick={() => checkAll(exactOpen)}><CheckCheck size={14} />Check all {n(exactOpen.length)}</button>}
+            {!none('todo') && <Nav sc={acrossT} what="matches to check" />}
+            {suggested.length > 1 && !f.exact.length && <button type="button" className="btn sm" disabled={busy} onClick={() => allOriginal(suggested)} title="Each match with the main version’s ISRC into Original – the first one (lowest LNV row) is the song’s row"><CheckCheck size={14} />All {n(suggested.length)} with the main version’s ISRC → Original</button>}
           </header>
-          {none('exact') ? <p className="cv-none">No exact match – no LNV row has the main version’s ISRC.</p> : table('exact', colsOf('exact'), across)}
+          {none('todo') ? <p className="cv-none">{prog.total ? <><CircleCheck size={15} /> Every match is checked{completed ? ' – the song is completed' : <> – <button type="button" className="rv-text-btn" onClick={() => setPreviewing(true)}>see it in the LNV and save it</button></>}.</> : 'No match for this song name.'}</p>
+            : table('todo', colsOf('todo'), acrossT)}
         </section>
 
-        {(['possible', 'version'] as const).map((k) => (
-          <section key={k} className="fam-sec" id={`fam-${k}`}>
-            <header className="fam-sec-head">
-              <div className="grow">
-                <h4>{CLASS_NAME[k]} : {n(k === 'possible' ? f.possible.length + solosIn(k).length : (f.version ?? []).length + solosIn(k).length)}</h4>
-                <p>{k === 'possible' ? `Another ISRC, but the same song by its title, album, year or writers. Each ${source} recording stands next to the LNV row it matches; pick what the LNV keeps.`
-                  : `The song's other versions – remix, lofi, unplugged … – against the main version: the ones the LNV has beside their row, the others beside none (each gets a row of its own).`}</p>
-                <p className="fam-legend"><span><i className="fam-sw dm" />differs from the main version</span>
-                  {d.ipi && <span><i className="fam-sw ipi" /><b>IPI List</b> – the member’s real name (PA) in the IPI / CAE list, which goes into the LNV</span>}</p>
-              </div>
-              {!none(k) && axis === 'x' && <Nav sc={k === 'possible' ? acrossP : acrossV} what={CLASS_NAME[k].toLowerCase()} />}
-              {!none(k) && axisBtns}
-            </header>
-            {none(k) ? <p className="cv-none">{k === 'possible' ? 'No possible match for this song name.' : 'No other version of this song.'}</p>
-              : axis === 'x' ? table(k, colsOf(k), k === 'possible' ? acrossP : acrossV) : cardsOf(k)}
+        <section className="fam-sec exact" id="fam-exact">
+          <header className="fam-sec-head">
+            <div className="grow">
+              <h4>Original : {n(open.exact)}</h4>
+              <p>The song itself – one row in the LNV. The first match put here is that row; the titles of the ones put here after it go into its Alternative work name, their ISRCs into its ISRC cell. Choose its title and each value in <b>Goes into the LNV</b>.</p>
+            </div>
+            {!none('exact') && <Nav sc={across} what="Original" />}
+          </header>
+          {none('exact') ? <p className="cv-none">Nothing here yet – press <b>Original</b> under a match above. The first one put here is the song’s row in the LNV.</p> : table('exact', colsOf('exact'), across)}
+        </section>
+
+        <section className="fam-sec version" id="fam-version">
+          <header className="fam-sec-head">
+            <div className="grow">
+              <h4>Other version : {n(open.version)}</h4>
+              <p>The song’s other versions – remix, lofi, unplugged … – each a row of its own right under the Original, the main version’s title beside it. Each {source} recording stands next to the LNV row it matches; pick what the LNV keeps. A recording beside no LNV row gets a new row.</p>
+            </div>
+            {!none('version') && axis === 'x' && <Nav sc={acrossV} what="other versions" />}
+            {!none('version') && axisBtns}
+          </header>
+          {none('version') ? <p className="cv-none">Nothing here yet – press <b>Other version</b> under a match above.</p>
+            : axis === 'x' ? table('version', colsOf('version'), acrossV) : cardsOf()}
+        </section>
+
+        {open.deleted > 0 && (
+          <section className="fam-sec deleted" id="fam-deleted">
+            <header className="fam-sec-head"><div className="grow"><h4>Deleted : {n(open.deleted)}</h4><p>Out of the LNV: the LNV row is left out of the downloaded file, a recording gets no row. Press the lit <b>Delete</b> to check it again.</p></div></header>
+            {deletedList()}
           </section>
-        ))}
+        )}
+
+        {f.out.length > 0 && (
+          <section className="fam-sec gone" id="fam-out">
+            <header className="fam-sec-head"><div className="grow"><h4>Not a match : {n(f.out.length)}</h4><p>Matches you said are not this song – a new row, mapped onto another song, or the row is another song’s.</p></div></header>
+            {outList()}
+          </section>
+        )}
 
         {f.typed.length > 0 && (
           <section className="fam-sec" id="fam-typed">
@@ -1166,14 +1307,20 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
         {delRows.length > 0 && <p>{delRows.length > 1 ? <>All its matches leave: <b>LNV rows {delRows.join(', ')}</b>.</> : <>Its match leaves: <b>LNV row {delRows[0]}</b>.</>} The LNV rows themselves stay in the LNV.</p>}
       </ConfirmDialog>
       {/* the second confirmation: a match moved to another section (or unchecked) */}
-      <ConfirmDialog open={!!moving} tone="primary" onCancel={() => setMoving(null)} onConfirm={() => { if (moving) move(moving) }}
-        confirmLabel={moving?.to ? `Move to ${CLASS_NAME[moving.to]}` : 'Check it again later'}
-        title={moving?.to ? `Move ${moving.g ? rowsLabel(moving.g) : `“${value(moving.x?.r.fields.Title)}”`} to ${CLASS_NAME[moving.to]}?` : 'Not checked any more?'}>
+      <ConfirmDialog open={!!moving} tone={moving?.to === 'deleted' ? 'danger' : 'primary'} onCancel={() => setMoving(null)} onConfirm={() => { if (moving) move(moving) }}
+        confirmLabel={moving?.to === 'deleted' ? 'Delete' : moving?.to ? `Move to ${CLASS_NAME[moving.to]}` : 'Check it again'}
+        title={moving?.to === 'deleted' ? `Delete ${moving.g ? rowsLabel(moving.g) : `“${value(moving.x?.r.fields.Title)}”`}?`
+          : moving?.to ? `Move ${moving.g ? rowsLabel(moving.g) : `“${value(moving.x?.r.fields.Title)}”`} to ${CLASS_NAME[moving.to]}?` : 'Check it again?'}>
         {moving?.to ? <>
-          <p>{moving.g ? <>“{value(moving.g.lnv.fields.Title)}” ({rowsLabel(moving.g)})</> : <>The {source} recording “{value(moving.x?.r.fields.Title)}”</>} moves from <b>{CLASS_NAME[(moving.g ?? moving.x)!.cls]}</b> to <b>{CLASS_NAME[moving.to]}</b> and is marked <b>checked</b> – no need to check it again. It stays editable there, and can be moved back.</p>
+          <p>{moving.g ? <>“{value(moving.g.lnv.fields.Title)}” ({rowsLabel(moving.g)})</> : <>The {source} recording “{value(moving.x?.r.fields.Title)}”</>}
+            {(moving.g ?? moving.x)!.cls ? <> moves from <b>{where((moving.g ?? moving.x)!.cls)}</b> to <b>{CLASS_NAME[moving.to]}</b></> : <> goes to <b>{CLASS_NAME[moving.to]}</b></>} and is marked <b>checked</b>. It can be put back any time.</p>
           <p className="muted">{CLASS_EFFECT[moving.to]}</p>
-        </> : <p>It goes back to <b>Left to check</b>, in the section the app puts it in{moving?.g && !gLocked(moving.g) ? ' – the values chosen for it go back to the LNV’s' : ''}.</p>}
+          {moving.to === 'exact' && moving.g && keepG && keepG.key !== moving.g.key && <p>LNV row {keepG.rows[0]} stays the song’s row: this one is merged into it, its title in the Alternative work name.</p>}
+          {moving.to !== 'exact' && moving.g && keepG?.key === moving.g.key && f.exact.length > 1 && <p>It is the song’s row now: LNV row {f.exact[1].rows[0]} becomes the song’s row instead.</p>}
+        </> : <p>It goes back to <b>To check</b>{moving?.g && !gLocked(moving.g) ? ' – the values chosen for it go back to the LNV’s' : ''}.</p>}
       </ConfirmDialog>
+      {previewing && <LnvPreview f={f} d={d} source={source} busy={busy} todo={todo} completed={completed} close={() => setPreviewing(false)} mark={(on) => void markComplete(on)}
+        rows={previewRows} mainTitle={keepG ? titleFinal(keepG) : finalOf(mainLine)} left={leftOut} prog={prog} />}
       {/* the same correction on the LNV row the recording matches: one row in the LNV, never two */}
       {syncing && (
         <div className="modal-backdrop" onClick={() => setSyncing(null)}>
@@ -1197,9 +1344,72 @@ export function FamilyView({ f, d, p, set, pos, total, prev, next, wideBtn, targ
   )
 }
 
-/** How far a song name is: Left to check · Partly checked 4 of 6 · All checked. */
+/** 2nd, 3rd, 4th … */
+const ordinal = (k: number) => `${k}${k % 100 >= 11 && k % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][k % 10] ?? 'th'}`
+
+/** One row the song gets in the LNV (the preview): where it comes from, and each field's value – editable where it can be. */
+type PreviewRow = { key: string; label: string; tone: 'keep' | 'version' | 'new'; note: string; cells: Record<string, { v: string[]; edit?: (v: string[]) => void }> }
+const PREVIEW_FIELDS = ['Title', 'Alternate title', 'Film / album', 'Lyricist', 'Composer', 'Publisher', 'Singer', 'ISRC', 'Year', 'Release date', 'Link']
+
+/** How a song looks in the downloaded LNV once checked: its Original row, a row for each other version, what is left
+ *  out – each value changed in place (it is saved like any other choice) – and "Save to LNV", which marks the song
+ *  completed. It opens by itself once every match is checked, and again from "Preview in LNV" any time. */
+function LnvPreview({ f, source, busy, todo, completed, close, mark, rows, mainTitle, left, prog }: {
+  f: Family; d: Step1; source: string; busy: boolean; todo: number; completed: boolean; close: () => void; mark: (on: boolean) => void
+  rows: PreviewRow[]; mainTitle: string; left: string[]; prog: { status: Status; done: number; total: number }
+}) {
+  useKeys({ escape: close })
+  return (
+    <div className="modal-backdrop" onClick={close}>
+      <div className="modal lp" role="dialog" aria-modal="true" aria-label={`“${f.title}” in the LNV`} onClick={(e) => e.stopPropagation()}>
+        <header className="lp-head">
+          <div className="modal-icon primary"><Eye size={20} /></div>
+          <div className="grow"><h2>“{f.title}” in the LNV</h2>
+            <p className="muted">The rows this song gets in the downloaded LNV. A value that needs a change: click it, type, Enter – it is saved like any other choice.</p></div>
+          <StatusChip status={prog.status} done={prog.done} total={prog.total} />
+          <button type="button" className="sm-nav" onClick={close} aria-label="Close"><X size={16} /></button>
+        </header>
+        {todo > 0 && <p className="pc-warn">{n(todo)} match{todo > 1 ? 'es are' : ' is'} still to check – the rows below may change. Check {todo > 1 ? 'them' : 'it'} first, then save the song to the LNV.</p>}
+        {rows.length ? (
+          <div className="lp-wrap">
+            <table className="lp-t">
+              <thead><tr><th className="lp-row">Row</th>{PREVIEW_FIELDS.map((fl) => <th key={fl}>{labelOf(fl)}</th>)}<th>Main version title</th></tr></thead>
+              <tbody>{rows.map((r) => (
+                <tr key={r.key} className={`lp-${r.tone}`}>
+                  <th className="lp-row"><b>{r.label}</b><small>{r.note}</small></th>
+                  {PREVIEW_FIELDS.map((fl) => <td key={fl} className={fl === 'ISRC' ? 'mono' : fl === 'Title' ? 'lp-title' : ''}><PreviewCell fl={fl} {...r.cells[fl]} source={source} /></td>)}
+                  <td className="muted">{r.tone === 'keep' ? '—' : mainTitle}</td>
+                </tr>))}</tbody>
+            </table>
+          </div>
+        ) : <p className="cv-none">No row yet – put a match in Original or Other version.</p>}
+        {left.length > 0 && <p className="lp-left"><b>Left out of the LNV:</b> {left.join(' · ')}</p>}
+        <div className="modal-actions">
+          <button type="button" className="btn ghost" onClick={close}>Close</button>
+          {completed ? <>
+            <span className="st complete"><CircleCheck size={14} />Completed</span>
+            <button type="button" className="btn" disabled={busy} onClick={() => mark(false)}>Not completed</button>
+          </> : <button type="button" className="btn primary" autoFocus disabled={busy || todo > 0 || !rows.length} onClick={() => mark(true)}
+            title={todo > 0 ? 'Check every match first' : 'Save the song to the LNV as shown, and mark it completed'}><Check size={15} />Save to LNV · completed</button>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** A value of the preview: shown as the LNV gets it, typed over in place. */
+function PreviewCell({ fl, v, edit, source }: { fl: string; v: string[]; edit?: (v: string[]) => void; source: string }) {
+  const [typing, setTyping] = useState<string | null>(null)
+  if (typing != null) return fl === 'Title'
+    ? <EditBox initial={typing} label="Title for the LNV" placeholder="Type the title for the LNV" done={(t) => { setTyping(null); if (t && t !== v.join(', ')) edit?.([t]) }} />
+    : <TypeIn fl={fl} initial={typing} now={v} done={(x) => { setTyping(null); if (x) edit?.(x) }} />
+  const shown = !v.length ? <span className="muted">—</span> : fl === 'Link' ? <Links urls={v} /> : <Values fl={fl} v={v} />
+  return edit ? <EditLine label={`${labelOf(fl).toLowerCase()}${source ? '' : ''}`} edit={() => setTyping(typedText(fl, v))}>{shown}</EditLine> : shown
+}
+
+/** How far a song name is: Left to check · Partly checked 4 of 6 · All checked · Completed. */
 export function StatusChip({ status, done, total, small }: { status: Status; done: number; total: number; small?: boolean }) {
-  const Icon = status === 'done' ? CircleCheck : status === 'part' ? CircleDot : Circle
+  const Icon = status === 'done' || status === 'complete' ? CircleCheck : status === 'part' ? CircleDot : Circle
   return <span className={`st ${status} ${small ? 'sm' : ''}`} title={`${STATUS[status]} – ${n(done)} of ${n(total)} match${total === 1 ? '' : 'es'} answered`}>
     <Icon size={13} />{STATUS[status]}{total > 0 && <b>{n(done)}/{n(total)}</b>}</span>
 }

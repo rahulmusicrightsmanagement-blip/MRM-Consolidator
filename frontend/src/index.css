@@ -3654,3 +3654,41 @@ button.side-ver:hover b, .foot-ver:hover { color: var(--brand); text-decoration:
 .rv-fact .ls-n { margin-left: 6px; }
 @media (max-width: 700px) { .cls-btn { padding: 4px 9px; font-size: 13px; } }
 .rv-list-tools .rv-fact { flex: 0 0 auto; min-width: 124px; }
+
+/* ============ v2.0: To check (against the main version) · Original (one row) · Other version · Deleted ============ */
+.cls-btn.now.deleted, .cls-btn.deleted:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+.cls-btn.on.deleted { border-color: var(--bad); background: var(--bad-bg); color: var(--bad); }
+.cls-btn.now { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent); }
+#fam-todo .fam-sec-head h4 { color: var(--text); }
+#fam-deleted .fam-sec-head h4, #fam-out .fam-sec-head h4 { color: var(--bad); }
+#fam-version .fam-sec-head h4 { color: var(--violet); }
+.fam-sec.todo .fx td:not(.fx-main), .fam-sec.todo .fx .fx-col { width: 290px; min-width: 290px; max-width: 290px; }
+.fam-count.deleted, .ls-sub i.deleted, .sm-item-text small .li-n.deleted { color: var(--bad); }
+.fam-count.deleted { background: var(--bad-bg); }
+.ls-sub i.todo { color: var(--text-2); }
+.fx-order { display: inline-block; margin-bottom: 4px; padding: 1px 8px; border-radius: 99px; background: var(--surface-3); color: var(--text-2); font-size: 12.5px; font-weight: 600; }
+.fx-order.first { background: var(--good-bg); color: var(--good); }
+.pc.out.del .pc-out { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.cv-none .rv-text-btn { font-size: inherit; }
+.st.complete { background: var(--brand-soft); color: var(--brand); }
+.sm-item.s-complete b { color: var(--brand); }
+.pg-item.complete b { color: var(--brand); }
+/* the song in the LNV: its rows as the download writes them */
+.modal.lp { width: min(1280px, 100%); max-height: calc(100vh - 32px); overflow: hidden; gap: 12px; }
+.lp-head { display: flex; align-items: flex-start; gap: 12px; }
+.lp-head h2 { font-size: 20px; }
+.lp-head p { margin-top: 2px; font-size: 14.5px; }
+.lp-wrap { overflow: auto; border: 1px solid var(--border); border-radius: var(--r); min-height: 0; flex: 1 1 auto; }
+.lp-t { border-collapse: separate; border-spacing: 0; font-size: 14px; min-width: 100%; }
+.lp-t th, .lp-t td { box-sizing: border-box; padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; min-width: 130px; max-width: 260px; overflow-wrap: anywhere; }
+.lp-t thead th { position: sticky; top: 0; z-index: 1; background: var(--surface-2); font-size: 13px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.lp-t .lp-row { position: sticky; left: 0; z-index: 2; background: var(--surface); min-width: 150px; width: 170px; box-shadow: 1px 0 0 var(--border); }
+.lp-t thead .lp-row { z-index: 3; background: var(--surface-2); }
+.lp-t .lp-row small { display: block; font-size: 12.5px; font-weight: 500; color: var(--muted); }
+.lp-t tr.lp-keep .lp-row { box-shadow: inset 3px 0 0 var(--good), 1px 0 0 var(--border); }
+.lp-t tr.lp-version .lp-row, .lp-t tr.lp-new .lp-row { box-shadow: inset 3px 0 0 var(--violet), 1px 0 0 var(--border); }
+.lp-t .lp-title { font-weight: 600; }
+.lp-t td { min-width: 150px; }
+.lp-t td.mono { min-width: 170px; overflow-wrap: normal; word-break: keep-all; }
+.lp-left { font-size: 14px; color: var(--text-2); }
+@media (max-width: 700px) { .lp-head .modal-icon { display: none; } .modal.lp { padding: 16px; } }

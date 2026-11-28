@@ -48,7 +48,7 @@ export type MasterEditIn = { master_row: number; field: string; internal_no: str
 
 export type CleanDecisionIn = {
   key: string; choice: CleanChoice | null
-  data?: { keep?: number | string; row?: number; rows?: number[]; excluded?: number[]; type?: string; cover?: string; a?: string; b?: string; songs?: string[]; name?: string; was?: number[]; family?: string; then?: string; level?: string; value?: string | string[]; to?: number | string; title?: string; from?: string; ipis?: string[]; also?: number[]; remark?: number | null }
+  data?: { keep?: number | string; row?: number; rows?: number[]; excluded?: number[]; type?: string; cover?: string; a?: string; b?: string; songs?: string[]; name?: string; was?: number[]; family?: string; then?: string; level?: string; value?: string | string[]; to?: number | string; title?: string; from?: string; ipis?: string[]; also?: number[]; remark?: number | null; at?: number }
   /** for the Undo section: the songs it concerns, what it did in plain words; items with one group are one change */
   log?: ChangeLog
 }

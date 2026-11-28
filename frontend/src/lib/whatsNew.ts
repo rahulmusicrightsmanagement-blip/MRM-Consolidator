@@ -2,6 +2,19 @@
  *  its CHANGELOG entry, cut at its semicolons. No React here: unit-tested in Node. */
 
 export const POINTS: Record<string, string[]> = {
+  '2.0.0': [
+    'Every match starts in To check, compared with the main version found from Muso.',
+    'Under every match: Original · Other version · Delete. The suggested one is ringed.',
+    'Original starts empty. The first match put there is the song’s one row in the LNV.',
+    'Matches put in Original after it: their titles go into its Alternative work name, with | between.',
+    'Other version: a row of its own each, right under the Original – a new row for a Muso-only version.',
+    'Delete: the LNV row leaves the downloaded LNV, a Muso version gets no row. Put back any time.',
+    'Each match checked adds to Checked. All checked: Preview in LNV opens by itself.',
+    'Preview in LNV: the song’s rows as the LNV gets them – change any value right there.',
+    'Save to LNV marks the song Completed. Preview in LNV opens again whenever needed.',
+    'New filter and progress: Completed. Old Possible matches count as Other version.',
+    'Matches only ticked before 2.0 (no section): back in To check – choose a section again.',
+  ],
   '1.8.2': [
     'Download stage 1 LNV: only the songs you checked – or choose Every row for the whole LNV.',
     'Serial numbers (SN) run 1, 2, 3 … in the file’s order. The old row number stays beside it.',

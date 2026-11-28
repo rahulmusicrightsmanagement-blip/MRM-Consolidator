@@ -1,4 +1,5 @@
-"""v1.8.0 – matching rebuilt, the ISRC first: the main version's ISRC is an exact match (one row in the LNV, the other titles
+"""(v2.0.0 changed the sections: Original · Other version · Deleted, nothing put in one by itself – see tests_v20.)
+v1.8.0 – matching rebuilt, the ISRC first: the main version's ISRC is an exact match (one row in the LNV, the other titles
 its Alternative Work Name); three sections the reviewer checks or moves a match between (Exact match · Possible match ·
 Other version); the singer shown, never deciding; stage names (PP) into the LNV as the IPI / CAE list's real names (PA)."""
 import io
@@ -17,9 +18,12 @@ class RuleTests(SimpleTestCase):
         self.assertEqual(review.default_class(["INAA1"], ["INAA1"], False), "exact")
         self.assertEqual(review.default_class(["INAA1"], ["INAA1"], True), "exact")      # one ISRC: one recording
         self.assertEqual(review.default_class(["INAA2"], ["INAA1"], True), "version")
-        self.assertEqual(review.default_class([], ["INAA1"], False), "possible")
+        self.assertIsNone(review.default_class([], ["INAA1"], False))   # v2.0: no suggestion – it waits in To check
+        # v2.0: Original (exact) · Other version · Deleted – a v1.8 Possible match is an other version
         self.assertEqual(review.classes_of({"class:4": {"choice": "exact"}, "class:m7": {"choice": "version"}, "class:5": {"choice": "nonsense"},
-                                            "pick:4:Title": {"choice": "muso"}}), {"class:4": "exact", "class:m7": "version"})
+                                            "class:6": {"choice": "possible"}, "class:8": {"choice": "deleted"}, "pick:4:Title": {"choice": "muso"}}),
+                         {"class:4": "exact", "class:m7": "version", "class:6": "version", "class:8": "deleted"})
+        self.assertEqual(review.class_at({"class:4": {"choice": "exact", "data": {"at": 5}}, "class:5": {"choice": "exact", "data": {"at": True}}}), {"class:4": 5})
 
 
 # the same song entered again under the main version's ISRC as a "male version", and a row of another song sharing it
@@ -56,7 +60,7 @@ class ExactOneRowTests(Base):
         keep = self.lnv_row("Pyaar Ka Geet", "Film A", rows)
         self.assertIn("Pyaar Ka Geet - Male Version", keep["Alternate Work"].split(" | "))
         self.assertEqual(keep["Row in the uploaded LNV"], 2)
-        self.assertTrue(any("Exact match – one row" in c and "Row 10" in c for c in changes))
+        self.assertTrue(any("Original – one row" in c and "Row 10" in c for c in changes))
         self.assertEqual(sum(1 for r in rows if r["Row in the uploaded LNV"] == 2), 1)
         # moved to Other version: its row comes back – a row of its own after the possible matches, the main title beside it
         self.save({"key": "class:10", "choice": "version"})
@@ -69,9 +73,12 @@ class ExactOneRowTests(Base):
     def test_a_section_is_checked_and_named_by_row_or_recording(self):
         self.save({"key": "class:abc", "choice": "exact"}, status=400)
         self.save({"key": "class:5", "choice": "somewhere"}, status=400)
+        self.save({"key": "class:5", "choice": "possible"}, status=400)   # v2.0: no Possible match any more
+        self.save({"key": "class:5", "choice": "exact", "data": {"at": "soon"}}, status=400)
         rid = self.pyaar()["muso"][0]["id"]
-        self.save({"key": f"class:m{rid}", "choice": "version"}, {"key": "class:5", "choice": "possible"})
-        self.assertEqual(self.step()["classes"], {f"class:m{rid}": "version", "class:5": "possible"})
+        self.save({"key": f"class:m{rid}", "choice": "version", "data": {"at": 7}}, {"key": "class:5", "choice": "deleted"})
+        step = self.step()
+        self.assertEqual((step["classes"], step["class_at"]), ({f"class:m{rid}": "version", "class:5": "deleted"}, {f"class:m{rid}": 7}))
         self.save({"key": "class:5", "choice": None})
         self.assertNotIn("class:5", self.step()["classes"])
 
@@ -90,10 +97,10 @@ class CheckedInTheLnvTests(Base):
         r = self.lnv_row("Saawan Ki Raat - Lofi", rows=rows)
         self.assertEqual((r["Checked as"], r["Main version title"], r["Original Work"], r["ISRC"]), ("Other version", "Saawan Ki Raat", "Saawan Ki Raat", "INAA19000044"))
         # an LNV row checked (linked, in its section) says so; one not checked says nothing
-        self.save({"key": f"link:{saawan['answer']['song']}", "choice": "same", "data": {"rows": [5]}}, {"key": "class:5", "choice": "possible"})
+        self.save({"key": f"link:{saawan['answer']['song']}", "choice": "same", "data": {"rows": [5]}}, {"key": "class:5", "choice": "version"})
         rows, _ = self.sheet()
         at = {r["Row in the uploaded LNV"]: r["Checked as"] for r in rows if r["Row in the uploaded LNV"]}
-        self.assertEqual((at[5], at[6], at[2]), ("Possible match", None, None))
+        self.assertEqual((at[5], at[6], at[2]), ("Other version", None, None))
         self.assertEqual(sum(1 for r in rows if r["Work*"] == "Saawan Ki Raat - Lofi"), 1)   # once, now its song is answered too
 
 
@@ -107,12 +114,12 @@ class CheckedOnlyDownloadTests(Base):
         self.assertEqual([(r["Work*"], r["Checked as"], r["Row in the uploaded LNV"]) for r in rows], [])   # nothing checked yet: no song in it
         saawan = next(c for c in self.step()["cases"] if c["title"] == "Saawan Ki Raat" and c["kind"] not in ("twice", "names"))
         lofi = next(r for r in saawan["muso"] if r["fields"]["Title"] == "Saawan Ki Raat - Lofi")
-        self.save({"key": f"link:{saawan['answer']['song']}", "choice": "same", "data": {"rows": [5, 7]}}, {"key": "class:5", "choice": "possible"},
-                  {"key": "class:7", "choice": "possible"}, {"key": f"class:m{lofi['id']}", "choice": "version"},
-                  {"key": "class:9", "choice": "exact"})   # (row 9: linked by the app – checked as an exact match)
+        self.save({"key": f"link:{saawan['answer']['song']}", "choice": "same", "data": {"rows": [5, 7]}}, {"key": "class:5", "choice": "version"},
+                  {"key": "class:7", "choice": "version"}, {"key": f"class:m{lofi['id']}", "choice": "version"},
+                  {"key": "class:9", "choice": "exact"})   # (row 9: linked by the app – put in Original)
         rows, changes = self.sheet(self.book("?stage=1"))
         self.assertEqual([(r["SN"], r["Work*"], r["Row in the uploaded LNV"], r["Checked as"]) for r in rows],
-                         [(1, "Has A Date", 9, "Exact match"), (2, "Saawan Ki Raat", 5, "Possible match"), (3, "Saawan Ki Raat", 7, "Possible match"),
+                         [(1, "Has A Date", 9, "Original"), (2, "Saawan Ki Raat", 5, "Other version"), (3, "Saawan Ki Raat", 7, "Other version"),
                           (4, "Saawan Ki Raat - Lofi", None, "Other version")])
         self.assertTrue(any("Checked songs only" in c for c in changes))
         # every row: the whole LNV, the serial numbers 1 … n in its order too
