@@ -99,6 +99,14 @@ export function describe(it: CleanDecisionIn, batch: CleanDecisionIn[], x: LogCo
       const owner = batch.find((b) => b.key.startsWith('link:') && b.choice !== 'same' && x.song.get(b.key.slice(5))?.c.lnv.some((r) => r.row === Number(row)))
       return !it.choice && owner ? answer(owner.key.slice(5), text, true) : { group: it.key, songs: refs(s ?? OTHER), text }
     }
+    case 'class': {   // v1.8: the section a match is checked in
+      const name = it.choice === 'exact' ? 'Exact match' : it.choice === 'possible' ? 'Possible match' : it.choice === 'version' ? 'Other version' : ''
+      if (rest.startsWith('m')) {
+        const r = x.rec.get(Number(rest.slice(1)))
+        return { group: it.key, songs: refs(r?.s ?? OTHER), text: name ? `“${short(r?.title ?? '')}” checked as ${name}` : `“${short(r?.title ?? '')}”: check taken back` }
+      }
+      return { group: it.key, songs: refs(x.row.get(Number(rest)) ?? OTHER), text: name ? `LNV row ${rest} checked as ${name}` : `LNV row ${rest}: check taken back` }
+    }
     case 'title': {
       const r = x.rec.get(Number(rest))
       return { group: it.key, songs: refs(r?.s ?? OTHER), text: it.choice ? `Title of “${short(r?.title ?? '')}”: “${short(list(it.data?.value).join(', '))}”` : `Title of “${short(r?.title ?? '')}”: choice taken back` }

@@ -536,6 +536,7 @@ def _lnv_songs(master, people):
             "isrcs": set(s["isrcs"]), "writers": people.writers(names),
             "has_writers": bool(names), "film": album_key(s.get("movie") or ""),
             "people": people.work(names), "pubkeys": {k for p in s.get("publishers", []) if (k := people.pub(p["name"]))},
+            "singers": {people.key(p["name"]) for p in s.get("singers", []) if not is_junk_name(p["name"])} - {""},
             "version": version_type(s["title"]), "year": str(s.get("release_year") or "")[:4],
             "codes": dict(Counter(r["society"] for r in s["registrations"] if r["code"])),
         })
@@ -811,6 +812,7 @@ def _recordings(rows, idxs, people):
                     "isrcs": {t for i in members for t in rows[i]["isrcs"]},
                     "people": people.work([x for i in members for x in rows[i]["lyricists"] + rows[i]["composers"]]),
                     "aside": {people.key(x) for i in members for x in rows[i]["singers"] if not is_junk_name(x)} | people.ignore,
+                    "singers": {people.key(x) for i in members for x in rows[i]["singers"] if not is_junk_name(x)} - {""},
                     "crew": people.crew,
                     "pubkeys": {k for i in members for x in rows[i].get("publishers", []) if (k := people.pub(x))}})
     return out
@@ -989,16 +991,26 @@ def _album_of(r, l):
     return _same_album(r["album"], l["movie"]) or bool((t := from_tag(r["title"])) and _same_album(t, l["movie"]))
 
 
+def _same_singer(r, l):
+    """same (a singer on both) · differ · blank (a side names none) – the exact match's second criterion."""
+    a, b = r.get("singers") or set(), l.get("singers") or set()
+    if not a or not b:
+        return "blank"
+    return "same" if any(same_person(x, y) for x in a for y in b) else "differ"
+
+
 def _level(s, l, publishers=True):
-    """The user's rule – two stages, one DSP recording against one LNV row:
-      stage 1 (the recording):  song name · film / album · ISRC · release year
-      stage 2 (the work):       song name · film / album · writers (lyricist + composer, as people) · publisher
-    exact: both stages hold, small differences allowed (spelling, one extra writer name, one company under two names;
-    a blank on the LNV side – no ISRC, no year yet – is filled, not a difference) · possible: one stage holds ·
-    None: neither – another song (an ISRC alone is flagged, "isrc_only", so it is never added twice).
+    """The user's rule (v1.8.0) – one DSP recording against one LNV row, the ISRC first:
+      exact:     the same ISRC – whatever the title (a lofi, a male version …), the singers or the credits: the reviewer
+                 then chooses which details the LNV keeps (the DSP's, the LNV's or typed). The singers are the second
+                 criterion: shown (same / other singer), never a reason to leave the exact match.
+      possible:  another ISRC (or none on one side), but the same recording or the same work by the two stages –
+                 stage 1 (the recording): song name · film / album · release year (no ISRC to contradict it);
+                 stage 2 (the work): song name · film / album · writers (lyricist + composer, as people) · publisher.
+      None:      neither – another song.
     The song's level is its best recording's. publishers: False when the DSP sheet has no publisher column."""
     best = None
-    rank = {"exact": 3, "possible": 2, "isrc_only": 1, None: 0}
+    rank = {"exact": 3, "possible": 2, None: 0}
     for r in s["recs"]:
         isrc = bool(r["isrcs"] & l["isrcs"])
         checks = {"isrc": "same" if isrc else "blank" if not l["isrcs"] or not r["isrcs"] else "differ",
@@ -1016,8 +1028,8 @@ def _level(s, l, publishers=True):
         stage1 = name and (isrc or (checks["isrc"] == "blank" and checks["year"] != "differ"))
         # stage 2: the same work
         stage2 = name and writers in ("same", "close") and checks["publisher"] != "differ"
-        level = "exact" if stage1 and stage2 else "possible" if stage1 or stage2 else "isrc_only" if isrc else None
-        checks.update(stage1=bool(stage1), stage2=bool(stage2))
+        level = "exact" if isrc else "possible" if stage1 or stage2 else None
+        checks.update(stage1=bool(stage1), stage2=bool(stage2), singer=_same_singer(r, l))
         score = (rank[level], isrc, sum(1 for k in ("title", "album") if checks[k]) + (writers == "same") + (checks["publisher"] == "same")
                  + (checks["year"] == "same"))
         if best is None or score > best[0]:
@@ -1275,25 +1287,24 @@ def match(master, dsp, client_name="", aliases=None, links=None, groups=None, ru
                 also = [known[r] for r in decided.get("also", []) if r in known and r not in rows and known[r]["rec"].get("level")]
                 matched.append({"song": si, "links": chosen, "confirmed": True, "also": also})
                 continue
-        # The rule (_level): the same credits and ISRC are the same song – the app links it; the same ISRC or the
-        # same credits alone may be – the reviewer decides; anything else is another song
+        # The rule (_level): the same ISRC is the same recording – the app links it, the reviewer picks the details; the
+        # same recording or work under another ISRC may be – the reviewer decides; anything else is another song
         same = own([c for c in cands if c["rec"]["level"]])
-        strong = own([c for c in same if c["rec"]["level"] == "exact"])
+        # the same ISRC is the exact match (v1.8.0): every LNV row holding it – the plain title or not ('Maula' and
+        # 'Maula - Lofi' under one ISRC are one recording: one row in the LNV, the other title its alternative name)
+        # A row that only shares the ISRC – its title another song's ('Some Other Song' under Dil Ki Baat's ISRC) – is an
+        # exact match all the same, but the app never links it by itself: it waits beside the others for the reviewer
+        exact = [c for c in cands if c["rec"]["level"] == "exact" and c["row"] not in taken]
+        strong = [c for c in exact if c["rec"].get("title") or c.get("title")]   # (a medley's name has no key: alike as written)
+        waiting = [c for c in exact if c not in strong]
         for c in strong:
-            same_what = "title, album, writers" + (", publisher" if publishers else "")
-            c["auto"] = f"Same {same_what} and ISRC" if c["rec"]["isrc"] == "same" else f"Same {same_what} – the LNV has no ISRC yet"
-        # one recording, one LNV row: several rows are kept only when the LNV has that one entry twice – they share
-        # its ISRC, or nothing tells them apart (_twins: no other version tag, writers or ISRC) – asked under "twice".
-        # Two recordings ('… - Aakanksha Version', '… (Nikhil Iyer Version)') are never both the song
-        if len(strong) > 1:
-            first = lnv[by_row[strong[0]["row"]]]
-            strong = [c for c in strong if c["rec"].get("isrc") == "same"] \
-                or [strong[0]] + [c for c in strong[1:] if _twins(first, lnv[by_row[c["row"]]])]
+            singer = {"same": "same singer", "differ": "another singer", "blank": "no singer to compare"}.get(c["rec"].get("singer"), "")
+            c["auto"] = "Same ISRC" + (f" – {singer}" if singer else "")
         if strong:
             for c in strong:
                 lnv_links[by_row[c["row"]]].append((si, c))
             tie()
-            matched.append({"song": si, "links": strong, "confirmed": False})
+            matched.append({"song": si, "links": strong, "confirmed": False, **({"also": waiting} if waiting else {})})
             continue
         unsure = same
         near = [c for c in cands if c not in unsure]
@@ -1489,7 +1500,11 @@ def lnv_versions(result, master_songs, moves=None):
                 continue
             original = {"title": home["title"], "album": home.get("movie", ""), "row": home["row"], "add": None,
                         "language": home.get("language", "")}
+        # a song of versions only, linked to LNV rows: its first recording IS those rows – never a row of its own too
+        lands = next((p for p in song["parts"] if not p["lnv_row"]), None) if links and not song.get("original") else None
         for p in song["parts"]:
+            if p is lands:
+                continue
             if p["lnv_row"]:   # an LNV row with a plain title that holds the version's ISRC is not named a version
                 if p["lnv_row"] != original["row"] and p["lnv_row"] in by_row \
                         and (p["type"] == REISSUE or version_type(by_row[p["lnv_row"]]["title"]) != ORIGINAL):
@@ -1508,6 +1523,20 @@ def lnv_versions(result, master_songs, moves=None):
                 seen.update(p["isrcs"])
                 rows.append({"lyricists": song["lyricists"], "composers": song["composers"], **p, "original": o})
     return {"rows": rows, "named": named}
+
+
+def part_of(result, rid):
+    """A recording of the match by its id (its first sheet row): (its song, its part) – None when no song has it."""
+    for kind in ("matched", "check"):
+        for item in result.get(kind) or []:
+            for p in item["song"].get("parts") or []:
+                if rid in (p.get("sheet") or ()):
+                    return item["song"], p
+    for song in result.get("missing") or []:
+        for p in song.get("parts") or []:
+            if rid in (p.get("sheet") or ()):
+                return song, p
+    return None
 
 
 def isrcs_once(versions, adds, plan, held):
@@ -1600,7 +1629,8 @@ def alternative_names(result, titles, master_songs):
     homes += [(c["song"], (c["decision"].get("data") or {}).get("rows", [])) for c in result["check"] if choice(c) == "same"]
     pairs = []
     for song, rows in homes:
-        o = song.get("original") or {"title": song["title"], "sheet": None}
+        # a song of versions only lands on its rows with its first recording
+        o = song.get("original") or next((p for p in song.get("parts", []) if not p["lnv_row"]), None) or {"title": song["title"], "sheet": None}
         pairs += [(r, o) for r in rows] + [(p["lnv_row"], p) for p in song.get("parts", []) if p["lnv_row"]]
     final = {}   # one title per row, whichever of its recordings it was chosen on
     for r, part in pairs:
@@ -1631,7 +1661,8 @@ def apply_titles(result, versions, adds, titles):
     homes += [(c["song"], (c["decision"].get("data") or {}).get("rows", [])) for c in result["check"] if choice(c) == "same"]
     picks, by_row = [], {}
     for song, rows in homes:
-        o = song.get("original")
+        # a song of versions only lands on its rows with its first recording
+        o = song.get("original") or next((p for p in song.get("parts", []) if not p["lnv_row"]), None)
         t = o and of(o.get("sheet"))
         for r in rows if t else ():
             picks.append({"row": r, "field": "Title", "value": t["value"], "why": why(t)})

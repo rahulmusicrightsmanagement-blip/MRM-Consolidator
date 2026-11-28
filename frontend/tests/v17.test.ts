@@ -62,15 +62,15 @@ test('a typed value is tidied, or says what is wrong', () => {
 
 test('5 the work name that is not kept is the alternative', () => {
   const l = lnv(4, { Title: 'Dil Ki Baat', 'Alternate title': 'Old Name' }), m = rec({ Title: 'Dil Ki Baat (From "Film")' })
-  assert.equal(autoAlternative('Dil Ki Baat', l, [m]), 'Old Name; Dil Ki Baat (From "Film")')            // the LNV's name kept
-  assert.equal(autoAlternative('Dil Ki Baat (From "Film")', l, [m]), 'Old Name; Dil Ki Baat')             // Muso's kept
-  assert.equal(autoAlternative('Typed', l, [m]), 'Old Name; Dil Ki Baat; Dil Ki Baat (From "Film")')      // typed: both
+  assert.equal(autoAlternative('Dil Ki Baat', l, [m]), 'Old Name | Dil Ki Baat (From "Film")')            // the LNV's name kept (v1.8: a pipe between them)
+  assert.equal(autoAlternative('Dil Ki Baat (From "Film")', l, [m]), 'Old Name | Dil Ki Baat')             // Muso's kept
+  assert.equal(autoAlternative('Typed', l, [m]), 'Old Name | Dil Ki Baat | Dil Ki Baat (From "Film")')      // typed: both
   assert.equal(autoAlternative('Pyaar', lnv(1, { Title: 'Pyaar' }), [rec({ Title: 'PYAAR' })]), '')       // one name on both sides
   assert.equal(autoAlternative('A', lnv(1, { Title: 'A', 'Alternate title': 'B' }), [rec({ Title: 'b' })]), 'B')   // it has it already
   assert.ok(sameName('दिल', 'दिल') && !sameName('दिल', 'प्यार') && sameName('Veer - Zaara', 'veer-zaara'))
   assert.deepEqual(otherNames('A', 'a', 'B', 'b', '', 'C'), ['B', 'C'])
   const fc = fieldChoices('Alternate title', group(l, [m]), undefined, 'Muso', autoAlternative('Dil Ki Baat', l, [m]))
-  assert.deepEqual([fc.def, fc.keep, keepText(fc.keep, 'Muso'), fc.now], ['auto', 'auto', 'Automatic', ['Old Name; Dil Ki Baat (From "Film")']])
+  assert.deepEqual([fc.def, fc.keep, keepText(fc.keep, 'Muso'), fc.now], ['auto', 'auto', 'Automatic', ['Old Name | Dil Ki Baat (From "Film")']])
   assert.equal(fc.pickOf('auto'), null)                        // nothing to save
   assert.deepEqual(fc.pickOf('lnv'), ['Old Name'])             // keep only the LNV's: an answer
   assert.equal(fieldChoices('Alternate title', group(l, [m]), 'Mine', 'Muso', 'x').keep, 'custom')
@@ -156,7 +156,8 @@ test('8 the change log says what was corrected, from what', () => {
 // ---------- 10 matches kept · 14 status
 
 const six = () => {
-  const ex = [1, 2, 3, 4].map((n) => lnv(n, { Title: 'Alpha', Year: String(1990 + n) }, { check: { writers: 'same', publisher: 'same', level: 'exact' } }))
+  // v1.8.0: exact = the main version's ISRC
+  const ex = [1, 2, 3, 4].map((n) => lnv(n, { Title: 'Alpha', Year: String(1990 + n), ISRC: ['INAA19000001'] }, { check: { writers: 'same', publisher: 'same', level: 'exact' } }))
   const po = [5, 6].map((n) => lnv(n, { Title: 'Alpha', Year: String(1990 + n) }))
   return song('Alpha', 'A', [...ex, ...po])
 }
@@ -229,7 +230,8 @@ test('10 a song sent to a new row, deleted or mapped away stays shown under its 
 test('10 a match that lost its row to another recording is still to check', () => {
   const v = { key: 'version:X', type: 'Lofi', row: 8, muso: rec({ Title: 'Alpha Lofi' }, { id: 50 }), lnv: lnv(8, { Title: 'Alpha Lofi' }), isrc: false, album: false, year: false, answer: null, taken: '‘Beta’' }
   const f = familiesOf([song('Alpha', 'A', [lnv(1, { Title: 'Alpha' })], { in_lnv: [v] })])[0]
-  assert.deepEqual([f.possible.map((g) => g.rows[0]), toCheck(NO_PENDING, f)], [[1, 8], 2])
+  // (v1.8.0: a version the LNV has is under Other version)
+  assert.deepEqual([f.possible.map((g) => g.rows[0]), f.version.map((g) => g.rows[0]), toCheck(NO_PENDING, f)], [[1], [8], 2])
   const none = familiesOf([song('Alpha', 'A', [lnv(1, { Title: 'Alpha' })], { in_lnv: [{ ...v, answer: 'none', taken: undefined }] })])[0]
   assert.deepEqual([none.possible.length, none.out.map((o) => [o.rows[0], o.version])], [1, [[8, 'version:X']]])
   assert.deepEqual(putBackItems(none.out[0], step([])), [{ key: 'version:X', choice: null }])
@@ -251,7 +253,7 @@ test('14 the lists count what they hold – status of every song and every match
   for (const k of EACH) { const s = sheetOf(x, k); assert.equal(s.rows.length, listCount(x, k), k); assert.ok(s.rows.every((r) => r.length === s.header.length), k) }
   const st = sheetOf(x, 'status').rows
   assert.deepEqual(st.map((r) => r.slice(0, 6)), [['Alpha', 'Partly checked', 6, 1, 1, 4], ['Beta', 'Left to check', 1, 0, 0, 1], ['Gamma', 'All checked', 1, 1, 0, 0]])
-  assert.match(String(st[0][8]), /2026/)
+  assert.match(String(st[0][9]), /2026/)
   assert.deepEqual(sheetOf(x, 'out').rows.map((r) => [r[0], r[3], r[4]]), [['Alpha', 'Not a match', 5]])
   const todo = sheetOf(x, 'todo')
   assert.ok(todo.rows.every((r) => r[todo.header.indexOf('Status')] === 'Left to check') && todo.rows.length === 5)

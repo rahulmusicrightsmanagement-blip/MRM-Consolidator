@@ -18,7 +18,7 @@ export function picksFor(f: Family, families: Family[], loose: ReviewCase[], p: 
   const out: Pick[] = []
   for (const x of families) {
     if (x.id === f.id) continue
-    for (const g of [...x.exact, ...x.possible]) {
+    for (const g of [...x.exact, ...x.possible, ...(x.version ?? [])]) {
       const e = g.entries.find((y) => !y.v) ?? g.entries[0]
       if (!e.c.answer.song) continue
       out.push({ key: `${x.id}|${g.key}`, kind: g.match, c: e.c, g, title: value(g.lnv.fields.Title) || value(g.recs[0].fields.Title), from: x.title,
@@ -44,7 +44,7 @@ export function addItems(pick: Pick, f: Family, d: Step1): CleanDecisionIn[] {
   const home = homeOf(f)
   if (!home) return []
   if (pick.kind === 'new' || !pick.g) {
-    const row = home.answer.rows?.[0] ?? f.exact[0]?.rows[0] ?? f.possible[0]?.rows[0]
+    const row = home.answer.rows?.[0] ?? f.exact[0]?.rows[0] ?? f.possible[0]?.rows[0] ?? f.version?.[0]?.rows[0]
     return pick.c.muso.filter((r) => r.in && r.id != null && r.id !== home.muso[0].id)
       .map((r) => ({ key: `map:${r.id}`, choice: 'join' as const, data: { to: home.muso[0].id!, row, title: f.title, from: pick.c.title } }))
   }

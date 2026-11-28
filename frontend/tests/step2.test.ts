@@ -96,7 +96,8 @@ test('with no list, a field keeps the LNV value; a blank one takes Muso’s – 
   const fc = fieldChoices('Singer', blank, undefined, 'Muso')
   assert.equal(fc.def, 'i0')
   assert.deepEqual(fc.now, ['Ram Krishna'])
-  assert.deepEqual(fc.pickOf('m0'), ['RK'])   // Muso's as written: an answer
+  // v1.8.0: the stage name (PP) is not offered as written – the LNV gets the member's real name (PA)
+  assert.equal(fc.opts.length, 0)
   assert.deepEqual(ipiChoices('Singer', blank.lnv, blank.recs, 'Muso')[0], { v: ['Ram Krishna'], ids: ['001'], from: 'Muso', raw: ['RK'] })
   // a name the list spells the same as the LNV is no choice of its own
   assert.equal(fieldChoices('Singer', group(lnvRow(4, { Singer: ['Ram Krishna'] }), blank.recs), undefined, 'Muso').ipis.length, 0)

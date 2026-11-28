@@ -51,7 +51,7 @@ def _recording(rows, recs, ids, rid, rtype, source, edits=None):
                 "Publisher": list(OrderedDict.fromkeys(x for i in idxs for x in rows[i].get("publishers", [])))[:4],
                 "ISRC": list(OrderedDict.fromkeys(t for i in idxs for t in rows[i]["isrcs"])),
                 "Year": dates[0][:4] if dates else "", "Release date": show_date(full[0]) if full else "",
-                "Link": p["link"]}}
+                "Label": p.get("label") or "", "Link": p["link"]}}
     fixed = (edits or {}).get(ids[rid]) or {}
     if fixed:
         out["edited"] = {}
@@ -103,6 +103,8 @@ def _marks(r):
     pub = r.get("publisher")
     if pub:
         add({"same": "Same publisher", "differ": "Other publisher", "unchecked": "Publisher not checked"}[pub], pub != "differ")
+    if r.get("singer") in ("same", "differ"):   # the exact match's second criterion: shown, never deciding
+        add("Same singer" if r["singer"] == "same" else "Other singer", r["singer"] == "same")
     if r.get("taken"):   # one LNV row is one recording: another recording already has this row
         add(f"Row already linked to {r['taken']}", False)
     return why
@@ -114,7 +116,8 @@ def _candidate(rec, c):
     return {**rec(c["row"]), "score": c.get("score"), "why": _marks(r),
             "check": {"writers": c.get("writers"), "publisher": c.get("publisher"), "isrc": bool(c.get("isrc")),
                       "title": c.get("title") or 0, "odd": c.get("odd", [0, 0]), "shared": c.get("shared", 0),
-                      "level": r.get("level"), "via": r.get("via"), "stage1": r.get("stage1"), "stage2": r.get("stage2")}
+                      "level": r.get("level"), "via": r.get("via"), "stage1": r.get("stage1"), "stage2": r.get("stage2"),
+                      "singer": r.get("singer")}
             if c.get("writers") else None}
 
 
@@ -202,7 +205,7 @@ def _level(c):
     levels = [(l.get("check") or {}).get("level") for l in c["lnv"]]
     if "exact" in levels:
         return "exact"
-    if "possible" in levels or "isrc_only" in levels or any(v["isrc"] and v["answer"] != "none" for v in c.get("in_lnv") or []):
+    if "possible" in levels or any(v["isrc"] and v["answer"] != "none" for v in c.get("in_lnv") or []):
         return "possible"
     a = c.get("answer") or {}
     if a.get("choice") == "same" and a.get("by") == "you" and a.get("rows"):
@@ -248,7 +251,7 @@ def families(cases):
         a = c["answer"]
         linked = (a.get("rows") or []) if a.get("choice") == "same" and r.get("part") != "version" else []
         return {"title": r["fields"].get("Title") or "", "isrcs": list(r["fields"].get("ISRC") or []), "year": r["fields"].get("Year") or "",
-                "rows": list(linked) + ([r["lnv_row"]] if r.get("lnv_row") else [])}
+                "rows": list(linked) + ([r["lnv_row"]] if r.get("lnv_row") else []), "id": r.get("id")}
     mains = {k: m for k, cs in by.items() if (m := main_of(cs))}
     for k, cs in group([c for c in songs if c not in matched]).items():
         while k in joins:
@@ -266,6 +269,117 @@ def families(cases):
             rows.update({v["row"]: k for v in c.get("in_lnv") or [] if v["answer"] != "none"})
             isrcs.update({i: k for r in c["muso"] for i in r["fields"].get("ISRC") or []})
     return {"joins": joins, "mains": mains, "rows": rows, "isrcs": isrcs}
+
+
+CLASSES = ("exact", "possible", "version")
+CLASS_NAMES = {"exact": "Exact match", "possible": "Possible match", "version": "Other version"}
+
+
+def classes_of(decisions):
+    """The reviewer's sections: "class:<LNV row>" (an LNV row matched to a song) or "class:m<recording id>" (a recording
+    beside no LNV row) -> exact · possible · version (Other version)."""
+    return {k: d["choice"] for k, d in decisions.items() if k.startswith("class:") and d.get("choice") in CLASSES}
+
+
+def default_class(isrcs, main_isrcs, version):
+    """The section a match is in until the reviewer moves it: the main version's ISRC – Exact match; a version the LNV
+    has – Other version; else Possible match (the screen's classOf)."""
+    return "exact" if set(isrcs or ()) & set(main_isrcs or ()) else "version" if version else "possible"
+
+
+def export_plan(cases, decisions, fam):
+    """Where step 2's sections put each song name's LNV rows in the downloaded LNV (v1.8.0):
+      exact     every row of the Exact match – the main version's ISRC, or moved there – is ONE row: the first one
+                ("keep") stays, the others go ("drop") once the reviewer checked them there; their titles (and the
+                recordings' beside no row moved there) join its Alternative Work Name, their ISRCs its ISRC cell
+      possible  one row each, right under it, the main version's title in "Main version title"
+      version   (Other version) one row each, after the possible ones
+    Only rows a song is linked to (by the app or the reviewer) – and every recording the reviewer checked beside no LNV
+    row, whether its song is answered or not: it gets a row of its own ("solo_rows"), unless it went into the exact row.
+    Returns {"keep": {row: {"drop", "names", "isrcs"}}, "rank": {row: 0 | 1 | 2}, "rows": {row: song name key},
+    "solo": {recording id: class}, "isrc_rank": {isrc: rank}, "checked": {row: section}, "isrc_checked": {isrc: section},
+    "solo_rows": [{"id", "class", "home": the LNV row its original is, "main": the main version's title}]}."""
+    classes = classes_of(decisions)
+    joins, mains = fam.get("joins") or {}, fam.get("mains") or {}
+
+    def root(k):
+        seen = set()
+        while k in joins and k not in seen:
+            seen.add(k)
+            k = joins[k]
+        return k
+    by_fam = OrderedDict()
+    for c in cases:
+        if c["kind"] in ("names", "twice") or c["answer"].get("choice") in ("not_ours", "deleted") \
+                or (c["answer"].get("choice") == "add" and c["answer"].get("by") == "you"):
+            continue
+        k = root(c.get("family")) if c.get("family") else None
+        if k in mains:
+            by_fam.setdefault(k, []).append(c)
+    out = {"keep": {}, "rank": {}, "rows": {}, "solo": {}, "isrc_rank": {}, "checked": {}, "isrc_checked": {}, "solo_rows": []}
+    for k, cs in by_fam.items():
+        main = mains[k]
+        hits = OrderedDict()   # row -> {"lnv", "titles", "isrcs", "version"}
+        landed = set()   # the recordings on a linked row: no row of their own
+        for c in cs:
+            a = c["answer"]
+            orig = next((r for r in c["muso"] if r.get("part") == "original"), c["muso"][0] if c["muso"] else None)
+            recs = {r["row"]: r for r in c.get("lnv") or [] if r.get("row") is not None}
+            if orig and a.get("choice") == "same" and a.get("rows"):
+                landed.add(orig.get("id"))
+            for row in (a.get("rows") or []) if a.get("choice") == "same" else []:
+                if row in recs and row not in hits:
+                    hits[row] = {"lnv": recs[row], "titles": [orig["fields"].get("Title")] if orig else [], "version": False, "you": a.get("by") == "you"}
+            for v in c.get("in_lnv") or []:
+                if v["answer"] != "none" and not v.get("taken") and v["row"] not in hits:
+                    hits[v["row"]] = {"lnv": v["lnv"], "titles": [v["muso"]["fields"].get("Title")], "version": True, "you": v["answer"] == "same"}
+        cls = {row: classes.get(f"class:{row}") or default_class(h["lnv"]["fields"].get("ISRC"), main["isrcs"], h["version"])
+               for row, h in hits.items()}
+        exact = sorted(r for r, x in cls.items() if x == "exact")
+        for row, x in cls.items():
+            out["rows"][row] = k
+            out["rank"][row] = {"exact": 0, "possible": 1, "version": 2}[x]
+            # checked: put in its section by the reviewer, or ticked by them
+            if f"class:{row}" in classes or hits[row]["you"]:
+                out["checked"][row] = CLASS_NAMES[x]
+        # the LNV row the song's other recordings name as their original: the exact row, else the main version's own
+        home = exact[0] if exact else next((r for r in main.get("rows") or [] if r in hits), None)
+        # the recordings beside no LNV row: their own row as a version, or (moved to Exact match) none – the exact row
+        # takes their title and ISRC
+        solos = [r for c in cs for r in c["muso"] if r.get("in") and r.get("id") is not None and r.get("part") == "version"
+                 and not r.get("lnv_row") and r["id"] != main.get("id") and r["id"] not in landed]
+        merged = []
+        for r in solos:
+            x = classes.get(f"class:m{r['id']}") or "version"
+            out["solo"][r["id"]] = x
+            if x == "exact" and exact:
+                merged.append(r)
+                continue
+            for i in r["fields"].get("ISRC") or []:
+                out["isrc_rank"][i] = 0 if x == "exact" else 1 if x == "possible" else 2
+            if f"class:m{r['id']}" in classes:   # checked: in the LNV, its song answered or not
+                out["solo_rows"].append({"id": r["id"], "class": x, "home": home, "main": main.get("title") or ""})
+                for i in r["fields"].get("ISRC") or []:
+                    out["isrc_checked"][i] = CLASS_NAMES[x]
+        if not exact:
+            continue
+        # the first exact row stays; another one leaves the file only once the reviewer checked it as an exact match (an
+        # LNV row that only shares the ISRC by mistake is never merged away unseen)
+        keep = exact[0]
+        gone = [r for r in exact[1:] if classes.get(f"class:{r}") == "exact"]
+        names, isrcs = [], []
+        for row in [keep, *gone]:
+            h = hits[row]
+            alt = str(h["lnv"]["fields"].get("Alternate title") or "")
+            names += [h["lnv"]["fields"].get("Title") or "", *re.split(r"\s*[;|]\s*", alt), *(h["titles"] or [])]
+            isrcs += [i for i in h["lnv"]["fields"].get("ISRC") or [] if i not in isrcs]
+        for r in merged:
+            names.append(r["fields"].get("Title") or "")
+            isrcs += [i for i in r["fields"].get("ISRC") or [] if i not in isrcs]
+        out["keep"][keep] = {"drop": gone, "names": [x for x in names if clean_text(x)], "isrcs": isrcs, "family": k}
+        if gone or merged:
+            out["checked"][keep] = "Exact match – one row"
+    return out
 
 
 def join_songs(cases, decisions):
@@ -577,8 +691,8 @@ def build(dsp, analysis, decisions, clean, master):
             "why": answer["why"] if answer.get("recheck") or (kind == "check" and answer.get("by") == "app")
             else _taken_why(item, source) if kind == "check" and _taken_why(item, source)
             else (song_of(kind, item).get("origin") or {}).get("why") if kind == "missing" and (song_of(kind, item).get("origin") or {}).get("why")
-            else {"check": "Exact match – stage 1 (the recording) and stage 2 (the work) both hold: the app linked it" if auto
-                    else "Possible match – only one stage holds (1 the recording: title, album, ISRC, year · 2 the work: title, album, writers, publisher): check and decide",
+            else {"check": "Exact match – the same ISRC: the app linked it; choose what the LNV keeps" if auto
+                    else "Possible match – another ISRC, but the same recording (title, album, year) or the same work (title, album, writers, publisher): check and decide",
                     "missing": (f"A new recording of LNV row {song_of(kind, item)['origin']['row']} – it gets a row of its own naming that original"
                                 if (song_of(kind, item).get("origin") or {}).get("sure") else
                                 f"Not in the LNV – maybe a new recording of LNV row {song_of(kind, item)['origin']['row']}: check the writers"
@@ -676,6 +790,8 @@ def build(dsp, analysis, decisions, clean, master):
         "cases": cases, "lnv_only": lnv_only, "typed": added, "moved": moved_list,
         # values the reviewer took from the DSP over the LNV's own ("pick:<row>:<field>")
         "picks": {k: (d.get("data") or {}).get("value") for k, d in decisions.items() if k.startswith("pick:")},
+        # the section the reviewer put a match in (Exact match · Possible match · Other version): checked
+        "classes": classes_of(decisions),
         # the title the reviewer chose for a recording (its id): mode main · muso · lnv · custom, and the title itself
         "titles": {str(k): v for k, v in dataclean.titles_of(decisions, songmerge.titles_now(dsp, analysis, decisions)).items()},
         "wins": _wins(clean, decisions),

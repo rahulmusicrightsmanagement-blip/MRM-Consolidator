@@ -137,7 +137,9 @@ export const api = {
   /** The final LNV: the stage 2 LNV with step 3's (IPRS) answers. */
   lnvUpdateUrl: (clientId: number) => `/api/clients/${clientId}/steps/lnv/`,
   /** The stage 1 LNV: the LNV with step 2's answers, A–Z by song or by album. */
-  stage1Url: (clientId: number, order: LnvOrder = 'song') => `/api/clients/${clientId}/steps/lnv/?stage=1${order === 'album' ? '&order=album' : ''}`,
+  /** rows: the songs checked in step 2 (the default) or every row of the LNV */
+  stage1Url: (clientId: number, order: LnvOrder = 'song', rows: 'checked' | 'all' = 'checked') =>
+    `/api/clients/${clientId}/steps/lnv/?stage=1${rows === 'all' ? '&rows=all' : ''}${order === 'album' ? '&order=album' : ''}`,
   /** Mark Muso vs LNV completed (its result is kept as the stage 2 LNV), or open it again. */
   completeStage1: (clientId: number, done: boolean) => request<ClientDetail>(`/api/clients/${clientId}/stage1/`, send({ done })),
   stage2Url: (clientId: number) => `/api/clients/${clientId}/stage2/`,

@@ -377,6 +377,8 @@ class PatchSheet:
         self.values, self.fills = {}, {}
         # the rows in a new order (old row numbers, from row 2): None keeps them where they are
         self.order = None
+        # rows left out of the file (old row numbers) – an exact match's other rows, merged into one: only with order
+        self.drop = set()
 
     def cell(self, row, col):
         return _Cell(self, row, col)
@@ -430,7 +432,7 @@ class PatchSheet:
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>'
             files[rels_path] = re.sub(r"<Relationships\b([^>]*)/>", r"<Relationships\1></Relationships>", own).replace("</Relationships>", "".join(
                 f'<Relationship Id="{i}" Type="{HYPERLINK}" Target={quoteattr(u)} TargetMode="External"/>' for i, u in links.items()) + "</Relationships>").encode("utf-8")
-        if self.order:
+        if self.order is not None:
             self._move_notes(files, sheet_path)
 
         # the change list as a new sheet
@@ -482,6 +484,11 @@ class PatchSheet:
             if path not in files:
                 continue
             text = files[path].decode("utf-8")
+            if self.drop:   # the notes of a row left out go with it
+                text = re.sub(r'<(comment|threadedComment)\b[^>]*?\sref="[A-Z]+(\d+)"[^>]*?(?:/>|>.*?</\1>)',
+                              lambda m: "" if int(m.group(2)) in self.drop else m.group(0), text, flags=re.S)
+                text = re.sub(r"<v:shape\b.*?</v:shape>", lambda m: "" if (r := re.search(r"<x:Row>(\d+)</x:Row>", m.group(0)))
+                              and int(r.group(1)) + 1 in self.drop else m.group(0), text, flags=re.S)
             text = re.sub(r'(<(?:comment|threadedComment)\b[^>]*?\sref="[A-Z]+)(\d+)"', lambda m: f'{m.group(1)}{new_of.get(int(m.group(2)), int(m.group(2)))}"', text)
             text = re.sub(r"(<x:Row>)(\d+)(</x:Row>)", lambda m: f"{m.group(1)}{new_of.get(int(m.group(2)) + 1, int(m.group(2)) + 1) - 1}{m.group(3)}", text)
             files[path] = text.encode("utf-8")
@@ -554,7 +561,7 @@ class PatchSheet:
         out.extend(self._row(r, "", edits[r], style_of) for r in pending)
         out.append(xml[end:])
         sheet = "".join(out)
-        if self.order:
+        if self.order is not None:
             sheet = self._reorder(sheet)
         last_row = max([len(self.rows)] + list(edits))
         return re.sub(r'(<dimension ref="[A-Z]+\d+:)([A-Z]+)(\d+)"',
@@ -583,22 +590,31 @@ class PatchSheet:
             x = re.sub(r'^(<row\b[^>]*?\br=")\d+"', lambda m: f'{m.group(1)}{n}"', x, count=1)
             return re.sub(r'(<c\b[^>]*?\br="[A-Z]+)\d+"', lambda m: f'{m.group(1)}{n}"', x)
         formulas = lambda x: re.sub(r"<f\b([^>]*?)(?:/>|>([^<]*)</f>)", formula, x) if "<f" in x else x
-        placed = sorted(((new_of.get(r, r), formulas(renumber(x, new_of[r]) if r in new_of and new_of[r] != r else x)) for r, x in rows.items()),
-                        key=lambda t: t[0])
+        drop = self.drop
+        placed = sorted(((new_of.get(r, r), formulas(renumber(x, new_of[r]) if r in new_of and new_of[r] != r else x)) for r, x in rows.items()
+                         if r not in drop), key=lambda t: t[0])
         xml = xml[:head_end] + "".join(x for _, x in placed) + xml[end:]
         # what stands after the cells and names them by their row: links, colour rules, dropdowns
         at = xml.index("</sheetData>")
         moved = lambda ref: re.sub(r"(?<=[A-Z])\d+", str(new_of.get(int(re.search(r"\d+", ref).group(0)), 0) or re.search(r"\d+", ref).group(0)), ref) \
             if len(set(re.findall(r"\d+", ref))) == 1 else ref
-        tail = re.sub(r'(<hyperlink\b[^>]*?\sref=")([^"]+)"', lambda m: f'{m.group(1)}{moved(m.group(2))}"', xml[at:])
-        tail = re.sub(r'(<(?:conditionalFormatting|dataValidation)\b[^>]*?\ssqref=")([^"]+)"',
-                      lambda m: m.group(1) + " ".join(moved(x) if re.fullmatch(r"[A-Z]+\d+(?::[A-Z]+\d+)?", x) else x for x in m.group(2).split()) + '"', tail)
+        gone = lambda ref: bool(drop) and len(set(re.findall(r"\d+", ref))) == 1 and int(re.search(r"\d+", ref).group(0)) in drop
+        tail = re.sub(r'<hyperlink\b[^>]*?\sref="([^"]+)"[^>]*?/>', lambda m: "" if gone(m.group(1)) else m.group(0), xml[at:]) if drop else xml[at:]
+        tail = re.sub(r'(<hyperlink\b[^>]*?\sref=")([^"]+)"', lambda m: f'{m.group(1)}{moved(m.group(2))}"', re.sub(r"<hyperlinks>\s*</hyperlinks>", "", tail))
+
+        def sqref(m):
+            refs = m.group(2).split()
+            refs = [x for x in refs if not gone(x)] or refs   # (a rule of left-out rows only: harmless where it was)
+            return m.group(1) + " ".join(moved(x) if re.fullmatch(r"[A-Z]+\d+(?::[A-Z]+\d+)?", x) else x for x in refs) + '"'
+        tail = re.sub(r'(<(?:conditionalFormatting|dataValidation)\b[^>]*?\ssqref=")([^"]+)"', sqref, tail)
         xml = xml[:at] + tail
 
         def merge(m):
             a, b = (int(x) for x in re.findall(r"\d+", m.group(1)))
             if a != b:   # across rows: it cannot follow rows that part
                 return "" if a in new_of or b in new_of else m.group(0)
+            if a in drop:
+                return ""
             return m.group(0).replace(m.group(1), re.sub(r"(?<=[A-Z])\d+", str(new_of.get(a, a)), m.group(1)))
         xml = re.sub(r'<mergeCell ref="([A-Z]+\d+:[A-Z]+\d+)"\s*/>', merge, xml)
         xml = re.sub(r'<mergeCells count="\d+"', lambda m: f'<mergeCells count="{len(re.findall("<mergeCell ", xml))}"', xml, count=1)

@@ -456,7 +456,7 @@ export interface User {
 
 /* ---------- data clean (step 1: today's LNV against one DSP sheet) ---------- */
 
-export type CleanChoice = 'ignore' | 'keep' | 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none' | 'accepted' | 'rejected' | 'pending' | 'set' | 'muso' | 'join' | 'main' | 'lnv' | 'custom' | 'deleted' | 'ipi' | 'rows' | 'typed'
+export type CleanChoice = 'ignore' | 'keep' | 'duplicate' | 'different' | 'owner' | 'neither' | 'same' | 'fix' | 'ok' | 'add' | 'not_ours' | 'accept' | 'reject' | 'none' | 'accepted' | 'rejected' | 'pending' | 'set' | 'muso' | 'join' | 'main' | 'lnv' | 'custom' | 'deleted' | 'ipi' | 'rows' | 'typed' | 'exact' | 'possible' | 'version'
 export interface CleanDecisionT { choice: CleanChoice; data?: { keep?: number | string; row?: number; rows?: number[] }; auto?: boolean; why?: string }
 export type CreditKind = 'writer' | 'shared' | 'medley' | 'performer'
 
@@ -543,6 +543,8 @@ export interface CaseRecord extends SongRecord {
     level?: 'exact' | 'possible' | 'isrc_only' | null; via?: number
     /** the user's two stages: 1 the recording (title, album, ISRC, year) · 2 the work (title, album, writers, publisher) */
     stage1?: boolean; stage2?: boolean
+    /** the exact match's second criterion: a singer on both sides – shown, never deciding */
+    singer?: 'same' | 'differ' | 'blank' | null
   } | null
 }
 export interface CaseAnswer {
@@ -590,6 +592,8 @@ export interface ReviewCase {
   origin?: (CaseRecord & { sure: boolean }) | null
 }
 export type TitleMode = 'main' | 'muso' | 'lnv' | 'custom'
+/** Step 2's three sections: Exact match (the main version's ISRC: one row in the LNV), Possible match, Other version. */
+export type MatchClass = 'exact' | 'possible' | 'version'
 export interface MovedOut { id: number; family: string; title: string; to_title: string; row?: number | null; level?: 'exact' | 'possible'; muso: CaseRecord; lnv: CaseRecord[] }
 export interface LastUpdate { key: string; title: string; at: string; by: string; what: string }
 export interface Step1 {
@@ -618,6 +622,8 @@ export interface Step1 {
   picks: Record<string, string | string[]>
   /** recording id -> the title the reviewer chose for it in the LNV: main · muso · lnv · custom */
   titles: Record<string, { mode: TitleMode; value: string }>
+  /** the section the reviewer checked a match in: "class:<LNV row>" · "class:m<recording id>" -> exact · possible · version */
+  classes?: Record<string, MatchClass>
   cases: ReviewCase[]
   lnv_only: { row: number; title: string; film: string; year: string; writers: string[] }[]
   /** One answer that settles many songs: a name under two spellings, a DSP name that is no writer, one company under two names */

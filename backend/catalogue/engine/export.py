@@ -345,7 +345,7 @@ def _alternative_names(ws, layout, dsp):
         new = [x for x in names if not any(same_name(x, y) for y in re.split(r"[;|]", old))]
         if not new:
             continue
-        _put(ws, row, _column(ws, layout, "alt_title"), "; ".join(([old] if old else []) + new), FILLED_FILL)
+        _put(ws, row, _column(ws, layout, "alt_title"), " | ".join(([old] if old else []) + new), FILLED_FILL)
         changes.append([row, clean_text(ws.cell(row, fields["title"] + 1).value), "Alternative work name",
                         f"{'; '.join(new)} – the work name of the source that was not kept"])
     return changes
@@ -416,7 +416,13 @@ def _picks(ws, layout, dsp):
             slots = layout["slots"].get(PICK_SLOTS[field], [])
             old = ", ".join(x for x in (clean_text(ws.cell(row, sl["name"] + 1).value) for sl in slots) if x)
             title = title_of(row)
-            more = _replace_names(ws, layout, row, PICK_SLOTS[field], values, FILLED_FILL, p.get("ipis") if "ipis" in p else None)
+            ipis = p.get("ipis") if "ipis" in p else None
+            if ipis is None and p.get("choice") in ("muso", "custom") and (dsp.get("ipi") or None):
+                # Muso and the LNV write stage names (PP): the LNV gets the member's real name (PA) from the IPI / CAE list
+                listed, found = _listed(dsp, [str(v) for v in values], _row_hints(ws, layout, row, dsp))
+                if listed != [str(v) for v in values] or any(found):
+                    values, ipis = listed, found
+            more = _replace_names(ws, layout, row, PICK_SLOTS[field], values, FILLED_FILL, ipis)
             new = ", ".join(values) + (" (not all fit the LNV's slots)" if more else "")
         elif field == "Link":
             title = title_of(row)
@@ -782,6 +788,7 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
         if r["key"] in plan:
             changes += _write_fill_row(ws, iprs_blocks, last, plan[r["key"]])
     added = {}   # song key -> its new row, for the versions naming it
+    answered = {}   # new rows of songs the reviewer answered themselves: the "Checked as" column
     why = {int(r): list(ns) for r, ns in ((dsp or {}).get("remarks") or {}).items()}   # row -> its remarks
 
     def remark(row, names):
@@ -806,6 +813,8 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
         last += 1
         sn += 1
         added[song["key"]] = last
+        if (song.get("decision") or {}).get("choice") == "add" and not (song.get("decision") or {}).get("auto"):
+            answered[last] = "New row"
         remark(last, song.get("remark"))
         g = song.get("origin")
         _write_dsp_song(ws, layout, last, song, sn,
@@ -847,6 +856,7 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
         if o and o.get("add"):
             o = {**o, "row": added.get(o["add"])}
         typed.write(ws, layout, header, last, sn, t["data"], o, _put, ADDED_FILL, _cae)
+        answered[last] = "Typed by you"
         changes.append([last, t["data"]["title"], "Added song (typed)", "Typed by the reviewer" + (f", added to '{o['title']}'" + (f" (row {o['row']})" if o.get("row") else "") if o else "")
                         + f" (ISRC {t['data']['isrc']})"])
         if arrange is not None and t.get("family"):
@@ -855,14 +865,39 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
     for r, ns in sorted(why.items()):
         if ns:
             changes.append([r, clean_text(ws.cell(r, layout["fields"]["title"] + 1).value), "Remark", "; ".join(ns)])
+    # an exact match is one row (step 2's Exact match: the same ISRC as the main version): its other rows are merged into
+    # the first – their titles are its Alternative Work Name, their ISRCs in its ISRC cell – and left out of the file
+    merged = {}
+    for keep, drop in sorted(((dsp or {}).get("merge") or {}).items()):
+        for r in drop:
+            if 2 <= int(r) <= uploaded and int(r) != int(keep) and int(r) not in merged:
+                merged[int(r)] = int(keep)
+    if merged:
+        title_of = lambda r: clean_text(ws.cell(r, layout["fields"]["title"] + 1).value) if "title" in layout["fields"] else ""
+        changes = [c for c in changes if c[0] not in merged]
+        # the ISRCs of the rows that go (their society blocks too) stay in the file: in the kept row's ISRC cell
+        kept_fields = {(int(r), f) for r, f in (dsp or {}).get("kept", [])}
+        col = layout["fields"].get("isrc")
+        for keep in sorted(set(merged.values())):
+            want = list(dict.fromkeys(isrc_list(((dsp or {}).get("isrcs") or {}).get(keep) or ((dsp or {}).get("isrcs") or {}).get(str(keep)) or [])))
+            if col is None or not want or (keep, "ISRC") in kept_fields or clean_text(ws.cell(keep, col + 1).value):
+                continue
+            _put(ws, keep, col, pipe_isrcs(want), FILLED_FILL)
+            changes.append([keep, title_of(keep), "ISRCs merged", f"{pipe_isrcs(want)} – every ISRC of the exact match's rows, in one row"])
+        for r, keep in sorted(merged.items()):
+            changes.append([keep, title_of(keep), "Exact match – one row", f"Row {r} '{title_of(r)}' merged into this row (the same ISRC); "
+                            "its title is in the Alternative Work Name"])
+        ws.drop = set(merged)
+        if arrange is None:
+            ws.order = [r for r in range(2, last + 1) if r not in merged]
     if arrange is not None:
-        changes = _arrange(ws, layout, last, uploaded, arrange, changes, by=order)
+        changes = _arrange(ws, layout, last, uploaded, {**arrange, "dropped": set(merged), "checked": {**(arrange.get("checked") or {}), **answered}}, changes, by=order)
     if dsp:
         _remark_column(ws, why, uploaded)
     return ws.save(changes, ["LNV row", "Title", "Change", "Detail"], (10, 45, 22, 90), log_name=log_name)
 
 
-ARRANGE_COLUMNS = ("Main version row", "Main version title", "Row in the uploaded LNV")
+ARRANGE_COLUMNS = ("Main version row", "Main version title", "Row in the uploaded LNV", "Checked as")
 _ISRC = re.compile(r"[A-Z]{2}[A-Z0-9]{3}\d{7}")
 # letters and digits of any script kept (a Hindi album sorts by its words, after the Latin ones), the rest dropped
 _sort_text = lambda t: re.sub(r"\s+", " ", re.sub(r"[\W_]+", " ", (t or "").lower())).strip()
@@ -882,6 +917,11 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
     get = lambda r, f: clean_text(ws.cell(r, fields[f] + 1).value) if f in fields else ""
     joins, mains = fam.get("joins") or {}, fam.get("mains") or {}
     moved_rows, moved_isrcs = fam.get("rows") or {}, fam.get("isrcs") or {}
+    # step 2's sections: the exact match's row first, then the possible matches, then the other versions (by ISRC for a
+    # new row); the rows merged into the exact one are left out
+    rank, isrc_rank, keeps, dropped = fam.get("rank") or {}, fam.get("isrc_rank") or {}, fam.get("keep") or {}, fam.get("dropped") or set()
+    # the rows the reviewer checked in step 2, with the section: an LNV row by its number, a new row by its ISRC
+    checked, isrc_checked = fam.get("checked") or {}, fam.get("isrc_checked") or {}
 
     def key_of(title):
         k = _family(title) if title else None
@@ -890,6 +930,8 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
         return k
     rows = []
     for r in range(2, last + 1):
+        if r in dropped:
+            continue
         title = get(r, "title")
         isrcs = set(_ISRC.findall(get(r, "isrc").upper()))
         # a song the reviewer added to another sits under that song's name, whatever its title
@@ -897,7 +939,8 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
         while key in joins:
             key = joins[key]
         rows.append({"row": r, "title": title, "key": key or key_of(title), "fixed": bool(key), "isrcs": isrcs,
-                     "year": (get(r, "release_year") or "")[:4]})
+                     "year": (get(r, "release_year") or "")[:4],
+                     "rank": rank.get(r, next((isrc_rank[i] for i in sorted(isrcs) if i in isrc_rank), 3) if r > uploaded else 3)})
     # a name only the LNV's versions carry joins the shorter name it starts with ('Maula Mere Maula Anwar Flip'), as
     # step 2 does for the DSP's
     names = sorted({x["key"] for x in rows if x["key"]}, key=len)
@@ -925,6 +968,10 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
             hits = [y for i in m["isrcs"] for y in by_isrc.get(i, [])]
             hits.sort(key=lambda y: (y["row"] not in here, y["row"] not in m["rows"], y["row"]))
             found = hits[0] if hits else next((y for y in rows if y["row"] in m["rows"]), None)
+        # the exact match's one row stands for the main version
+        kept = next((y for y in xs if keeps.get(y["row"]) == k), None)
+        if kept:
+            found = kept
         if not found:   # no row of the DSP's main version: the LNV's oldest plain row of the name
             found = min(xs, key=lambda y: (plainness(y["title"]), y["year"] or "9999", y["row"]))
         main_of[k] = found
@@ -935,14 +982,25 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
     order = []
     for k in sorted(groups, key=lambda k: (name(k), k)):
         m = main_of[k]
-        order += sorted(groups[k], key=lambda y: (y is not m, _sort_text(y["title"]), y["row"]))
+        order += sorted(groups[k], key=lambda y: (y is not m, y["rank"], _sort_text(y["title"]), y["row"]))
     if by == "album":   # the same order inside each album; the albums A–Z, rows with no album last
         at = {x["row"]: i for i, x in enumerate(order)}
         album = lambda x: _sort_text(get(x["row"], "movie"))
         order.sort(key=lambda x: (not album(x), album(x), at[x["row"]]))
-    order += [x for x in rows if not x["title"]]   # rows with no title stay together at the end
+    done_of = lambda x: checked.get(x["row"]) or (None if x["row"] <= uploaded else next((isrc_checked[i] for i in sorted(x["isrcs"]) if i in isrc_checked), None))
+    only = bool(fam.get("only_checked"))
+    if only:   # the songs checked in step 2 only: every other row is left out of the file
+        order = [x for x in order if done_of(x)]
+        ws.drop = set(ws.drop) | {x["row"] for x in rows if not done_of(x)}
+    else:
+        order += [x for x in rows if not x["title"]]   # rows with no title stay together at the end
     new_of = {x["row"]: n for n, x in enumerate(order, start=2)}
     ws.order = [x["row"] for x in order]
+    # the serial numbers follow the new order: 1, 2, 3 … (each row's old number is in "Row in the uploaded LNV")
+    sn_col = layout["fields"].get("sn")
+    if sn_col is not None:
+        for n, x in enumerate((x for x in order if x["title"]), start=1):
+            ws.cell(x["row"], sn_col + 1).value = n
 
     # the three columns, after the LNV's last one
     col = _last_column(ws)
@@ -951,18 +1009,28 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
     for k, xs in groups.items():
         m = main_of[k]
         for x in xs:
-            ws.cell(x["row"], col + 2).value = new_of[m["row"]]
+            ws.cell(x["row"], col + 2).value = new_of.get(m["row"])   # (blank: its main version is not in this file)
             ws.cell(x["row"], col + 3).value = m["title"]
     for x in rows:
         if x["row"] <= uploaded and x["title"]:
             ws.cell(x["row"], col + 4).value = x["row"]
+        done = done_of(x)
+        if done:
+            ws.cell(x["row"], col + 5).value = done
 
     renum = lambda text: re.sub(r"\b(rows?) (\d+)", lambda m: f"{m.group(1)} {new_of.get(int(m.group(2)), m.group(2))}", text)
-    out = [[new_of.get(c[0], c[0]) if isinstance(c[0], int) else c[0], c[1], c[2], renum(c[3]) if isinstance(c[3], str) else c[3]] for c in changes]
+    out = [[new_of.get(c[0], c[0]) if isinstance(c[0], int) else c[0], c[1], c[2], renum(c[3]) if isinstance(c[3], str) else c[3]] for c in changes
+           if not isinstance(c[0], int) or c[0] in new_of]   # (a row left out of the file: its changes too)
+    if only:
+        out.insert(0, [None, "", "Checked songs only", f"The {len(order)} rows of the songs checked in step 2 (Exact match, Possible match, Other version, "
+                       "a new row, a typed song) – every other row of the LNV is left out. Download 'Every row' for the whole LNV."])
+    out.insert(0, [None, "", "Serial numbers", "SN is 1, 2, 3 … in this file's order; the number each row had is in 'Row in the uploaded LNV'."] if sn_col is not None else None)
+    out = [c for c in out if c]
     out.insert(0, [None, "", "Sorted A–Z by album" if by == "album" else "Sorted A–Z",
                    ("Rows by album A–Z (rows with no album last); in each album " if by == "album" else "Rows in alphabetical order, ")
-                   + "each song's rows together, its main version first. "
-                   "'Main version row' and 'Main version title' name each song's main version; 'Row in the uploaded LNV' is the row "
+                   + "each song's rows together, its main version first (an exact match is one row), then its possible matches, then its other versions. "
+                   "'Main version row' and 'Main version title' name each song's main version; 'Checked as' the section a row was checked in "
+                   "(Exact match, Possible match, Other version); 'Row in the uploaded LNV' is the row "
                    "each one had before. Row numbers in this list are the new ones."])
     return out
 
