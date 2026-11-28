@@ -8,7 +8,7 @@ import { POINTS, releases } from '../src/lib/whatsNew'
 import { blankSong, addItems, homeOf, picksFor, problems } from '../src/pages/client/addSongModel'
 import { logContext, withLog } from '../src/pages/client/changeLog'
 import { EACH, listCount, sheetOf, sheetsOf } from '../src/pages/client/lists'
-import { NO_PENDING, checkedIn, familiesOf, inFamilies, pendingItems, tickGroup, toCheck } from '../src/pages/client/Families'
+import { NO_PENDING, checkedIn, chooseClass, classesNow, familiesOf, inFamilies, pendingItems, tickGroup, toCheck } from '../src/pages/client/Families'
 import { isDeleted, isNewRow, itemsOf, draftOf } from '../src/pages/client/reviewModel'
 
 const root = process.cwd()
@@ -57,23 +57,26 @@ test('counts in step: one tick is one less to check and one more checked, before
   const a = song('Alpha', 'A', 'alpha', [row(80, 'Alpha'), row(81, 'Alpha Gujarati')])
   const f = familiesOf([a])[0]
   assert.deepEqual([checkedIn(NO_PENDING, f), toCheck(NO_PENDING, f)], [0, 2])
-  const p = tickGroup(NO_PENDING, f.possible[0], true, {})
-  assert.deepEqual([checkedIn(p, f), toCheck(p, f)], [1, 1])
+  // v2.0: a match is checked when it is put in a section (Original here) – it is linked with it
+  const p = chooseClass(NO_PENDING, step([a]), f.todo[0], 'exact')
+  const f1 = familiesOf([a], [], [], classesNow(step([a]), p))[0]
+  assert.deepEqual([checkedIn(p, f1), toCheck(p, f1)], [1, 1])
   const link = pendingItems(p, step([a])).find((x) => x.key === 'link:A')
   assert.deepEqual(link, { key: 'link:A', choice: 'same', data: { rows: [80], also: [81] } })
   // as the server sends it back
   const saved = { ...a, done: true, answer: { song: 'A', choice: 'same', rows: [80], also: [81], by: 'you' as const } }
-  const f2 = familiesOf([saved])[0]
-  assert.deepEqual([checkedIn(NO_PENDING, f2), toCheck(NO_PENDING, f2), f2.possible.length], [1, 1, 2])
-  // the second one too: linked to both, nothing left beside
-  const both = pendingItems(tickGroup(NO_PENDING, f2.possible[1], true, {}), step([saved])).find((x) => x.key === 'link:A')
-  assert.deepEqual(both!.data, { rows: [80, 81] })
+  const f2 = familiesOf([saved], [], [], { 'class:80': 'exact' })[0]
+  assert.deepEqual([checkedIn(NO_PENDING, f2), toCheck(NO_PENDING, f2), f2.groups.length], [1, 1, 2])
+  // a tick alone (a value kept) links it, it does not check it: only a section does
+  const both = tickGroup(NO_PENDING, f2.todo[0], true, {})
+  assert.deepEqual(pendingItems(both, step([saved])).find((x) => x.key === 'link:A')!.data, { rows: [80, 81] })
+  assert.equal(toCheck(both, f2), 1)
   // an answer from an earlier version keeps its one row
-  assert.equal(familiesOf([{ ...saved, answer: { ...saved.answer, also: undefined } }])[0].possible.length, 1)
+  assert.equal(familiesOf([{ ...saved, answer: { ...saved.answer, also: undefined } }])[0].groups.length, 1)
   assert.deepEqual(itemsOf(saved, { ...draftOf(saved), rows: [80] }).find((x) => x.key === 'link:A')!.data, { rows: [80], also: [81] })
 })
 
-test('a song chosen from the sheet joins, checked: one less to check, one more checked over the whole step', () => {
+test('a song chosen from the sheet joins: its match is to check under the song it joined', () => {
   const a = song('Alpha', 'A', 'alpha', [row(1, 'Alpha', 'exact')]), b = song('Beta', 'B', 'beta', [row(2, 'Beta')]), c = song('Gamma', 'C', 'gamma', [])
   const d = step([a, b, c])
   const fs = familiesOf(d.cases), f = fs.find((x) => x.title === 'Alpha')!
@@ -86,10 +89,10 @@ test('a song chosen from the sheet joins, checked: one less to check, one more c
   assert.deepEqual(addItems(picks[1], f, d).map((x) => [x.key, x.choice, x.data!.to]), [[`map:${c.muso[0].id}`, 'join', a.muso[0].id]])
   const tot = (xs: ReviewCase[]) => familiesOf(xs).reduce((t, x) => [t[0] + toCheck(NO_PENDING, x), t[1] + checkedIn(NO_PENDING, x)], [0, 0])
   const after = [a, { ...b, family: 'alpha', joined: { to: 'A', title: 'Alpha', from: 'Beta' }, done: true, answer: { song: 'B', choice: 'same', rows: [2], by: 'you' as const } }, c]
-  assert.deepEqual([tot(d.cases), tot(after)], [[2, 0], [1, 1]])
+  assert.deepEqual([tot(d.cases), tot(after)], [[2, 0], [2, 0]])   // v2.0: to check there – Original or Other version
   const g = familiesOf(after)[0]
   assert.equal(g.main.fields.Title, 'Alpha')   // an added song never becomes the main version
-  assert.equal(g.possible.length, 1)
+  assert.equal(g.groups.length, 2)
   // a song of the name itself is never offered
   assert.equal(picksFor(g, familiesOf(after), [], NO_PENDING).length, 0)
 })
@@ -137,7 +140,8 @@ test('the Excel lists hold exactly the rows their counts count', () => {
   const gone = song('Gone', 'G', 'gone', [], { done: true, answer: { song: 'G', choice: 'deleted', by: 'you' }, was: [row(7, 'Gone')] })
   const d = step([a, n, add, gone], [typedSong('alpha')])
   const x = { families: familiesOf(d.cases, d.typed), loose: d.cases.filter((c) => !inFamilies(c) && !isNewRow(c) && !isDeleted(c)), newRows: d.cases.filter(isNewRow), deleted: d.cases.filter(isDeleted), isDone: (c: ReviewCase) => c.done, d, p: NO_PENDING }
-  assert.deepEqual(EACH.map((k) => listCount(x, k)), [1, 1, 1, 0, 1, 2, 0, 1, 1, 2, 1, 1])   // v1.7: song status first, not a match after the checked ones · v1.8: other versions after the possible ones
+  // v1.7: song status first, not a match after the checked ones · v2.0: to check, Original, other versions, deleted matches
+  assert.deepEqual(EACH.map((k) => listCount(x, k)), [1, 2, 0, 0, 0, 1, 0, 1, 1, 2, 1, 1])
   for (const k of EACH) { const s = sheetOf(x, k); assert.equal(s.rows.length, listCount(x, k), k); assert.ok(s.rows.every((r) => r.length === s.header.length), k) }
   assert.equal(sheetsOf(x, 'all').length, EACH.length)
   const s = sheetOf(x, 'deleted')

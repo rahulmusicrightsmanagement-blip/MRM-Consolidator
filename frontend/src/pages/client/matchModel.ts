@@ -2,20 +2,24 @@ import type { CaseRecord, MatchClass } from '../../types'
 import { list } from './Block'
 import { shownOf } from './reviewModel'
 
-/** Step 2's three sections and what a match has in common with the song – no React here: unit-tested in Node.
- *  Exact match: the LNV row holds the main version's ISRC (the ISRC first; the singer is the second criterion, shown,
- *  never deciding) – every exact row of a song is ONE row in the LNV. Possible match: another ISRC. Other version: a
- *  version (remix, lofi …) of the song. The reviewer moves a match to another section with its three buttons. */
+/** Step 2's sections (v2.0) and what a match has in common with the song – no React here: unit-tested in Node.
+ *  Every match starts in To check, compared with the main version; the reviewer puts it in Original (the song itself:
+ *  the first one put there is its ONE row in the LNV, the titles of the others its Alternative work name), Other
+ *  version (remix, lofi …: a row of its own) or Deleted (out of the LNV). Nothing goes into a section by itself – the
+ *  main version's ISRC is only a suggestion. */
 
-export const CLASSES: MatchClass[] = ['exact', 'possible', 'version']
-export const CLASS_NAME: Record<MatchClass, string> = { exact: 'Exact match', possible: 'Possible match', version: 'Other version' }
+export const CLASSES: MatchClass[] = ['exact', 'version', 'deleted']
+export const CLASS_NAME: Record<MatchClass, string> = { exact: 'Original', version: 'Other version', deleted: 'Deleted' }
+/** A section saved by v1.8 (Possible match) is an other version now: a row of its own, as before. */
+export const savedClass = (x: string | null | undefined): MatchClass | null => x === 'possible' ? 'version' : x === 'exact' || x === 'version' || x === 'deleted' ? x : null
 /** The decision a section is saved under: an LNV row, or a recording beside no LNV row. */
 export const rowClassKey = (row: number) => `class:${row}`
 export const recClassKey = (id: number) => `class:m${id}`
 
-/** The section of a match until the reviewer moves it – the same rule as the download (review.default_class). */
-export function defaultClass(lnvIsrcs: string[], mainIsrcs: string[], version: boolean): MatchClass {
-  return lnvIsrcs.some((i) => mainIsrcs.includes(i)) ? 'exact' : version ? 'version' : 'possible'
+/** What the screen suggests for a match nobody checked yet (review.default_class): the main version's ISRC – Original;
+ *  a version the LNV has – Other version; else nothing. */
+export function defaultClass(lnvIsrcs: string[], mainIsrcs: string[], version: boolean): MatchClass | null {
+  return lnvIsrcs.some((i) => mainIsrcs.includes(i)) ? 'exact' : version ? 'version' : null
 }
 
 const LEGAL = new Set(['the', 'm', 's', 'pvt', 'private', 'ltd', 'limited', 'llp', 'llc', 'inc', 'co', 'company', 'corp', 'india', 'indian', 'music',

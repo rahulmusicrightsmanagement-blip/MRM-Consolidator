@@ -10,7 +10,7 @@ export type Line = { id: number; muso: string; lnv?: string; label?: string; def
 
 export function titleModel(f: Family, d: Step1, p: Pending) {
   const lines = new Map<number, Line>()
-  ;[...f.exact, ...f.possible, ...(f.version ?? [])].flatMap((g) => g.entries).forEach((e) => {
+  ;f.groups.flatMap((g) => g.entries).forEach((e) => {
     if (e.tr.id == null || lines.has(e.tr.id)) return
     const earlier = d.picks[pickKey(e.row, 'Title')] !== undefined   // a title taken from the DSP before stays the DSP's
     lines.set(e.tr.id, { id: e.tr.id, muso: value(e.tr.fields.Title), lnv: value(e.lnv.fields.Title) || undefined, label: `LNV row ${e.row}`, def: earlier ? 'muso' : 'lnv' })

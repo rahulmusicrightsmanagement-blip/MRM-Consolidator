@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import type { CaseRecord, MovedOut, ReviewCase, Step1 } from '../src/types'
 import { autoAlternative, dateOf, editItem, isLink, isrcsOf, otherNames, pipe, rawOf, sameName, typedText, typedValue } from '../src/pages/client/editModel'
 import { fieldChoices, keepText } from '../src/pages/client/fieldModel'
-import { NO_PENDING, STATUS, checkedIn, familiesOf, newRowItems, pendingItems, progressOf, putBackItems, restOf, tickGroup, toCheck, turnDownItems } from '../src/pages/client/Families'
+import { NO_PENDING, STATUS, checkedIn, chooseClass, classesNow, familiesOf, newRowItems, pendingItems, progressOf, putBackItems, restOf, toCheck, turnDownItems } from '../src/pages/client/Families'
 import type { Group } from '../src/pages/client/Families'
 import { describe as describeChange, logContext, withLog } from '../src/pages/client/changeLog'
 import { draftOf, itemsOf, pickItem } from '../src/pages/client/reviewModel'
@@ -163,39 +163,44 @@ const six = () => {
 }
 
 test('10 four exact and two possible: all six stay until the last is answered', () => {
-  const a = six(), f = familiesOf([a])[0]
-  assert.deepEqual([f.exact.length, f.possible.length, progressOf(NO_PENDING, f)], [4, 2, { total: 6, left: 6, done: 0, status: 'todo' }])
-  // one ticked: five left, the link names the others as still to check
-  const p = tickGroup(NO_PENDING, f.exact[0], true, {})
-  assert.deepEqual([toCheck(p, f), progressOf(p, f).status], [5, 'part'])
+  const a = six(), d = step([a]), f = familiesOf([a])[0]
+  // v2.0: all six to check – the four with the main version's ISRC suggested as Original, none in it by itself
+  assert.deepEqual([f.todo.length, f.exact.length, f.todo.filter((g) => g.def === 'exact').length, progressOf(NO_PENDING, f)], [6, 0, 4, { total: 6, left: 6, done: 0, status: 'todo' }])
+  // one put in Original: five left, the link names the others as still to check
+  const p = chooseClass(NO_PENDING, d, f.todo[0], 'exact')
+  const f1 = familiesOf([a], [], [], classesNow(d, p))[0]
+  assert.deepEqual([toCheck(p, f1), progressOf(p, f1).status], [5, 'part'])
   assert.deepEqual(pendingItems(p, step([a])).find((x) => x.key === 'link:A'), { key: 'link:A', choice: 'same', data: { rows: [1], also: [2, 3, 4, 5, 6] } })
   // as the server sends it back, with one of them turned down
   const b = { ...a, lnv: a.lnv.filter((r) => r.row !== 5), off: [5], off_lnv: [a.lnv[4]], done: true, answer: { song: 'A', choice: 'same', rows: [1], also: [2, 3, 4, 6], by: 'you' as const } }
-  const g = familiesOf([b])[0]
-  assert.deepEqual([g.exact.length, g.possible.length, g.out.map((o) => [o.rows[0], o.why, o.match])], [4, 1, [[5, 'off', 'possible']]])
+  const g = familiesOf([b], [], [], { 'class:1': 'exact' })[0]
+  assert.deepEqual([g.exact.length, g.todo.length, g.out.map((o) => [o.rows[0], o.why, o.match])], [1, 4, [[5, 'off', 'possible']]])
   assert.deepEqual(progressOf(NO_PENDING, g), { total: 6, left: 4, done: 2, status: 'part' })
-  // every one answered: still six on screen, and the song is done
+  // every one answered: still six on screen, and the song is all checked – completed once saved to the LNV
   const all = { ...b, lnv: a.lnv.slice(0, 4), off: [5, 6], off_lnv: a.lnv.slice(4), answer: { ...b.answer, rows: [1, 2, 3, 4], also: undefined } }
-  assert.deepEqual(progressOf(NO_PENDING, familiesOf([all])[0]), { total: 6, left: 0, done: 6, status: 'done' })
-  assert.deepEqual(STATUS, { todo: 'Left to check', part: 'Partly checked', done: 'All checked' })
+  const sections = { 'class:1': 'exact', 'class:2': 'exact', 'class:3': 'version', 'class:4': 'deleted' } as const
+  assert.deepEqual(progressOf(NO_PENDING, familiesOf([all], [], [], sections)[0]), { total: 6, left: 0, done: 6, status: 'done' })
+  assert.equal(progressOf(NO_PENDING, familiesOf([all], [], [], sections)[0], ['alpha']).status, 'complete')
+  assert.deepEqual(STATUS, { todo: 'Left to check', part: 'Partly checked', done: 'All checked', complete: 'Completed' })
 })
 
 test('10 “Not a match – new row” answers one match; the song is a new row only after its last one', () => {
   const a = six(), f = familiesOf([a])[0], d = step([a])
-  const one = newRowItems(f.possible[0], d)
+  const five = f.todo.find((x) => x.rows[0] === 5)!
+  const one = newRowItems(five, d)
   assert.deepEqual([one.waiting, one.items], [[1, 2, 3, 4, 6], [{ key: 'off:A', choice: 'rows', data: { rows: [5], then: 'add' } }]])
-  assert.deepEqual(restOf(a, f.possible[0]), [1, 2, 3, 4, 6])
+  assert.deepEqual(restOf(a, five), [1, 2, 3, 4, 6])
   // the last one: the whole song, with every row it was matched to
   const last = { ...a, lnv: [a.lnv[5]], off: [1, 2, 3, 4, 5], off_then: 'add' }
   const g = familiesOf([last])[0]
-  const r = newRowItems(g.possible[0], step([last]))
+  const r = newRowItems(g.todo[0], step([last]))
   assert.deepEqual(r.waiting, [])
   assert.deepEqual(r.items.find((x) => x.key === 'link:A'), { key: 'link:A', choice: 'none', data: { rows: [6, 1, 2, 3, 4, 5] } })
   assert.deepEqual(r.items.filter((x) => ['missing:A', 'off:A'].includes(x.key)).map((x) => x.choice), ['add', null])
   // a linked row turned down is unlinked, the other stays
   const linked = { ...a, done: true, answer: { song: 'A', choice: 'same', rows: [1, 2], also: [3, 4, 5, 6], by: 'you' as const } }
   const h = familiesOf([linked])[0]
-  const t = turnDownItems(linked, h.exact[0], null, step([linked]))
+  const t = turnDownItems(linked, h.todo[0], null, step([linked]))
   assert.deepEqual(t.find((x) => x.key === 'off:A')!.data, { rows: [1] })
   assert.deepEqual(t.find((x) => x.key === 'link:A')!.data, { rows: [2], also: [3, 4, 5, 6] })
 })
@@ -230,10 +235,10 @@ test('10 a song sent to a new row, deleted or mapped away stays shown under its 
 test('10 a match that lost its row to another recording is still to check', () => {
   const v = { key: 'version:X', type: 'Lofi', row: 8, muso: rec({ Title: 'Alpha Lofi' }, { id: 50 }), lnv: lnv(8, { Title: 'Alpha Lofi' }), isrc: false, album: false, year: false, answer: null, taken: '‘Beta’' }
   const f = familiesOf([song('Alpha', 'A', [lnv(1, { Title: 'Alpha' })], { in_lnv: [v] })])[0]
-  // (v1.8.0: a version the LNV has is under Other version)
-  assert.deepEqual([f.possible.map((g) => g.rows[0]), f.version.map((g) => g.rows[0]), toCheck(NO_PENDING, f)], [[1], [8], 2])
+  // (v2.0: both to check – a version the LNV has suggested as Other version)
+  assert.deepEqual([f.todo.map((g) => g.rows[0]), f.todo.map((g) => g.def), toCheck(NO_PENDING, f)], [[1, 8], [null, 'version'], 2])
   const none = familiesOf([song('Alpha', 'A', [lnv(1, { Title: 'Alpha' })], { in_lnv: [{ ...v, answer: 'none', taken: undefined }] })])[0]
-  assert.deepEqual([none.possible.length, none.out.map((o) => [o.rows[0], o.version])], [1, [[8, 'version:X']]])
+  assert.deepEqual([none.todo.length, none.out.map((o) => [o.rows[0], o.version])], [1, [[8, 'version:X']]])
   assert.deepEqual(putBackItems(none.out[0], step([])), [{ key: 'version:X', choice: null }])
 })
 
@@ -249,7 +254,7 @@ test('14 the lists count what they hold – status of every song and every match
   const b = song('Beta', 'B', [lnv(9, { Title: 'Beta' })])
   const c = song('Gamma', 'C', [lnv(10, { Title: 'Gamma' })], { done: true, answer: { song: 'C', choice: 'same', rows: [10], by: 'you' } })
   const d = step([a, b, c], { updates: { last: [], songs: { 'f:alpha': '2026-11-25T09:30:00+00:00' } } })
-  const x = { families: familiesOf(d.cases), loose: [], newRows: [], deleted: [], isDone: () => false, d, p: NO_PENDING }
+  const x = { families: familiesOf(d.cases, [], [], { 'class:1': 'exact', 'class:10': 'version' }), loose: [], newRows: [], deleted: [], isDone: () => false, d, p: NO_PENDING }
   for (const k of EACH) { const s = sheetOf(x, k); assert.equal(s.rows.length, listCount(x, k), k); assert.ok(s.rows.every((r) => r.length === s.header.length), k) }
   const st = sheetOf(x, 'status').rows
   assert.deepEqual(st.map((r) => r.slice(0, 6)), [['Alpha', 'Partly checked', 6, 1, 1, 4], ['Beta', 'Left to check', 1, 0, 0, 1], ['Gamma', 'All checked', 1, 1, 0, 0]])

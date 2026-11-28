@@ -496,7 +496,7 @@ def _write_dsp_song(ws, layout, row, song, sn, extra=None, dsp=None):
     year = (song.get("year") or "")[:4]
     values = {"sn": sn, "title": song["title"], "isrc": pipe_isrcs(song.get("isrcs") or []), "movie": song.get("album", ""),
               "release_year": year, "release_date": release_date(song.get("dates") or [], year),
-              "duration": song.get("duration", ""), "label": song.get("label", ""), "alt_title": "; ".join(song.get("alt") or []),
+              "duration": song.get("duration", ""), "label": song.get("label", ""), "alt_title": " | ".join(song.get("alt") or []),
               "website": song.get("link", "") if is_link(song.get("link")) else "", **(extra or {})}
     for field, value in values.items():
         _put(ws, row, _column(ws, layout, field) if value else fields.get(field), value, ADDED_FILL)
@@ -865,13 +865,22 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
     for r, ns in sorted(why.items()):
         if ns:
             changes.append([r, clean_text(ws.cell(r, layout["fields"]["title"] + 1).value), "Remark", "; ".join(ns)])
-    # an exact match is one row (step 2's Exact match: the same ISRC as the main version): its other rows are merged into
-    # the first – their titles are its Alternative Work Name, their ISRCs in its ISRC cell – and left out of the file
+    # Original is one row (step 2, v2.0: the matches the reviewer put in Original): its other rows are merged into the
+    # first one put there – their titles are its Alternative Work Name, their ISRCs in its ISRC cell – and left out
     merged = {}
     for keep, drop in sorted(((dsp or {}).get("merge") or {}).items()):
         for r in drop:
             if 2 <= int(r) <= uploaded and int(r) != int(keep) and int(r) not in merged:
                 merged[int(r)] = int(keep)
+    # the LNV rows the reviewer deleted in step 2 (v2.0): out of the file
+    deleted = {int(r) for r in (dsp or {}).get("delete") or () if 2 <= int(r) <= uploaded and int(r) not in merged}
+    if deleted:
+        title_of = lambda r: clean_text(ws.cell(r, layout["fields"]["title"] + 1).value) if "title" in layout["fields"] else ""
+        changes = [c for c in changes if c[0] not in deleted]
+        changes += [[None, title_of(r), "Deleted", f"Row {r} '{title_of(r)}' deleted in step 2 – left out of the file"] for r in sorted(deleted)]
+        ws.drop = set(ws.drop) | deleted
+        if arrange is None and not merged:
+            ws.order = [r for r in range(2, last + 1) if r not in deleted]
     if merged:
         title_of = lambda r: clean_text(ws.cell(r, layout["fields"]["title"] + 1).value) if "title" in layout["fields"] else ""
         changes = [c for c in changes if c[0] not in merged]
@@ -885,13 +894,13 @@ def final_report(master_path, iprs=None, final=None, edits=(), fill=None, dsp=No
             _put(ws, keep, col, pipe_isrcs(want), FILLED_FILL)
             changes.append([keep, title_of(keep), "ISRCs merged", f"{pipe_isrcs(want)} – every ISRC of the exact match's rows, in one row"])
         for r, keep in sorted(merged.items()):
-            changes.append([keep, title_of(keep), "Exact match – one row", f"Row {r} '{title_of(r)}' merged into this row (the same ISRC); "
+            changes.append([keep, title_of(keep), "Original – one row", f"Row {r} '{title_of(r)}' merged into this row (put in Original); "
                             "its title is in the Alternative Work Name"])
-        ws.drop = set(merged)
+        ws.drop = set(ws.drop) | set(merged)
         if arrange is None:
-            ws.order = [r for r in range(2, last + 1) if r not in merged]
+            ws.order = [r for r in range(2, last + 1) if r not in merged and r not in deleted]
     if arrange is not None:
-        changes = _arrange(ws, layout, last, uploaded, {**arrange, "dropped": set(merged), "checked": {**(arrange.get("checked") or {}), **answered}}, changes, by=order)
+        changes = _arrange(ws, layout, last, uploaded, {**arrange, "dropped": set(merged) | deleted, "checked": {**(arrange.get("checked") or {}), **answered}}, changes, by=order)
     if dsp:
         _remark_column(ws, why, uploaded)
     return ws.save(changes, ["LNV row", "Title", "Change", "Detail"], (10, 45, 22, 90), log_name=log_name)
@@ -1022,15 +1031,15 @@ def _arrange(ws, layout, last, uploaded, fam, changes, by="song"):
     out = [[new_of.get(c[0], c[0]) if isinstance(c[0], int) else c[0], c[1], c[2], renum(c[3]) if isinstance(c[3], str) else c[3]] for c in changes
            if not isinstance(c[0], int) or c[0] in new_of]   # (a row left out of the file: its changes too)
     if only:
-        out.insert(0, [None, "", "Checked songs only", f"The {len(order)} rows of the songs checked in step 2 (Exact match, Possible match, Other version, "
+        out.insert(0, [None, "", "Checked songs only", f"The {len(order)} rows of the songs checked in step 2 (Original, Other version, "
                        "a new row, a typed song) – every other row of the LNV is left out. Download 'Every row' for the whole LNV."])
     out.insert(0, [None, "", "Serial numbers", "SN is 1, 2, 3 … in this file's order; the number each row had is in 'Row in the uploaded LNV'."] if sn_col is not None else None)
     out = [c for c in out if c]
     out.insert(0, [None, "", "Sorted A–Z by album" if by == "album" else "Sorted A–Z",
                    ("Rows by album A–Z (rows with no album last); in each album " if by == "album" else "Rows in alphabetical order, ")
-                   + "each song's rows together, its main version first (an exact match is one row), then its possible matches, then its other versions. "
+                   + "each song's rows together, its main version first (Original is one row), then its other versions. "
                    "'Main version row' and 'Main version title' name each song's main version; 'Checked as' the section a row was checked in "
-                   "(Exact match, Possible match, Other version); 'Row in the uploaded LNV' is the row "
+                   "(Original, Other version); 'Row in the uploaded LNV' is the row "
                    "each one had before. Row numbers in this list are the new ones."])
     return out
 

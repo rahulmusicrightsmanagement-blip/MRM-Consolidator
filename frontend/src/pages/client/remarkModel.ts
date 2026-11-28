@@ -36,7 +36,7 @@ export function spotsFor(c: ReviewCase, families: Family[], p: Pending): Spot[] 
   const put = (s: Spot) => { if (!seen.has(s.key)) { seen.add(s.key); out.push(s) } }
   for (const f of families) {
     const good = (x: ReviewCase) => x.id !== c.id && x.muso[0]?.id != null && !x.muso[0].moved
-    for (const g of [...f.exact, ...f.possible, ...(f.version ?? [])]) {
+    for (const g of f.groups) {
       const e = g.entries.find((y) => !y.v && good(y.c)) ?? g.entries.find((y) => good(y.c))
       if (!e) continue
       const base = { match: g.match, c: e.c, to: e.c.muso[0].id!, family: f.title, checked: gTicked(p, g) }
@@ -47,7 +47,7 @@ export function spotsFor(c: ReviewCase, families: Family[], p: Pending): Spot[] 
     }
     for (const { c: x, r } of [...f.rest, ...(f.solos ?? [])]) {
       if (!good(x) || r.id == null) continue
-      const g = [...f.exact, ...f.possible, ...(f.version ?? [])].find((y) => y.entries.some((e) => e.c.id === x.id))
+      const g = f.groups.find((y) => y.entries.some((e) => e.c.id === x.id))
       put({ key: `m${r.id}`, from: 'muso', match: g?.match ?? 'possible', c: x, to: x.muso[0].id!, row: g?.rows[0], rowTitle: g ? value(g.lnv.fields.Title) : undefined, title: value(r.fields.Title), isrcs: list(r.fields.ISRC),
         film: value(r.fields['Film / album']), writers: writersOf(r).join(', '), family: f.title, checked: !!g && gTicked(p, g), version: r.version ?? undefined })
     }
