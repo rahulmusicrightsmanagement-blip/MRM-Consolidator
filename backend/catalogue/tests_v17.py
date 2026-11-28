@@ -133,7 +133,7 @@ class Base(TestCase):
     def case(self, title, step=None):
         return next(c for c in (step or self.step())["cases"] if c["title"] == title and c["kind"] not in ("twice", "names"))
 
-    def book(self, query="?stage=1"):
+    def book(self, query="?stage=1&rows=all"):
         res = self.client.get(f"/api/clients/{self.cid}/steps/lnv/{query}")
         self.assertEqual(res.status_code, 200, res.content[:300])
         return res.content
@@ -143,6 +143,10 @@ class Base(TestCase):
         wb = openpyxl.load_workbook(io.BytesIO(content or self.book()))
         rows = [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
         return [dict(zip(rows[0], r)) for r in rows[1:]], [" ".join(str(c) for c in r if c is not None) for r in wb["MRM changes"].iter_rows(values_only=True)]
+
+    def link_dil(self):
+        """v1.8.0: Dil Ki Baat's LNV row has no ISRC – a possible match: the reviewer links it."""
+        self.save({"key": f"link:{self.case('Dil Ki Baat (From \"Film B\")')['answer']['song']}", "choice": "same", "data": {"rows": [3]}})
 
     def lnv_row(self, title, film=None, rows=None):
         rows = rows or self.sheet()[0]
@@ -418,10 +422,11 @@ class CompactTests(SimpleTestCase):
 
 class OutputTests(Base):
     def test_5_the_other_work_name_is_the_alternative(self):
+        self.link_dil()
         rows, changes = self.sheet()
         r = self.lnv_row("Dil Ki Baat", rows=rows)
         # the LNV's name kept: Muso's is the alternative, after the one the LNV had
-        self.assertEqual(r["Alternate Work"], 'Old Name; Dil Ki Baat (From "Film B")')
+        self.assertEqual(r["Alternate Work"], 'Old Name | Dil Ki Baat (From "Film B")')   # (v1.8.0: a pipe between them)
         self.assertTrue(any("Alternative work name" in c for c in changes))
         # the same name on both sides: nothing to add
         self.assertIsNone(self.lnv_row("Pyaar Ka Geet", "Film A", rows)["Alternate Work"])
@@ -430,10 +435,10 @@ class OutputTests(Base):
         rid = c["muso"][0]["id"]
         self.save({"key": f"title:{rid}", "choice": "muso", "data": {"value": "Dil Ki Baat (From \"Film B\")"}})
         r = self.lnv_row('Dil Ki Baat (From "Film B")')
-        self.assertEqual(r["Alternate Work"], "Old Name; Dil Ki Baat")
+        self.assertEqual(r["Alternate Work"], "Old Name | Dil Ki Baat")
         # a title typed: both
         self.save({"key": f"title:{rid}", "choice": "custom", "data": {"value": "Dil Ki Baat Hai"}})
-        self.assertEqual(self.lnv_row("Dil Ki Baat Hai")["Alternate Work"], 'Old Name; Dil Ki Baat; Dil Ki Baat (From "Film B")')
+        self.assertEqual(self.lnv_row("Dil Ki Baat Hai")["Alternate Work"], 'Old Name | Dil Ki Baat | Dil Ki Baat (From "Film B")')
         # the reviewer's own value wins; the LNV's own kept on purpose too
         self.save({"key": "pick:3:Alternate title", "choice": "custom", "data": {"value": "Typed Name"}})
         self.assertEqual(self.lnv_row("Dil Ki Baat Hai")["Alternate Work"], "Typed Name")
@@ -446,6 +451,7 @@ class OutputTests(Base):
         self.assertEqual(self.lnv_row("Naya Geet")["Alternate Work"], "Brand New Hit")
 
     def test_6_every_isrc_of_a_song_with_pipes_and_never_twice(self):
+        self.link_dil()
         rows, changes = self.sheet()
         # the LNV's own first, then Muso's other recording on the same album
         self.assertEqual(self.lnv_row("Pyaar Ka Geet", "Film A", rows)["ISRC"], "INAA19000001 | INAA19000002")
@@ -503,6 +509,7 @@ class OutputTests(Base):
         head = [h for h in HEAD if h not in ("Date Of Release(DD-MM-YYYY)", "Alternate Work", "Website1")]
         lnv_file(f"{self.tmp}/bare.xlsx", LNV, head)
         self.upload("master/", "bare.xlsx")
+        self.link_dil()
         rows, _ = self.sheet()
         r = self.lnv_row("Dil Ki Baat", rows=rows)
         self.assertEqual((r["Date Of Release(DD-MM-YYYY)"], r["Alternate Work"]), ("15-08-1991", 'Dil Ki Baat (From "Film B")'))
@@ -541,6 +548,7 @@ class CorrectionTests(Base):
         self.assertEqual(self.lnv_row("Brand New Hit")["ISRC"], "INAA19000099")
 
     def test_8_a_corrected_value_fills_the_lnvs_blanks_and_the_match_stays(self):
+        self.link_dil()
         c = self.case('Dil Ki Baat (From "Film B")')
         rid = c["muso"][0]["id"]
         level = c["lnv"][0]["check"]["level"]
@@ -551,7 +559,7 @@ class CorrectionTests(Base):
         c2 = self.case("Something Else Entirely")
         self.assertEqual((c2["answer"], c2["lnv"][0]["row"], c2["lnv"][0]["check"]["level"], c2["family"]), (c["answer"], 3, level, c["family"]))
         r = self.lnv_row("Dil Ki Baat")
-        self.assertEqual((r["ISRC"], r["Date Of Release(DD-MM-YYYY)"], r["Alternate Work"]), ("INAA19000015", "20-08-1991", "Old Name; Something Else Entirely"))
+        self.assertEqual((r["ISRC"], r["Date Of Release(DD-MM-YYYY)"], r["Alternate Work"]), ("INAA19000015", "20-08-1991", "Old Name | Something Else Entirely"))
 
     def test_8_the_title_kept_from_muso_is_the_corrected_one(self):
         c = self.case("Has A Date")
@@ -884,7 +892,7 @@ class FileSizeTests(Base):
         self.assertEqual(sorted(str(r["Work*"]) for r in self.sheet(final)[0]), sorted(str(r["Work*"]) for r in rows))
 
     def test_12_by_album_too(self):
-        rows, _ = self.sheet(self.book("?stage=1&order=album"))
+        rows, _ = self.sheet(self.book("?stage=1&rows=all&order=album"))
         films = [r["Movie Name *"] for r in rows]
         self.assertEqual(films, sorted(films, key=lambda f: (not f, (f or "").lower())))
 

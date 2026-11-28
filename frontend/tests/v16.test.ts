@@ -17,7 +17,9 @@ const row = (n: number, title: string, level: 'exact' | 'possible' = 'possible',
   rec({ Title: title, ISRC: [`INH10051${String(1000 + n)}`] }, { src: 'LNV', row: n, check: { writers: 'same', publisher: 'same', level, via } })
 let id = 0
 const song = (title: string, key: string, family: string, lnv: CaseRecord[], over: Partial<ReviewCase> = {}): ReviewCase => ({
-  id: key, kind: 'check', title, why: '', family, merge: null, muso: [rec({ Title: title, Singer: ['S'] }, { id: ++id, in: true, part: 'original' })], lnv,
+  id: key, kind: 'check', title, why: '', family, merge: null, lnv,
+  // v1.8.0: an exact match holds the main version's ISRC
+  muso: [rec({ Title: title, Singer: ['S'], ISRC: lnv.filter((l) => l.check?.level === 'exact').flatMap((l) => l.fields.ISRC as string[]) }, { id: ++id, in: true, part: 'original' })],
   answer: { song: key, choice: null, rows: [], by: null }, done: false, new_row: null, updates: [], ...over })
 const step = (cases: ReviewCase[], typed: TypedSong[] = []) => ({ source: 'Muso', cases, picks: {}, titles: {}, lnv_only: [{ row: 99, title: 'Z', film: '', year: '', writers: ['A'] }], typed } as unknown as Step1)
 const typedSong = (family: string): TypedSong => ({ key: 'song:1', family, to: 'A', to_title: 'Alpha', rows: [], add: null, record: rec({ Title: 'T', ISRC: ['X'] }),
@@ -135,7 +137,7 @@ test('the Excel lists hold exactly the rows their counts count', () => {
   const gone = song('Gone', 'G', 'gone', [], { done: true, answer: { song: 'G', choice: 'deleted', by: 'you' }, was: [row(7, 'Gone')] })
   const d = step([a, n, add, gone], [typedSong('alpha')])
   const x = { families: familiesOf(d.cases, d.typed), loose: d.cases.filter((c) => !inFamilies(c) && !isNewRow(c) && !isDeleted(c)), newRows: d.cases.filter(isNewRow), deleted: d.cases.filter(isDeleted), isDone: (c: ReviewCase) => c.done, d, p: NO_PENDING }
-  assert.deepEqual(EACH.map((k) => listCount(x, k)), [1, 1, 1, 1, 2, 0, 1, 1, 2, 1, 1])   // v1.7: song status first, not a match after the checked ones
+  assert.deepEqual(EACH.map((k) => listCount(x, k)), [1, 1, 1, 0, 1, 2, 0, 1, 1, 2, 1, 1])   // v1.7: song status first, not a match after the checked ones · v1.8: other versions after the possible ones
   for (const k of EACH) { const s = sheetOf(x, k); assert.equal(s.rows.length, listCount(x, k), k); assert.ok(s.rows.every((r) => r.length === s.header.length), k) }
   assert.equal(sheetsOf(x, 'all').length, EACH.length)
   const s = sheetOf(x, 'deleted')

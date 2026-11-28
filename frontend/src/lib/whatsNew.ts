@@ -2,6 +2,30 @@
  *  its CHANGELOG entry, cut at its semicolons. No React here: unit-tested in Node. */
 
 export const POINTS: Record<string, string[]> = {
+  '1.8.2': [
+    'Download stage 1 LNV: only the songs you checked – or choose Every row for the whole LNV.',
+    'Serial numbers (SN) run 1, 2, 3 … in the file’s order. The old row number stays beside it.',
+    'Mark as completed still sends every row on to LNV vs IPRS.',
+  ],
+  '1.8.1': [
+    'Every Excel list can be downloaded, also when it is empty.',
+    'Stage 1 LNV: every song you checked is in it – a version checked beside no LNV row too.',
+    'New column Checked as: Exact match, Possible match, Other version, New row or Typed by you.',
+    'Checked versions are in the Excel lists: Checked matches, Left to check and their section.',
+  ],
+  '1.8.0': [
+    'The ISRC decides: an LNV row with the main version’s ISRC is an exact match, whatever its title.',
+    'The singer is shown beside it (same or other singer) – it never moves a match.',
+    'Every exact match is one row in the LNV: choose its title and each value from Muso or any LNV row.',
+    'The other titles go into the Alternative work name, with | between them.',
+    'Under every match: Exact match · Possible match · Other version. Move it – it is then checked.',
+    'New section Other version: remixes, lofis and other versions, against the main version.',
+    'Possible match: each Muso recording next to its LNV row, in one table (X or Y scroll).',
+    'Change a Muso recording that matches an LNV row: the app offers the same change on the row.',
+    'Download: possible matches right under the exact one, then other versions, the main title beside.',
+    'Names go into the LNV as the IPI / CAE list’s real names (PA), not stage names.',
+    'Match on filter: songs with an ISRC match, a singer match or a production match, with counts.',
+  ],
   '1.7.0': [
     'Alternative work name fills itself: keep the LNV’s name and Muso’s goes there, or the reverse.',
     'ISRC: all ISRCs of a song in one cell, with | between them. No ISRC twice.',

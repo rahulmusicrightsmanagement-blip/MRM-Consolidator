@@ -119,7 +119,7 @@ export function Fields({ r, main, fields = CARD_FIELDS, all }: { r: CaseRecord; 
 export function Checks({ r }: { r: CaseRecord }) {
   const ch = r.check
   if (!ch) return null
-  const level = ch.level === 'exact' ? ['good', 'Exact match'] : ch.level === 'possible' ? ['warn', 'Possible match']
+  const level = ch.level === 'exact' ? ['good', 'Same ISRC'] : ch.level === 'possible' ? ['warn', 'Another ISRC – same song?']
     : ch.level === 'isrc_only' ? ['warn', 'Only the ISRC is the same'] : ['bad', 'Not the same song by the rule']
   const why = (Array.isArray(r.why) ? r.why : []).filter((w) => !w.good || w.text.startsWith('Writers: one') || w.text.startsWith('Later year'))
   const mark = (ok: boolean | undefined | null, text: string, title: string) => ok == null ? null

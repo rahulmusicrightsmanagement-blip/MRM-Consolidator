@@ -4,7 +4,7 @@ import logging
 import re
 import tempfile
 import threading
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from datetime import date
 from pathlib import Path
 from urllib.parse import quote
@@ -703,7 +703,7 @@ def client_stage2(request, client_id):
 # ---------------------------------------------------------------- data clean (step 1: today's LNV against one DSP sheet)
 
 # Decisions that point at rows of the LNV: they go when a new LNV arrives. Name, junk and missing-song decisions stay.
-ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:", "off:", "hold:")
+ROW_DECISIONS = ("dup:", "isrc:", "fill:", "link:", "pick:", "off:", "hold:", "class:")
 CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}, "name": {"same", "different"},
                  "junk": {"fix", "ok"}, "missing": {"add", "not_ours", "deleted"}, "fill": {"accept", "reject"}, "link": {"same", "none"},
                  "merge": {"accepted", "rejected", "pending"}, "type": {"set"}, "version": {"same", "none"},
@@ -718,7 +718,9 @@ CLEAN_CHOICES = {"dup": {"duplicate", "different"}, "isrc": {"owner", "neither"}
                  # a recording mapped onto an exactly matched song · the title that goes into the LNV for a recording
                  "map": {"join"}, "title": set(dataclean.TITLE_MODES),
                  # a value of the DSP (Muso) data corrected: "muso:<recording id>:<field>"
-                 "muso": {"set"}}
+                 "muso": {"set"},
+                 # the section a match is checked in: "class:<LNV row>" or "class:m<recording id>"
+                 "class": set(review.CLASSES)}
 # the LNV fields a value can be chosen for
 PICK_FIELDS = set(export.PICK_FIELDS) | set(export.PICK_SLOTS)
 MAX_ITEMS = 20000   # decisions in one save
@@ -750,6 +752,8 @@ def _checked(key, choice, data):
     data = {k: v for k, v in data.items() if k in DECISION_DATA}
     if kind in ("title", "map", "type") and not rest.isdigit():
         raise BadDecision(f"{key!r} names no recording")
+    if kind == "class" and not (rest.isdigit() or (rest[:1] == "m" and rest[1:].isdigit())):
+        raise BadDecision(f"{key!r} names no LNV row or recording")
     if kind == "pick":
         row, _, field = rest.partition(":")
         if not row.isdigit() or field not in PICK_FIELDS:
@@ -1220,7 +1224,7 @@ def _dsp_part(decisions, master, dsp, clean):
                     for r in c["rows"] if r["row"] != d["data"]["keep"]],
         # the values the reviewer chose over the LNV's own: "pick:<row>:<field>" = muso (the DSP's) or custom (typed),
         # data.value
-        "picks": [{"row": int(k.split(":")[1]), "field": k.split(":", 2)[2], "value": (d.get("data") or {}).get("value"),
+        "picks": [{"row": int(k.split(":")[1]), "field": k.split(":", 2)[2], "value": (d.get("data") or {}).get("value"), "choice": d.get("choice"),
                    **({"why": "typed by the reviewer"} if d.get("choice") == "custom" else {}),
                    **({"why": "the name in the IPI / CAE list, chosen by the reviewer", "ipis": (d.get("data") or {}).get("ipis") or []}
                       if d.get("choice") == "ipi" else {})}
@@ -1236,8 +1240,29 @@ def _dsp_part(decisions, master, dsp, clean):
     sheet, merge = _dsp_sheet(dsp)
     step = review.build(sheet, merge, decisions, clean, parsed)
     arrange = review.families(step["cases"])
+    # the sections of step 2: an exact match is one row (its other rows merged into it), the possible matches and the
+    # other versions one row each under it
+    plan = review.export_plan(step["cases"], decisions, arrange)
+    arrange = {**arrange, "rows": {**plan["rows"], **(arrange.get("rows") or {})}, "rank": plan["rank"], "isrc_rank": plan["isrc_rank"],
+               "keep": {r: m["family"] for r, m in plan["keep"].items()}, "checked": plan["checked"], "isrc_checked": plan["isrc_checked"]}
     part["typed"] = _typed_part(step["typed"], parsed, arrange)
     part["versions"] = dataclean.lnv_versions(clean, parsed["songs"], songmerge.moves(decisions))
+    # a recording moved to Exact match gets no row of its own: the exact row has it
+    gone = {rid for rid, x in plan["solo"].items() if x == "exact"} if plan["keep"] else set()
+    part["versions"]["rows"] = [v for v in part["versions"].get("rows", []) if not set(v.get("sheet") or ()) & gone]
+    # every recording the reviewer checked beside no LNV row is in the LNV – also while its song is not answered yet
+    have = {x for v in part["versions"]["rows"] for x in v.get("sheet") or ()}
+    by_row = {s["row"]: s for s in parsed["songs"]}
+    for x in plan["solo_rows"]:
+        found = dataclean.part_of(clean, x["id"]) if x["id"] not in have else None
+        if not found:
+            continue
+        song, p = found
+        home = by_row.get(x["home"])
+        original = {"title": home["title"], "album": home.get("movie", ""), "row": home["row"], "add": None, "language": home.get("language", "")} if home \
+            else {"title": x["main"], "album": "", "row": None, "add": None, "language": ""}
+        part["versions"]["rows"].append({"lyricists": song["lyricists"], "composers": song["composers"], **p, "original": original})
+        have.update(p.get("sheet") or ())
     # the titles the reviewer chose, where each recording lands (after the older Title picks: they win)
     titles = dataclean.titles_of(decisions, songmerge.titles_now(sheet, merge, decisions))
     titled, part["versions"], part["adds"] = dataclean.apply_titles(clean, part["versions"], part["adds"], titles)
@@ -1248,10 +1273,21 @@ def _dsp_part(decisions, master, dsp, clean):
     part["remarks"], part["versions"], part["adds"] = dataclean.place_remarks(
         clean, part["versions"], part["adds"], {k: v["name"] for k, v in remarks.of(decisions).items()})
     part["versions"], part["adds"] = dataclean.isrcs_once(part["versions"], part["adds"], part["isrcs"], clean.get("isrc_rows") or {})
+    # the exact match's one row: its other rows go, their titles join its Alternative Work Name, their ISRCs its ISRC cell
+    part["merge"] = {}
+    for keep, m in plan["keep"].items():
+        part["merge"][keep] = m["drop"]
+        if m["drop"] or len(m["names"]) > 1:
+            chosen = next((p["value"] for p in reversed(part["picks"]) if p["row"] == keep and p["field"] == "Title" and p.get("value")), None)
+            final = (chosen[0] if isinstance(chosen, list) else chosen) or m["names"][0]
+            names = part["alternatives"].get(keep, [])
+            part["alternatives"][keep] = names + [x for x in dataclean.other_names(final, *m["names"]) if not any(dataclean.same_name(x, y) for y in names)]
+        if m["drop"] or m["isrcs"]:
+            part["isrcs"] = {**part["isrcs"], keep: list(OrderedDict.fromkeys([*(part["isrcs"].get(keep) or []), *m["isrcs"]]))}
     return part, arrange
 
 
-def _stage1_lnv(client, order="song"):
+def _stage1_lnv(client, order="song", rows="all"):
     """The stage 1 LNV: the client's LNV as uploaded with step 2's answers written in, the rows A–Z by song (each song's
     rows together under its main version) or by album. None without the LNV."""
     decisions = _clean_decisions(client)
@@ -1259,7 +1295,8 @@ def _stage1_lnv(client, order="song"):
     if not master:
         return None
     part, arrange = _dsp_part(decisions, master, dsp, clean)
-    return export.final_report(master.file.path, dsp=part, arrange=arrange, order=order)
+    # rows="checked": only the songs checked in step 2 (the download); "all": every row of the LNV (the stage 2 LNV)
+    return export.final_report(master.file.path, dsp=part, arrange={**arrange, "only_checked": rows == "checked"}, order=order)
 
 
 ORDERS = ("song", "album")
@@ -1274,10 +1311,12 @@ def lnv_update_export(request, client_id):
     name = client.name.replace(" ", "_")
     try:
         if request.GET.get("stage") == "1":
-            content = _stage1_lnv(client, order)
+            # the songs checked in step 2 (the default) – or ?rows=all, every row of the LNV
+            rows = "all" if request.GET.get("rows") == "all" else "checked"
+            content = _stage1_lnv(client, order, rows)
             if content is None:
                 return JsonResponse({"error": "Upload the LNV master first"}, status=409)
-            return _xlsx(content, f"{name}_LNV_stage1{'_by_album' if order == 'album' else ''}_{date.today()}")
+            return _xlsx(content, f"{name}_LNV_stage1{'_checked' if rows == 'checked' else ''}{'_by_album' if order == 'album' else ''}_{date.today()}")
         run = _iprs_run(client)
         result = compute(run) if run else None
         lnv2 = client.stage2_master()

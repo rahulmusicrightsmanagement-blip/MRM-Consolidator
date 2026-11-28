@@ -18,6 +18,18 @@ function useLnvOrder(): [LnvOrder, (o: LnvOrder) => void] {
   return [o, (x) => { setO(x); try { localStorage.setItem(ORDER_KEY, x) } catch { /* private mode */ } }]
 }
 
+const ROWS_KEY = 'mrm-lnv-rows'
+type LnvRows = 'checked' | 'all'
+/** Which rows the stage 1 download holds – the songs checked in step 2, or every row of the LNV – kept for next time. */
+function useLnvRows(): [LnvRows, (r: LnvRows) => void] {
+  const [r, setR] = useState<LnvRows>(() => { try { return localStorage.getItem(ROWS_KEY) === 'all' ? 'all' : 'checked' } catch { return 'checked' } })
+  return [r, (x) => { setR(x); try { localStorage.setItem(ROWS_KEY, x) } catch { /* private mode */ } }]
+}
+const ROWS = [
+  { value: 'checked' as const, label: 'Checked songs', hint: 'Only the songs checked in step 2 – numbered 1, 2, 3 …' },
+  { value: 'all' as const, label: 'Every row', hint: 'The whole LNV with the answers – what goes on to LNV vs IPRS' },
+]
+
 const ORDERS = [
   { value: 'song' as const, label: 'Songs A–Z', hint: "By song title – each song's rows together, its main version first" },
   { value: 'album' as const, label: 'Albums A–Z', hint: 'By album (film), then song – rows with no album last' },
@@ -28,12 +40,15 @@ export function Stage1Download({ clientId, before, primary, label = 'Download st
   clientId: number; before?: () => Promise<boolean>; primary?: boolean; label?: string
 }) {
   const [order, setOrder] = useLnvOrder()
+  const [rows, setRows] = useLnvRows()
   return (
     <span className="lnv-dl">
+      <Dropdown className="lnv-dl-order" label="Which rows" value={rows} options={ROWS} onChange={setRows} menuWidth={320}
+        shown={<>{rows === 'all' ? 'Every row' : 'Checked songs'}</>} />
       <Dropdown className="lnv-dl-order" label="Order of the rows" value={order} options={ORDERS} onChange={setOrder} menuWidth={300}
         shown={<>Order: {order === 'album' ? 'Albums A–Z' : 'Songs A–Z'}</>} />
-      <FileButton className={primary ? 'primary' : ''} url={api.stage1Url(clientId, order)} before={before}
-        title={`The client's LNV with step 2's answers, ${order === 'album' ? 'sorted by album, then song' : 'sorted by song'} – takes a few seconds`}>{label}</FileButton>
+      <FileButton className={primary ? 'primary' : ''} url={api.stage1Url(clientId, order, rows)} before={before}
+        title={`${rows === 'all' ? "The client's whole LNV" : 'The songs checked in step 2'} with step 2's answers, ${order === 'album' ? 'sorted by album, then song' : 'sorted by song'} – takes a few seconds`}>{label}</FileButton>
     </span>
   )
 }

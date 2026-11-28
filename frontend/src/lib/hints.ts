@@ -30,10 +30,29 @@ const E: Entry[] = [
   [/^not the same song by the rule$/i, 'Neither the recording nor the work agrees with this row.'],
   [/^a version the lnv has$/i, 'The LNV already has a row for this version of the song.'],
   // ---- lists and counts
-  [/^exact( match)?( ?:? ?[\d,]+.*)?$/i, 'The recording and the work both agree with an LNV row.'],
-  [/^possible( match)?( ?:? ?[\d,]+.*)?$/i, 'Only the recording or only the work agrees: please check it.'],
-  [/^exact matches/i, 'Every match where the recording and the work both agree.'],
-  [/^possible matches/i, 'Every match where only a part agrees.'],
+  [/^exact( match)?( ?:? ?[\d,]+.*)?$/i, 'ISRCs agree with an LNV row: the main version’s ISRC, one row in the LNV.'],
+  [/^possible( match)?( ?:? ?[\d,]+.*)?$/i, 'Another ISRC, but title, album or writers agree: please check it.'],
+  [/^other( versions?)?( ?:? ?[\d,]+.*)?$/i, 'Remix, lofi and other versions of the song, against the main version.'],
+  [/^exact matches/i, 'Every match with the main version’s ISRC.'],
+  [/^possible matches/i, 'Every match with another ISRC: please check it.'],
+  [/^other versions/i, 'Every other version of a song: remix, lofi, unplugged …'],
+  // ---- v1.8: the ISRC first, the singer second, the production; the three sections
+  [/^same singer$/i, 'A singer is the same on both sides. Shown only: the ISRC decides.'],
+  [/^other singer$/i, 'The singers differ. Shown only: the ISRC decides.'],
+  [/^same production$/i, 'The label or production company is the same.'],
+  [/^other production$/i, 'The label or production company is different.'],
+  [/^– no (singer|production|isrc) to compare$/i, 'One side has nothing here, so it could not be compared.'],
+  [/^another isrc – same song\?$/i, 'Another ISRC: check whether it is the same song.'],
+  [/^goes into the lnv · one row$/i, 'Every exact match becomes this one LNV row: choose its values.'],
+  [/^which section\?$/i, 'Exact match, possible match or other version: choose one.'],
+  [/^(isrc|singer|production) match( [\d,]+)?$|^match on/i, 'Show only the songs with an LNV row of the same ISRC, singer or production.'],
+  [/^any match( [\d,]+)?$/i, 'Show every song name.'],
+  [/^change both$/i, 'Make the same change in the LNV row: one row, never two.'],
+  [/^only muso$/i, 'Change only the Muso data, not the LNV row.'],
+  [/^check all/i, 'Check every exact match of this song at once.'],
+  [/^beside no lnv row/i, 'The LNV has no row of this version: it gets one of its own.'],
+  [/^matches lnv row/i, 'This recording matches that LNV row. A change to it is offered there.'],
+  [/^keep: exact match title$|^keep: lnv row \d+$|^keep lnv row \d+'s value$|^keep this title of the exact match$/i, 'A value of another row of the exact match is used.'],
   [/^(checked( ?: ?[\d,]+)?|all checked)$/i, 'Matches you have ticked as right, and songs you typed.'],
   [/^(to check ?:? ?[\d,]*|[\d,]+ to check|left to check.*)$/i, 'Matches that still need your tick.'],
   [/^not in the lnv/i, 'Songs of the sheet that no LNV row matches.'],
@@ -107,13 +126,13 @@ const E: Entry[] = [
   [/^goes into the lnv$/i, 'This is the value the LNV will have.'],
   [/^pick one$/i, 'The two sides differ: choose the value the LNV keeps.'],
   [/^same people – pick the spelling$/i, 'Same people, spelt differently: choose one spelling.'],
-  [/^x scroll$/i, 'Show the possible matches side by side.'],
-  [/^y scroll$/i, 'Show the possible matches one below another.'],
+  [/^x scroll$/i, 'Show the matches side by side, Muso next to the LNV row.'],
+  [/^y scroll$/i, 'Show the matches one below another.'],
   [/^differs from the main version$/i, 'Yellow means: not the same as the main version.'],
   [/^ipi list/i, 'The member’s real name in the IPI / CAE list.'],
   [/^blank in the lnv|^blank – /i, 'The LNV has nothing here, so the other sheet’s value is used.'],
   [/^linked by the app$/i, 'The app was certain and linked it by itself.'],
-  [/^checked by you$/i, 'You ticked this match.'],
+  [/^checked by you/i, 'You checked this match. It stays editable.'],
   [/^the app says it is this row/i, 'The app’s suggestion: tick it when it is right.'],
   [/^the app would add it as a new row/i, 'The app would make a new row: tick it if it is this row instead.'],
   [/^list locked$|^lock list$/i, 'Keep the song list open, or let it close by itself.'],
@@ -161,6 +180,7 @@ const E: Entry[] = [
   [/^stage 2 lnv/i, 'The LNV after Muso vs LNV: IPRS is checked against it.'], [/^stage 1 lnv$/i, 'The LNV with the answers of Muso vs LNV.'],
   [/^download stage 1 lnv|^download the lnv/i, 'Get the LNV as Excel, with your answers in it.'], [/^download the final lnv/i, 'Get the finished LNV as Excel.'], [/^download excel/i, 'Get any list as an Excel file.'],
   [/^order: /i, 'How the rows of the downloaded LNV are sorted.'],
+  [/^checked songs$/i, 'Only the songs you checked, numbered 1, 2, 3 …'], [/^every row$/i, 'The whole LNV with your answers.'],
   [/^amend(ment list.*)?$/i, 'IPRS has the song, with other details: ask for a correction.'], [/^regist(er|ration)( list.*)?$/i, 'IPRS does not have the song yet: register it.'],
   [/^to decide$/i, 'Songs where you say which IPRS work it is.'], [/^change files$/i, 'Replace one of the uploaded files.'],
   [/^follow-up tasks$|^tasks$/i, 'The work still to be done at the societies.'], [/^catalogue$/i, 'Every song of this client.'], [/^more tools$/i, 'The society workspaces and other tools.'],
@@ -193,6 +213,9 @@ const find = (t: string, s: HintSource) => {
 /** The explanation of one thing on screen – null when there is nothing to explain. */
 export function hintFor(s: HintSource): string | null {
   if (/\bfx-dm\b/.test(s.cls) && s.tag === 'TD') return 'Yellow: this value is not the same as the main version’s.'
+  // the three section buttons under a match (v1.8)
+  if (/\bcls-btn\b/.test(s.cls)) return /\bon\b/.test(s.cls) ? 'Checked here. Click again to check it later.'
+    : /\bnow\b/.test(s.cls) ? 'The app puts it here. Click to confirm: it is then checked.' : `Move it to ${tidy(s.text)}. You are asked first; then it is checked.`
   const text = tidy(s.text), label = tidy(s.label), title = tidy(s.title), ph = tidy(s.placeholder)
   const known = find(text, s) ?? find(label, s)
   if (known) return known

@@ -10,12 +10,12 @@ export type Line = { id: number; muso: string; lnv?: string; label?: string; def
 
 export function titleModel(f: Family, d: Step1, p: Pending) {
   const lines = new Map<number, Line>()
-  ;[...f.exact, ...f.possible].flatMap((g) => g.entries).forEach((e) => {
+  ;[...f.exact, ...f.possible, ...(f.version ?? [])].flatMap((g) => g.entries).forEach((e) => {
     if (e.tr.id == null || lines.has(e.tr.id)) return
     const earlier = d.picks[pickKey(e.row, 'Title')] !== undefined   // a title taken from the DSP before stays the DSP's
     lines.set(e.tr.id, { id: e.tr.id, muso: value(e.tr.fields.Title), lnv: value(e.lnv.fields.Title) || undefined, label: `LNV row ${e.row}`, def: earlier ? 'muso' : 'lnv' })
   })
-  f.rest.forEach(({ r }) => { if (r.id != null && !lines.has(r.id)) lines.set(r.id, { id: r.id, muso: value(r.fields.Title), def: 'muso' }) })
+  ;[...f.rest, ...(f.solos ?? [])].forEach(({ r }) => { if (r.id != null && !lines.has(r.id)) lines.set(r.id, { id: r.id, muso: value(r.fields.Title), def: 'muso' }) })
   const main = f.main
   const mainLine: Line = (main.id != null && lines.get(main.id)) || { id: main.id ?? -1, muso: value(main.fields.Title), def: 'muso' }
   const choiceOf = (id: number) => (String(id) in p.titles ? p.titles[String(id)] : d.titles?.[String(id)]) ?? undefined

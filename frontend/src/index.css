@@ -3616,3 +3616,41 @@ button.side-ver:hover b, .foot-ver:hover { color: var(--brand); text-decoration:
 .fam-counts { gap: 6px 8px; }
 .rv-strip { margin-bottom: 8px; }
 .rv-strip .pg + .lu .lu-what { display: none; }
+
+/* ============ v1.8: three sections – Exact match (one row) · Possible match · Other version ============ */
+.cls-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.cls-btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: 1.5px solid var(--border-strong); border-radius: 99px;
+  background: var(--surface); color: var(--text-2); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; line-height: 1.2; }
+.cls-btn:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+.cls-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.cls-btn:disabled { opacity: .6; cursor: default; }
+.cls-btn svg { flex: none; }
+/* the section it is in now (not checked yet): outlined in its colour; checked there: filled */
+.cls-btn.now.exact { border-color: var(--good); color: var(--good); }
+.cls-btn.now.possible { border-color: var(--warn); color: var(--warn); }
+.cls-btn.now.version { border-color: var(--violet); color: var(--violet); }
+.cls-btn.on.exact { border-color: var(--good); background: var(--good-bg); color: var(--good); }
+.cls-btn.on.possible { border-color: var(--warn); background: var(--warn-bg); color: var(--warn); }
+.cls-btn.on.version { border-color: var(--violet); background: var(--violet-bg); color: var(--violet); }
+.fx-yes .cls-btns, .pc-yes .cls-btns { margin: 0; }
+.pc-solo-btns { padding: 10px 14px 14px; }
+.pc.solo .fam-main-fields { padding: 0 14px; }
+/* the exact match's one row: what goes into the LNV */
+.cv-badge.keep { background: var(--brand-soft); color: var(--brand); }
+.fx .fx-col.fx-merged, .fx td.fx-merged { background: color-mix(in srgb, var(--brand-soft) 55%, var(--surface)); }
+.fx .fx-col.fx-merged { box-shadow: inset 0 3px 0 var(--brand); }
+.fx-merged-why { display: block; font-size: 13px; font-weight: 500; color: var(--muted); }
+.fx td.fx-src { color: var(--text-2); }
+.fx .fx-col.fx-mcol { background: color-mix(in srgb, var(--violet-bg) 45%, var(--surface)); }
+.fx td.fx-mc { background: color-mix(in srgb, var(--violet-bg) 22%, var(--surface)); }
+.fx td.fx-mc.fx-dm { background: var(--warn-bg); }
+.fx-none { display: block; font-size: 13.5px; }
+.cv-checks.facts { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 13px; font-weight: 500; }
+.fx thead .cv-checks { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 13px; font-weight: 500; }
+.fam-count.version, .ls-sub i.version { color: var(--violet); }
+.fam-count.version { background: var(--violet-bg); }
+.sm-item-text small .li-n.version { color: var(--violet); }
+#fam-version .fx td:not(.fx-main), #fam-version .fx .fx-col { width: 300px; min-width: 300px; max-width: 300px; }
+.rv-fact .ls-n { margin-left: 6px; }
+@media (max-width: 700px) { .cls-btn { padding: 4px 9px; font-size: 13px; } }
+.rv-list-tools .rv-fact { flex: 0 0 auto; min-width: 124px; }

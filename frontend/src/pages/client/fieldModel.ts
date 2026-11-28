@@ -54,16 +54,27 @@ export const keepText = (k: Keep, source: string) => k === 'lnv' ? 'LNV' : k ===
  *  nothing ([]) to leave it blank. */
 export type Choices = {
   lv: string[]; lvShown: string[]; vs: Variant[]; opts: string[][]; ipis: IpiChoice[]
+  /** an exact match's other LNV rows (merged into this one): their values ('l0' …) */
+  rows: { row: number; v: string[] }[]
   /** every ISRC of the row: the LNV's and the DSP's · the alternative work name by itself */
   all: string[]; auto: string[]
   def: string; mode: string; now: string[]; keep: Keep; pickOf: (m: string) => string[] | null
 }
-export function fieldChoices(fl: string, g: Group, taken: string | string[] | undefined, source: string, alternative?: string): Choices {
+export function fieldChoices(fl: string, g: Group, taken: string | string[] | undefined, source: string, alternative?: string, others: CaseRecord[] = []): Choices {
   const lv = list(g.lnv.fields[fl])
   const vs = fl === 'Alternate title' ? [] : variantsOf(fl, g.recs)
   const mvs = vs.map((x) => x.v)
-  const opts = lv.length ? mvs.filter((v) => differs(fl, v, lv)) : mvs
-  const ipis = NAME_FIELDS.has(fl) ? ipiChoices(fl, g.lnv, g.recs, source) : []
+  const ipis = NAME_FIELDS.has(fl) ? ipiChoices(fl, g.lnv, [...g.recs, ...others], source) : []
+  // a name the IPI / CAE list knows goes into the LNV as the member's real name (PA): the DSP's stage name (PP) is offered
+  // as the list's name, never as written
+  const listed = (v: string[]) => NAME_FIELDS.has(fl) && vs.some((x) => same(x.v, v) && x.res !== x.v && (ipis.some((y) => valueKey(y.v) === valueKey(x.res)) || valueKey(x.res) === valueKey(lv)))
+  const opts = (lv.length ? mvs.filter((v) => differs(fl, v, lv)) : mvs).filter((v) => !listed(v))
+  // the other rows of an exact match: each value of theirs not offered already
+  const rows: { row: number; v: string[] }[] = []
+  if (fl !== 'Alternate title') for (const r of others) {
+    const v = list(r.fields[fl])
+    if (v.length && r.row != null && (!lv.length || differs(fl, v, lv)) && !opts.some((x) => !differs(fl, x, v)) && !rows.some((x) => !differs(fl, x.v, v))) rows.push({ row: r.row, v })
+  }
   const own = ipiOf(g.lnv, fl)
   const ipiAt = (v?: string[] | null) => v ? ipis.findIndex((x) => same(x.v, v)) : -1
   // what the LNV row gets besides its own: worked out by the server, one rule for the screen and the file
@@ -79,17 +90,19 @@ export function fieldChoices(fl: string, g: Group, taken: string | string[] | un
     : fill !== undefined ? (fillAt >= 0 ? `m${fillAt}` : 'blank')
     : vs.length ? (vs[0].res !== vs[0].v && ipiAt(vs[0].res) >= 0 ? `i${ipiAt(vs[0].res)}` : 'm0') : 'blank'
   const valueOf = (m: string): string[] => m === 'lnv' ? lv : m === 'all' ? all : m === 'auto' ? auto
-    : m.startsWith('m') ? opts[Number(m.slice(1))] ?? [] : m.startsWith('i') ? ipis[Number(m.slice(1))]?.v ?? [] : []
+    : m.startsWith('m') ? opts[Number(m.slice(1))] ?? [] : m.startsWith('i') ? ipis[Number(m.slice(1))]?.v ?? [] : /^l\d+$/.test(m) ? rows[Number(m.slice(1))]?.v ?? [] : []
   let mode = def
   if (taken !== undefined) {
     const t = list(taken)
     // a year kept from the DSP before it was shown as a year only ('2013-05-08')
     const key = (v: string[]) => fl === 'Year' ? (v[0] ?? '').slice(0, 4) : fl === 'Link' ? v.join(' ') : valueKey(v)
     const m = opts.findIndex((v) => key(v) === key(t))
+    const l = rows.findIndex((x) => key(x.v) === key(t))
     mode = !t.length ? (lv.length ? 'custom' : 'blank') : lv.length && same(t, lv) ? 'lnv' : all.length && key(t) === key(all) ? 'all'
-      : ipiAt(t) >= 0 ? `i${ipiAt(t)}` : m >= 0 ? `m${m}` : 'custom'
+      : ipiAt(t) >= 0 ? `i${ipiAt(t)}` : m >= 0 ? `m${m}` : l >= 0 ? `l${l}` : 'custom'
   }
-  const now = taken !== undefined ? (mode.startsWith('m') ? valueOf(mode) : list(taken)) : valueOf(def)
-  const keep: Keep = mode === 'lnv' || mode === 'custom' || mode === 'blank' || mode === 'all' || mode === 'auto' ? mode : mode.startsWith('i') ? 'ipi' : 'muso'
-  return { lv, lvShown: own?.names ?? lv, vs, opts, ipis, all, auto, def, mode, now, keep, pickOf: (m) => m === def ? null : m === 'blank' ? [] : valueOf(m) }
+  const now = taken !== undefined ? (mode.startsWith('m') || /^l\d+$/.test(mode) ? valueOf(mode) : list(taken)) : valueOf(def)
+  const keep: Keep = mode === 'lnv' || mode === 'custom' || mode === 'blank' || mode === 'all' || mode === 'auto' ? mode : mode.startsWith('i') ? 'ipi'
+    : /^l\d+$/.test(mode) ? 'lnv' : 'muso'
+  return { lv, lvShown: own?.names ?? lv, vs, opts, ipis, rows, all, auto, def, mode, now, keep, pickOf: (m) => m === def ? null : m === 'blank' ? [] : valueOf(m) }
 }

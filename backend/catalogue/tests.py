@@ -871,6 +871,8 @@ MUSO_ROWS = [
     ("Dil Ki Baat", "Film B", "INAB12300001", "Malik Varma", "Ravi Kumar Verma", 30),
     ("Brand New Hit", "Film E", "INXY12300099", "Gulzar", "Ravi Kumar Verma", 70),
 ]
+# v1.8.0: the ISRC first – Pyaar Ka Geet's LNV rows have no ISRC: a possible match until the reviewer links it
+LINK_PYAAR = {"link:INXY12300011": {"choice": "same", "data": {"rows": [2, 3]}}}
 
 
 class DataCleanEngineTests(TestCase):
@@ -1021,15 +1023,18 @@ class DataCleanEngineTests(TestCase):
         self.assertEqual(r["source"]["songs"], 3)   # the lofi flip stays with its song
         self.assertIn("Ravi Kumar Verma", r["client_names"])
         matched = {m["song"]["title"]: sorted(l["row"] for l in m["links"]) for m in r["matched"]}
-        self.assertEqual(matched, {"Pyaar Ka Geet": [2, 3]})
-        # The user's two stages: 1 the recording (title, album, ISRC, year) · 2 the work (title, album, writers,
-        # publisher); both = exact, one = possible. Dil Ki Baat has row 4's ISRC, title and film but "Malik Varma" on
-        # Muso and "MALIK VERMA" in the LNV: stage 1 only, possible – a person decides, the two spellings asked once.
-        # Row 5 shares only the ISRC: listed so it is never added twice
+        # v1.8.0, the ISRC first: Dil Ki Baat has row 4's ISRC – an exact match, linked by the app, though "Malik Varma"
+        # on Muso is "MALIK VERMA" in the LNV (the singer and the credits never decide). Row 5 shares the ISRC under
+        # another title: an exact match too, but never linked by itself – it waits beside row 4 for the reviewer
+        self.assertEqual(matched, {"Dil Ki Baat": [4]})
+        dil = next(m for m in r["matched"] if m["song"]["title"] == "Dil Ki Baat")
+        self.assertEqual([(x["row"], x["rec"]["level"]) for x in dil["also"]], [(5, "exact")])
+        self.assertEqual((dil["links"][0]["rec"]["stage1"], dil["links"][0]["rec"]["stage2"], dil["links"][0]["auto"]), (True, False, "Same ISRC – no singer to compare"))
+        # Pyaar Ka Geet: the same recording and work, but no ISRC in the LNV – a possible match, a person decides
         self.assertEqual([(c["song"]["title"], [(x["row"], x["rec"]["level"]) for x in c["candidates"]]) for c in r["check"]],
-                         [("Dil Ki Baat", [(4, "possible"), (5, "isrc_only")])])
-        self.assertEqual((r["check"][0]["candidates"][0]["rec"]["stage1"], r["check"][0]["candidates"][0]["rec"]["stage2"]), (True, False))
+                         [("Pyaar Ka Geet", [(2, "possible"), (3, "possible")])])
         self.assertEqual([m["title"] for m in r["missing"]], ["Brand New Hit"])
+        r = self._match(LINK_PYAAR)   # the reviewer links it: the rest as before
         dups = {c["kind"]: c for c in r["duplicates"]}
         self.assertEqual(sorted(x["row"] for x in dups["duplicate"]["rows"]), [2, 3])
         self.assertEqual(dups["duplicate"]["decision"]["choice"], "duplicate")   # answered by the app: same song, same film
@@ -1038,9 +1043,9 @@ class DataCleanEngineTests(TestCase):
         self.assertNotIn("decision", dups["wrong_isrc"])                          # a person decides which song owns the ISRC
         spelling = [n for n in r["names"] if n["kind"] == "spelling"]
         self.assertEqual({spelling[0]["a"]["spelling"].lower(), spelling[0]["b"]["spelling"].lower()}, {"malik verma", "malik varma"})
-        self.assertFalse(spelling[0]["info"])
-        # "Same person": now the writers are the same and Dil Ki Baat is LNV row 4
-        r = self._match({spelling[0]["key"]: {"choice": "same", "data": {}}})
+        self.assertTrue(spelling[0]["info"])   # (v1.8.0) it keeps no song from its row any more: not asked
+        # "Same person": now the writers are the same – Dil Ki Baat is LNV row 4 still
+        r = self._match({spelling[0]["key"]: {"choice": "same", "data": {}}, **LINK_PYAAR})
         self.assertEqual({m["song"]["title"]: sorted(l["row"] for l in m["links"]) for m in r["matched"]}, {"Pyaar Ka Geet": [2, 3], "Dil Ki Baat": [4]})
         self.assertEqual([n["name"] for n in r["names"] if n["kind"] == "junk"], ["IPRS"])
         self.assertEqual([(m["title"], m["credit"], m["decision"]["choice"]) for m in r["missing"]], [("Brand New Hit", "writer", "add")])
@@ -1095,7 +1100,7 @@ class DataCleanEngineTests(TestCase):
     def test_versions_get_rows_of_their_own(self):
         from openpyxl import load_workbook
         from .engine import dataclean, export
-        r = self._match()
+        r = self._match(LINK_PYAAR)
         song = next(m for m in r["matched"] if m["song"]["title"] == "Pyaar Ka Geet")["song"]
         # The original is the song's LNV row; the lofi is a version of it, with its own recording
         self.assertEqual(song["original"]["isrcs"], ["INXY12300011"])
@@ -1120,14 +1125,15 @@ class DataCleanEngineTests(TestCase):
         from .engine.songmerge import analyse, songs
         merge = analyse(self.dsp["rows"])
         groups = songs(merge, {f"merge:{k}": {"choice": "accepted"} for k in merge["items"]})
-        r = dataclean.apply_decisions(dataclean.match(master, self.dsp, CLIENT, groups=groups), {})
+        aliases, links = dataclean.learned(LINK_PYAAR)
+        r = dataclean.apply_decisions(dataclean.match(master, self.dsp, CLIENT, aliases, links, groups), LINK_PYAAR)
         song = next(m for m in r["matched"] if m["song"]["title"] == "Pyaar Ka Geet")
         self.assertEqual(sorted(l["row"] for l in song["links"]), [2, 3])
         plan = dataclean.lnv_versions(r, master["songs"])
         self.assertEqual((plan["rows"], [(v["row"], v["original"]["row"]) for v in plan["named"]]), ([], [(7, 2)]))
         self.assertNotIn(7, [c["row"] for c in song["song"]["near"]])   # never offered as the song itself
         # The reviewer says row 7 is not this version: it is added as a new row, and row 7 is left as it is
-        decisions = {"version:INXY12300010": {"choice": "none", "data": {"rows": [7]}}}
+        decisions = {"version:INXY12300010": {"choice": "none", "data": {"rows": [7]}}, **LINK_PYAAR}
         aliases, links = dataclean.learned(decisions)
         r = dataclean.apply_decisions(dataclean.match(master, self.dsp, CLIENT, aliases, links, groups), decisions)
         plan = dataclean.lnv_versions(r, master["songs"])
@@ -1154,8 +1160,10 @@ class DataCleanEngineTests(TestCase):
         decisions = {f"merge:{k}": {"choice": "accepted"} for k in merge["items"]}
         decisions["map:5"] = {"choice": "join", "data": {"to": 3, "row": 2, "title": "Pyaar Ka Geet", "from": "Brand New Hit"}}
         decisions["map:4"] = {"choice": "join", "data": {"to": 5}}   # onto a recording that is itself mapped: ignored
+        decisions.update(LINK_PYAAR)
         self.assertEqual(list(moves(decisions)), [5])
-        r = dataclean.apply_decisions(dataclean.match(self.master, self.dsp, CLIENT, groups=songs(merge, decisions),
+        aliases, links = dataclean.learned(decisions)
+        r = dataclean.apply_decisions(dataclean.match(self.master, self.dsp, CLIENT, aliases, links, groups=songs(merge, decisions),
                                                       moved=moved_rows(merge, decisions)), decisions)
         self.assertNotIn("Brand New Hit", [m["title"] for m in r["missing"]])
         song = next(m for m in r["matched"] if m["song"]["title"] == "Pyaar Ka Geet")
@@ -1379,29 +1387,23 @@ class StepsApiTests(TestCase):
         c = one["counts"]["1"]
         self.assertEqual((c["rows"], c["recordings"], c["songs"], c["in_lnv"], c["adding"]), (4, 4, 3, 1, 1))
         got = cases()
-        self.assertEqual(sorted(got), ["check:Dil Ki Baat", "missing:Brand New Hit", "names:Malik Varma  ·  MALIK VERMA",
-                                       "twice:Dil Ki Baat", "twice:Pyaar Ka Geet", "versions:Pyaar Ka Geet"])
-        # Dil Ki Baat: a possible match (same ISRC, the writer spelled differently) – shown, not linked; the same
-        # recording (ISRC, name, album), so the app proposes row 4 for the reviewer to confirm – nothing saved yet
+        # v1.8.0, the ISRC first: Dil Ki Baat has row 4's ISRC – an exact match the app links, whatever the writer's
+        # spelling (no "same person?" question for it); row 5 only shares the ISRC, under another title: shown beside it,
+        # never linked by itself. Pyaar Ka Geet's rows have no ISRC: a possible match, for the reviewer to answer
+        self.assertEqual(sorted(got), ["check:Dil Ki Baat", "missing:Brand New Hit", "twice:Dil Ki Baat", "twice:Pyaar Ka Geet", "versions:Pyaar Ka Geet"])
         dil = got["check:Dil Ki Baat"]
-        self.assertEqual(([r["row"] for r in dil["lnv"]], dil["lnv"][0]["check"]["level"], dil["answer"]["choice"]), ([4, 5], "possible", "same"))
-        self.assertEqual((dil["answer"]["by"], dil["answer"]["rows"], dil["done"]), ("app", [4], False))
+        self.assertEqual(([r["row"] for r in dil["lnv"]], [r["check"]["level"] for r in dil["lnv"]], dil["answer"]["choice"]), ([4, 5], ["exact", "exact"], "same"))
+        self.assertEqual((dil["answer"]["by"], dil["answer"]["rows"], dil["auto"]), ("app", [4], True))
         self.assertIn("Different writers", [w["text"] for w in dil["lnv"][0]["why"]])
-        # "Same person", answered once for every client: Dil Ki Baat is LNV row 4 now
-        name = got["names:Malik Varma  ·  MALIK VERMA"]
-        decide({"key": name["answer"]["key"], "choice": "same", "data": name["names"]})
-        got = cases()
-        self.assertTrue(got["names:Malik Varma  ·  MALIK VERMA"]["done"])
-        self.assertEqual((got["check:Dil Ki Baat"]["auto"], got["check:Dil Ki Baat"]["answer"]["rows"]), (True, [4]))   # exact now
-        self.assertEqual(self.client.get(f"{url}?step=1").json()["counts"]["1"]["in_lnv"], 2)
+        self.assertNotIn("Other singer", [w["text"] for w in dil["lnv"][0]["why"]])   # (this LNV names no singer: nothing to compare)
         v = got["versions:Pyaar Ka Geet"]
         self.assertEqual([(r["fields"]["Title"], r["version"], r["in"]) for r in v["muso"]],
                          [("Pyaar Ka Geet", "Original", True), ("Pyaar Ka Geet - Lofi Flip", "Lofi", True)])
-        self.assertEqual(([r["row"] for r in v["lnv"]], v["answer"]["choice"], v["answer"]["by"], v["done"]), ([2, 3], "same", "app", False))
+        self.assertEqual(([r["row"] for r in v["lnv"]], [r["check"]["level"] for r in v["lnv"]], v["answer"]["choice"], v["done"]), ([2, 3], ["possible", "possible"], None, False))
         # one case per song: the merge items it is made of travel with it, each with its recordings
         self.assertEqual([(m["key"], m["ids"]) for m in v["merge"]["items"]], [("merge:G2", [3, 2])])
         self.assertEqual(got["missing:Brand New Hit"]["answer"]["choice"], "add")
-        self.assertEqual(c["open"], 6)
+        self.assertEqual(c["open"], 4)   # Pyaar Ka Geet, Brand New Hit, the two LNV-twice questions (Dil Ki Baat: the app's exact match)
 
         # Confirm with the lofi unticked and only row 2: the lofi becomes a song of its own.
         lofi = v["muso"][1]["id"]
@@ -1482,11 +1484,11 @@ class StepsApiTests(TestCase):
         self.assertEqual(self.client.get(f"/api/clients/{cid}/stage2/").status_code, 404)
 
         titles = lambda content: [r[1] for r in openpyxl.load_workbook(io.BytesIO(content)).worksheets[0].iter_rows(min_row=2, values_only=True) if r[1]]
-        by_song = self.client.get(f"/api/clients/{cid}/steps/lnv/?stage=1")
+        by_song = self.client.get(f"/api/clients/{cid}/steps/lnv/?stage=1&rows=all")
         self.assertEqual(by_song.status_code, 200)
         self.assertIn("LNV_stage1_", by_song["Content-Disposition"])
         self.assertEqual(titles(by_song.content)[:2], ["Brand New Hit", "Dil Ki Baat"])
-        by_album = self.client.get(f"/api/clients/{cid}/steps/lnv/?stage=1&order=album")
+        by_album = self.client.get(f"/api/clients/{cid}/steps/lnv/?stage=1&rows=all&order=album")
         self.assertIn("_by_album_", by_album["Content-Disposition"])
         book = openpyxl.load_workbook(io.BytesIO(by_album.content))
         head = [c.value for c in book.worksheets[0][1]]
@@ -1679,7 +1681,7 @@ class IpiApiTests(TestCase):
         return cid
 
     def _lnv_cells(self, cid):
-        res = self.client.get(f"/api/clients/{cid}/steps/lnv/?stage=1")
+        res = self.client.get(f"/api/clients/{cid}/steps/lnv/?stage=1&rows=all")
         self.assertEqual(res.status_code, 200)
         wb = openpyxl.load_workbook(io.BytesIO(res.content))
         sheet = [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
@@ -1745,7 +1747,8 @@ class IpiApiTests(TestCase):
         cid = self._client()
         step = self.client.get(f"/api/clients/{cid}/steps/?step=1").json()["step"]
         dil = next(c for c in step["cases"] if c["title"] == "Dil Ki Baat" and c["kind"] != "twice")
-        self.assertNotEqual(dil["lnv"][0]["check"]["level"], "exact")   # "Malik Varma" / "MALIK VERMA": not one person yet
+        # v1.8.0: the ISRC decides – an exact match; "Malik Varma" / "MALIK VERMA" are not one person yet: not the same work
+        self.assertEqual((dil["lnv"][0]["check"]["level"], dil["lnv"][0]["check"]["stage2"]), ("exact", False))
         self.assertNotIn("ipi", step)
         sheet, _ = self._lnv_cells(cid)
         self.assertIn("VERMA, RAVI KUMAR", [c for r in sheet for c in r])
@@ -1753,9 +1756,9 @@ class IpiApiTests(TestCase):
         self.assertEqual(self._post("/api/ipi/", f"{self.tmp}/list.xlsx").status_code, 200)
         step = self.client.get(f"/api/clients/{cid}/steps/?step=1").json()["step"]
         self.assertEqual(step["ipi"]["members"], 5)
-        # the list says Malik Varma is Malik Verma: the same writers now – an exact match
+        # the list says Malik Varma is Malik Verma: the same writers now – the same work too
         dil = next(c for c in step["cases"] if c["title"] == "Dil Ki Baat" and c["kind"] != "twice")
-        self.assertEqual(dil["lnv"][0]["check"]["level"], "exact")
+        self.assertEqual((dil["lnv"][0]["check"]["level"], dil["lnv"][0]["check"]["stage2"]), ("exact", True))
         muso = dil["muso"][0]
         self.assertEqual(muso["ipi"]["Lyricist"], {"names": ["Malik Verma"], "ids": ["00222222221"]})
         self.assertEqual(muso["ipi"]["Singer"]["names"], ["Lata Dinanath Mangeshkar"])   # the singer under the member's PA name
@@ -1889,6 +1892,11 @@ class SongWorkTests(TestCase):
     def _save(self, *items):
         return self._send("clean/decisions/", {"quiet": True, "items": list(items)})
 
+    def _link_pyaar(self):
+        """v1.8.0: Pyaar Ka Geet's LNV rows have no ISRC – a possible match: linked by the reviewer (kept out of the change log)."""
+        from .models import CleanDecision
+        CleanDecision.objects.create(client_id=self.cid, key="link:INXY12300011", **LINK_PYAAR["link:INXY12300011"])
+
     def _step(self):
         return self.client.get(f"/api/clients/{self.cid}/steps/?step=1").json()["step"]
 
@@ -1899,7 +1907,7 @@ class SongWorkTests(TestCase):
         return self.client.get(f"/api/clients/{self.cid}/changes/").json()["changes"]
 
     def _lnv(self):
-        res = self.client.get(f"/api/clients/{self.cid}/steps/lnv/?stage=1")
+        res = self.client.get(f"/api/clients/{self.cid}/steps/lnv/?stage=1&rows=all")
         self.assertEqual(res.status_code, 200)
         wb = openpyxl.load_workbook(io.BytesIO(res.content))
         rows = [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
@@ -1938,6 +1946,7 @@ class SongWorkTests(TestCase):
         self.assertEqual((c["lnv"], review._level(c)), ([], "new"))
 
     def test_a_song_added_to_another_sits_under_its_name(self):
+        self._link_pyaar()
         self._save({"key": "link:INXY12300099", "choice": "same", "data": {"rows": [6]}},
                    {"key": "family:INXY12300099", "choice": "join", "data": {"to": "INXY12300011"}})
         step = self._step()
@@ -1974,6 +1983,7 @@ class SongWorkTests(TestCase):
         # not through the decisions
         self._send("clean/decisions/", {"items": [{"key": "song:x", "choice": "typed", "data": {}}]}, 400)
 
+        self._link_pyaar()
         key = self._send("songs/", {"data": self.TYPED, "log": {"songs": [{"key": "f", "title": "Pyaar Ka Geet"}], "text": "Song typed"}})["key"]
         self.assertIn("typed this ISRC", self._send("songs/", {"data": self.TYPED}, 422)["fields"]["isrc"])
         step = self._step()
@@ -2053,6 +2063,7 @@ class SongWorkTests(TestCase):
         self._send("changes/", {"undo": [z["id"]]}, 409)
 
     def test_undo_a_deleted_song_and_a_shared_name(self):
+        self._link_pyaar()
         song = self._case("Pyaar Ka Geet")["answer"]["song"]
         self._save({"key": f"link:{song}", "choice": "none", "data": {"rows": [2, 3]}, "log": {"group": "d", "text": "Deleted", "minor": True}},
                    {"key": f"missing:{song}", "choice": "deleted", "log": {"group": "d", "text": "Deleted"}},
@@ -2201,10 +2212,10 @@ class RemarkTests(TestCase):
         self._post(f"/api/clients/{self.cid}/clean/", f"{self.tmp}/muso.xlsx")
         step = self._step()
         dil, other = self._case("Dil Ki Baat", step), self._case("Priya Geetham", step)
-        self.assertFalse(dil["done"])
+        self.assertEqual(dil["answer"]["by"], "app")   # v1.8.0: linked by the app (the same ISRC), not answered by the reviewer
         self._save({"key": f"map:{other['muso'][0]['id']}", "choice": "join", "data": {"to": dil["muso"][0]["id"], "row": 4, "title": "Dil Ki Baat"}},
                    self._set("INXY12300022", "Uncredited Adaptation"))
-        self.assertFalse(self._case("Dil Ki Baat")["done"])
+        self.assertEqual(self._case("Dil Ki Baat")["answer"]["by"], "app")
         head, rows, _ = self._lnv()
         new = next(r for r in rows if r[1] == "Priya Geetham")
         self.assertEqual((new[head.index("Remark")], new[head.index("Original Work")]), ("Uncredited Adaptation", "Dil Ki Baat"))

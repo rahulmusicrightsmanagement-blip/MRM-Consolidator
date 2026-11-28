@@ -91,10 +91,12 @@ export function otherNames(final: string, ...names: string[]) {
   return out
 }
 /** The Alternative Work Name an LNV row gets by itself: the names it has, and the work name of the source that is not
- *  kept – Muso's when the LNV's title is kept, the LNV's when Muso's is. */
-export function autoAlternative(final: string, lnv: CaseRecord, recs: CaseRecord[]): string {
-  const old = list(lnv.fields['Alternate title']).join('; ')
+ *  kept – Muso's when the LNV's title is kept, the LNV's when Muso's is – with a pipe between them. others: the rows of
+ *  an exact match merged into this one (the same ISRC): their titles and alternative names join it. */
+export function autoAlternative(final: string, lnv: CaseRecord, recs: CaseRecord[], others: CaseRecord[] = []): string {
+  const old = list(lnv.fields['Alternate title']).join(' | ')
   const has = old.split(/[;|]/)
-  const fresh = otherNames(final, list(lnv.fields.Title)[0] ?? '', ...recs.map((r) => list(r.fields.Title)[0] ?? '')).filter((x) => !has.some((y) => sameName(x, y)))
-  return [old, ...fresh].filter(Boolean).join('; ')
+  const theirs = others.flatMap((r) => [list(r.fields.Title)[0] ?? '', ...list(r.fields['Alternate title']).join('|').split(/[;|]/)])
+  const fresh = otherNames(final, list(lnv.fields.Title)[0] ?? '', ...theirs, ...recs.map((r) => list(r.fields.Title)[0] ?? '')).filter((x) => !has.some((y) => sameName(x, y.trim())))
+  return [old, ...fresh].filter(Boolean).join(' | ')
 }

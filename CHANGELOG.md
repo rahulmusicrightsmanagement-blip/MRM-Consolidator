@@ -1,5 +1,14 @@
 # MRM changelog
 
+## 1.8.2 – 2026-11-28 (patch)
+- Download stage 1 LNV holds only the songs checked in step 2 (Checked songs), or the whole LNV (Every row); the serial number (SN) is 1, 2, 3 … in the file's order, the old row number stays in Row in the uploaded LNV; Mark as completed keeps every row for LNV vs IPRS
+
+## 1.8.1 – 2026-11-28 (patch)
+- Every Excel list can be downloaded, an empty one too; the stage 1 LNV has every song checked in step 2 – a version checked beside no LNV row gets its row even while its song is not answered – with a Checked as column (Exact match, Possible match, Other version, New row, Typed by you); checked versions are in the Excel lists (Checked matches, Left to check, their section)
+
+## 1.8.0 – 2026-11-28 (minor)
+- Matching rebuilt, the ISRC first: the main version's ISRC is an exact match whatever the title or singer (the singer shown beside it), one row in the LNV – its title and every value chosen from Muso, any of its LNV rows or typed, the other titles in Alternate Work with a | between them, its rows' ISRCs in its ISRC cell; three buttons under every match – Exact match, Possible match, Other version – check it where it is or move it (asked first), checked and still editable; Other version section beside Exact and Possible; Possible match and Other version in one table, each Muso recording next to its LNV row (X or Y scroll), a correction to that recording offered to the LNV row too, one row in the LNV; the download puts the possible matches right under the exact one and the other versions after, the main version's title beside each; Muso and LNV stage names (PP) go into the LNV as the IPI / CAE list's real names (PA); Match on filter: ISRC match, Singer match, Production match, with counts
+
 ## 1.7.0 – 2026-11-25 (minor)
 - Alternative work name filled by itself (the LNV's or Muso's name that is not kept, editable); every ISRC of a song in one cell with a pipe, each once; the complete release date from Muso beside the LNV's release year; Muso data editable like the LNV's (the file's value stays and can be put back) and links editable on both sides; a song's matches stay on screen until every one is answered – one turned down is marked Not a match and can be put back, the song leaves Left to check after the last; Last updated song with date, time, name and Continue, on the step and the client list; Left to check, Partly checked and All checked on every song and match, as filters, progress bar and a Song status Excel; downloads a fraction of the size (5.3 MB to 0.9 MB) with every value, formula, colour and link kept – links, colour rules and notes now move with their rows; checked answers, uploads and file names, content security policy, admin sign-in page closed
 

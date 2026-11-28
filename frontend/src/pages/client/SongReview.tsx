@@ -14,7 +14,9 @@ import { Act, Block, Compare, Kbd, Legend, LnvCard, LnvRowDetails, MainCard, Map
   differs, targetsOf, useKeys, useStored, value } from './CaseParts'
 import type { Col, Spot, Target, TitleLine } from './CaseParts'
 import { logContext, songRef, withLog } from './changeLog'
-import { FamilyView, NO_PENDING, SaveBar, STATUS, StatusChip, TypedCard, checkedIn, familiesOf, holdsOf, inFamilies, openOf, pendingCount, pendingItems, progressOf, stripSaved, toCheck } from './Families'
+import { FamilyView, NO_PENDING, SaveBar, STATUS, StatusChip, TypedCard, checkedIn, classesNow, familiesOf, familyFacts, holdsOf, inFamilies, openOf, pendingCount, pendingItems, progressOf, stripSaved, toCheck } from './Families'
+import { FACT_NAME } from './matchModel'
+import type { FactFilter } from './matchModel'
 import type { Family, Holds, Pending, Status } from './Families'
 import { MusoContext } from './EditParts'
 import type { MusoEditing } from './EditParts'
@@ -110,7 +112,14 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
   const [selectedId, setSelectedId] = useState<string | null>(() => { try { return localStorage.getItem(placeKey) } catch { return null } })
   const pickSection = (s: Section) => { setView('review'); setSection(s); setSelectedId(null) }
 
-  const families = useMemo(() => familiesOf(d.cases, d.typed, d.moved), [d])
+  // ---- the queue: ticks, values, titles and sections save themselves a moment after the last change, or at once with Save
+  const [pending, setPending] = useState<Pending>(NO_PENDING)
+  // (the sections as they are now – saved, and waiting in the queue: a match moved is in its new section at once)
+  const families = useMemo(() => familiesOf(d.cases, d.typed, d.moved, classesNow(d, pending)), [d, pending.cls])   // eslint-disable-line react-hooks/exhaustive-deps
+  // the song names with a match on the ISRC, a singer, the production: the "Match on" filter
+  const [fact, setFact] = useState<FactFilter>('all')
+  const factsBy = useMemo(() => new Map(families.map((f) => [f.id, familyFacts(f)])), [families])
+  const factCount = (k: FactFilter) => k === 'all' ? families.length : families.filter((f) => factsBy.get(f.id)?.[k]).length
   const familyOf = useMemo(() => new Map(families.flatMap((f) => f.cases.map((c) => [c.id, f] as const))), [families])
   // every save says what it did, in plain words, for the Undo section
   const ctx = useMemo(() => logContext(d, familyOf), [d, familyOf])
@@ -122,8 +131,6 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
   famRef.current = families
   // (with the matches on screen of the songs answered: they stay until each of them is answered)
   const save = useCallback((items: CleanDecisionIn[]) => rawRef.current(withLog(items, ctxRef.current), holdsOf(items, famRef.current)), [])
-  // ---- the queue: ticks, values and titles save themselves a moment after the last change, or at once with Save
-  const [pending, setPending] = useState<Pending>(NO_PENDING)
   const [flushing, setFlushing] = useState(false)
   const live = useRef({ pending, d, save })
   live.current = { pending, d, save }
@@ -205,9 +212,10 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
     const at = (id: string) => d.updates?.songs[id] ?? ''
     const byTitle = (a: string, b: string) => sort === 'za' ? b.localeCompare(a) : a.localeCompare(b)
     if (section === 'songs') {
-      const score = (f: Family) => sort === 'most' ? f.exact.length + f.possible.length : sort === 'exact' ? f.exact.length
+      const score = (f: Family) => sort === 'most' ? f.exact.length + f.possible.length + f.version.length : sort === 'exact' ? f.exact.length
         : sort === 'possible' ? f.possible.length : sort === 'todo' ? left(f) : 0
-      const fs = families.filter((f) => (!s || norm(f.title).includes(s) || f.cases.some(hit)) && keep(f.id, progressOf(pending, f).status))
+      const fs = families.filter((f) => (!s || norm(f.title).includes(s) || f.cases.some(hit)) && keep(f.id, progressOf(pending, f).status)
+        && (fact === 'all' || f.id === selectedId || !!factsBy.get(f.id)?.[fact]))
         .sort((a, b) => sort === 'updated' ? at(b.id).localeCompare(at(a.id)) || byTitle(a.title, b.title) : score(b) - score(a) || byTitle(a.title, b.title))
       const os = others.filter((c) => (!s || hit(c)) && keep(c.id, ofCase(c))).sort((a, b) => byTitle(a.title, b.title))
       return [...fs.map((f): Item => ({ id: f.id, f })), ...os.map((c): Item => ({ id: c.id, c }))]
@@ -219,7 +227,7 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
     }
     const cs = loose.filter((c) => (!s || hit(c)) && keep(c.id, ofCase(c))).sort((a, b) => byTitle(a.title, b.title))
     return [...cs.map((c): Item => ({ id: c.id, c })), ...(!s && show === 'all' && d.lnv_only.length ? [{ id: 'lnv_only', lnvOnly: true }] : [])]
-  }, [d, q, section, show, sort, selectedId, done, pending, families, loose, others, newRows, deleted, typed])   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [d, q, section, show, sort, selectedId, done, pending, families, loose, others, newRows, deleted, typed, fact, factsBy])   // eslint-disable-line react-hooks/exhaustive-deps
 
   const sel = shown.find((x) => x.id === selectedId) ?? shown[0] ?? null
   const at = sel ? shown.indexOf(sel) : -1
@@ -280,12 +288,14 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
   // the step's numbers: exact and possible matches (one per LNV row, and how many are not ticked yet), songs to answer
   const tot = families.reduce((a, f) => {
     const o = openOf(pending, f)
-    return { ...a, exact: a.exact + f.exact.length, possible: a.possible + f.possible.length, exactLeft: a.exactLeft + o.exact, possibleLeft: a.possibleLeft + o.possible, checked: a.checked + checkedIn(pending, f) }
-  }, { exact: 0, possible: 0, exactLeft: 0, possibleLeft: 0, checked: 0, newLeft: loose.filter((c) => !isDone(c)).length })
+    return { ...a, exact: a.exact + f.exact.length, possible: a.possible + f.possible.length, version: a.version + f.version.length + f.solos.length,
+      exactLeft: a.exactLeft + o.exact, possibleLeft: a.possibleLeft + o.possible, versionLeft: a.versionLeft + o.version, checked: a.checked + checkedIn(pending, f) }
+  }, { exact: 0, possible: 0, version: 0, exactLeft: 0, possibleLeft: 0, versionLeft: 0, checked: 0, newLeft: loose.filter((c) => !isDone(c)).length })
   const sizeOf: Record<Section, number> = { songs: families.length, new: loose.length, newrow: newRows.length + typed.length, deleted: deleted.length }
   const matchCounts = (
     <span className="ls-sub"><i className="exact">Exact match {n(tot.exact)}{tot.exactLeft ? ` (${n(tot.exactLeft)} to check)` : ''}</i>
       <i className="possible">Possible match {n(tot.possible)}{tot.possibleLeft ? ` (${n(tot.possibleLeft)} to check)` : ''}</i>
+      <i className="version">Other version {n(tot.version)}{tot.versionLeft ? ` (${n(tot.versionLeft)} to check)` : ''}</i>
       <i className="checked">Checked {n(tot.checked)}</i></span>
   )
   // the lists as Excel: the rows the counts count, with the answers waiting saved first
@@ -355,7 +365,8 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
             ]} />
           <Dropdown<ListId> className="rv-dl" label="Download a list as Excel" value={'' as ListId} onChange={(id) => void listFile(id)} menuWidth={340}
             shown={preparing ? <><span className="spinner small-dark" />Preparing…</> : <><Download size={15} />Download Excel</>}
-            options={[...EACH.map((id) => ({ value: id as ListId, label: <ListOpt name={LIST_NAMES[id]} count={listCount(lists, id)} />, disabled: !listCount(lists, id) || !!preparing })),
+            options={[...EACH.map((id) => ({ value: id as ListId, label: <ListOpt name={LIST_NAMES[id]} count={listCount(lists, id)} />, disabled: !!preparing,
+              ...(listCount(lists, id) ? {} : { hint: 'Empty for now – the file has its columns only' }) })),
               { value: 'all', label: LIST_NAMES.all, hint: 'One file, each list on a sheet of its own', sep: true, disabled: !!preparing }]} />
           <span className="rv-total-note muted">One match is one LNV row.
             <button type="button" className="rv-text-btn rv-sum-btn" onClick={() => setSumOpen(!sumOpen)} aria-expanded={sumOpen}>{sumOpen ? 'Hide how it adds up' : 'How it adds up'}</button></span>
@@ -425,6 +436,12 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
                   { value: 'part' as const, label: <ListOpt name="– partly checked" count={showCount('part')} />, hint: 'Some matches answered, others still to check' }] : []),
                 { value: 'done', label: <ListOpt name={section === 'songs' ? 'All checked' : 'Done'} count={showCount('done')} />, hint: section === 'songs' ? 'Every match answered' : 'Answered' },
               ]} />}
+              {section === 'songs' && <Dropdown<FactFilter> className="rv-dd rv-fact" label="Match on" value={fact} onChange={(v) => { setFact(v); setSelectedId(null) }}
+                shown={<>{fact === 'all' ? 'Any match' : `${FACT_NAME[fact]} ${n(factCount(fact))}`}</>} options={[
+                  { value: 'all', label: <ListOpt name="Any match" count={factCount('all')} />, hint: 'Every song name' },
+                  ...(['isrc', 'singer', 'production'] as const).map((k) => ({ value: k, label: <ListOpt name={FACT_NAME[k]} count={factCount(k)} />,
+                    hint: k === 'isrc' ? 'An LNV row has the ISRC of one of its recordings' : k === 'singer' ? 'An LNV row names one of its singers' : 'An LNV row has its label / production company' })),
+                ]} />}
               <Dropdown className="rv-dd" label="Order" value={sortShown} onChange={setSort} options={sorts.map(([id, label]) => ({ value: id, label }))} />
               {section === 'new' && confirmable > 0 && (
                 <button type="button" className="btn sm" onClick={() => setAsking(true)} title="Accept the app's answer on every song shown that has one">
@@ -452,6 +469,7 @@ export default function SongReview({ d, save: rawSave, act, stage1, complete }: 
                       <span className="sm-item-text">
                         <b>{f.title}</b>
                         <small><span className="li-n exact">Exact {n(f.exact.length)}</span><span className="li-n possible">Possible {n(f.possible.length)}</span>
+                          {f.version.length + f.solos.length > 0 && <span className="li-n version">Other {n(f.version.length + f.solos.length)}</span>}
                           {pr.left > 0 && <span className="rv-verdict">{n(pr.left)} to check</span>}</small>
                         <span className="li-st"><StatusChip small status={pr.status} done={pr.done} total={pr.total} />
                           {upd && <span className={`li-upd ${updates.last[0]?.key === f.id ? 'last' : ''}`} title={`Last updated ${whenText(upd, true)}`}><Clock size={11} />{updates.last[0]?.key === f.id ? 'Last updated · ' : ''}{whenText(upd)}</span>}</span>
